@@ -1,6 +1,5 @@
 "use client";
 
-import React from "react";
 import { OverviewData } from "../types";
 import { SkeletonOverview } from "../common/Skeleton";
 

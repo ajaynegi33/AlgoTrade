@@ -1,6 +1,5 @@
 "use client";
 
-import React from "react";
 import { OverviewData, ZerodhaSessionData } from "../types";
 
 interface HeaderProps {

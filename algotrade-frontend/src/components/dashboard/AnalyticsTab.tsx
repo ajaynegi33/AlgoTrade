@@ -1,6 +1,5 @@
 "use client";
 
-import React from "react";
 import { AnalyticsData } from "../types";
 import { SkeletonAnalytics } from "../common/Skeleton";
 

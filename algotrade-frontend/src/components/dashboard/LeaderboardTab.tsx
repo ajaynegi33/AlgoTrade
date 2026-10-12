@@ -1,6 +1,5 @@
 "use client";
 
-import React from "react";
 import { ScoredCandidate } from "../types";
 import { SkeletonLeaderboard } from "../common/Skeleton";
 
