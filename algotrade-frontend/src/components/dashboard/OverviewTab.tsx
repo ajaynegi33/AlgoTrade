@@ -2,12 +2,14 @@
 
 import { OverviewData } from "../types";
 import { SkeletonOverview } from "../common/Skeleton";
+import DecisionFeedTerminal from "./DecisionFeedTerminal";
 
 interface OverviewTabProps {
   overview: OverviewData | null;
+  backendUrl?: string;
 }
 
-export default function OverviewTab({ overview }: OverviewTabProps) {
+export default function OverviewTab({ overview, backendUrl = "http://localhost:8080" }: OverviewTabProps) {
   if (!overview) {
     return <SkeletonOverview />;
   }
@@ -135,6 +137,10 @@ export default function OverviewTab({ overview }: OverviewTabProps) {
           </p>
         </div>
       )}
+
+      {/* Live Engine Decision Stream & Audit Terminal */}
+      <DecisionFeedTerminal backendUrl={backendUrl} />
     </div>
   );
 }
+

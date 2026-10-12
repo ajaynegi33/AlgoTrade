@@ -5,8 +5,8 @@ import { OverviewData, ZerodhaSessionData } from "../types";
 interface HeaderProps {
   overview: OverviewData | null;
   session: ZerodhaSessionData | null;
-  activeTab: "overview" | "leaderboard" | "analytics" | "explorer";
-  setActiveTab: (tab: "overview" | "leaderboard" | "analytics" | "explorer") => void;
+  activeTab: "overview" | "leaderboard" | "analytics" | "explorer" | "decisions";
+  setActiveTab: (tab: "overview" | "leaderboard" | "analytics" | "explorer" | "decisions") => void;
   onOpenModeModal: () => void;
   onEmergencyExit: () => void;
   onAutoLogin: () => Promise<void>;

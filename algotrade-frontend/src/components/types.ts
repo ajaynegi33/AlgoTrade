@@ -124,3 +124,15 @@ export interface ZerodhaSessionData {
   availableCash?: number;
   autoLoginConfigured?: boolean;
 }
+
+export interface EngineActivityEvent {
+  id: number;
+  timestamp: string;
+  category: "ORDERS" | "STRATEGY" | "RISK" | "LIFECYCLE" | "SYSTEM" | string;
+  level: "INFO" | "WARN" | "ERROR" | string;
+  title: string;
+  message: string;
+  symbol?: string | null;
+  metadata?: Record<string, any>;
+}
+

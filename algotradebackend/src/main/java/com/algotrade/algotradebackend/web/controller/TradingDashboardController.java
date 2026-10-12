@@ -1,9 +1,12 @@
 package com.algotrade.algotradebackend.web.controller;
 
 import com.algotrade.algotradebackend.broker.BrokerGatewayManager;
+import com.algotrade.algotradebackend.core.model.EngineActivityEvent;
 import com.algotrade.algotradebackend.core.model.ExecutionMode;
 import com.algotrade.algotradebackend.core.model.Position;
 import com.algotrade.algotradebackend.core.model.ScoredCandidate;
+import com.algotrade.algotradebackend.core.service.EngineActivityFeedService;
+import com.algotrade.algotradebackend.core.service.MarketCalendarService;
 import com.algotrade.algotradebackend.persistence.entity.PaperTradeEntity;
 import com.algotrade.algotradebackend.persistence.repository.PaperTradeRepository;
 import com.algotrade.algotradebackend.risk.PositionSizingEngine;
@@ -38,20 +41,23 @@ public class TradingDashboardController {
     private final StrategyManager strategyManager;
     private final PositionSizingEngine positionSizingEngine;
     private final PaperTradeRepository paperTradeRepository;
-    private final com.algotrade.algotradebackend.core.service.MarketCalendarService marketCalendarService;
+    private final MarketCalendarService marketCalendarService;
+    private final EngineActivityFeedService activityFeedService;
 
     public TradingDashboardController(
         BrokerGatewayManager brokerGatewayManager,
         StrategyManager strategyManager,
         PositionSizingEngine positionSizingEngine,
         PaperTradeRepository paperTradeRepository,
-        com.algotrade.algotradebackend.core.service.MarketCalendarService marketCalendarService
+        MarketCalendarService marketCalendarService,
+        EngineActivityFeedService activityFeedService
     ) {
         this.brokerGatewayManager = brokerGatewayManager;
         this.strategyManager = strategyManager;
         this.positionSizingEngine = positionSizingEngine;
         this.paperTradeRepository = paperTradeRepository;
         this.marketCalendarService = marketCalendarService;
+        this.activityFeedService = activityFeedService;
     }
 
     /**
@@ -159,6 +165,18 @@ public class TradingDashboardController {
     }
 
     /**
+     * Real-time Activity Feed / Decision Audit stream.
+     * Serves recent algorithmic decisions from lock-free in-memory ring buffer.
+     */
+    @GetMapping("/activity-feed")
+    public ResponseEntity<List<EngineActivityEvent>> getActivityFeed(
+            @RequestParam(required = false) Long sinceId,
+            @RequestParam(defaultValue = "50") int limit
+    ) {
+        return ResponseEntity.ok(activityFeedService.getRecentEvents(sinceId, limit));
+    }
+
+    /**
      * Toggle Execution Mode (PAPER <-> LIVE).
      */
     @PostMapping("/mode")
@@ -166,6 +184,14 @@ public class TradingDashboardController {
         try {
             ExecutionMode targetMode = ExecutionMode.valueOf(mode.toUpperCase());
             brokerGatewayManager.setExecutionMode(targetMode);
+            activityFeedService.record(
+                "SYSTEM",
+                "INFO",
+                "Execution Venue Switched",
+                "Trading venue switched to " + targetMode.name(),
+                null,
+                Map.of("targetMode", targetMode.name())
+            );
             return ResponseEntity.ok(Map.of("success", true, "mode", targetMode.name()));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("success", false, "error", e.getMessage()));
@@ -177,6 +203,14 @@ public class TradingDashboardController {
      */
     @PostMapping("/emergency-exit")
     public ResponseEntity<Map<String, Object>> emergencyExit() {
+        activityFeedService.record(
+            "RISK",
+            "WARN",
+            "Emergency Kill-Switch Triggered",
+            "Manual emergency square-off initiated by operator from UI.",
+            null,
+            Map.of("action", "SQUARE_OFF_ALL", "source", "USER_OPERATOR")
+        );
         strategyManager.executeSquareOff1515();
         return ResponseEntity.ok(Map.of("success", true, "message", "Emergency square-off executed"));
     }
@@ -201,6 +235,14 @@ public class TradingDashboardController {
     public ResponseEntity<Map<String, Object>> authenticateZerodhaSession(@RequestParam String requestToken) {
         try {
             var userData = brokerGatewayManager.getZerodhaLiveGateway().authenticateSession(requestToken);
+            activityFeedService.record(
+                "SYSTEM",
+                "INFO",
+                "Zerodha OAuth Connected",
+                "Live Kite Connect session authenticated and verified.",
+                null,
+                Map.of("gateway", "ZerodhaLiveGateway")
+            );
             Map<String, Object> resp = new LinkedHashMap<>();
             resp.put("success", true);
             resp.putAll(userData);
@@ -220,6 +262,14 @@ public class TradingDashboardController {
             @RequestParam(required = false) String totpSecret) {
         try {
             var userData = brokerGatewayManager.getZerodhaLiveGateway().triggerAutoLogin(password, totpSecret);
+            activityFeedService.record(
+                "SYSTEM",
+                "INFO",
+                "Automated 2FA Authenticated",
+                "Kite Connect automated TOTP authentication successful.",
+                null,
+                Map.of("gateway", "ZerodhaLiveGateway", "method", "RFC6238_TOTP")
+            );
             Map<String, Object> resp = new LinkedHashMap<>();
             resp.put("success", true);
             resp.put("message", "Automated TOTP authentication successful!");

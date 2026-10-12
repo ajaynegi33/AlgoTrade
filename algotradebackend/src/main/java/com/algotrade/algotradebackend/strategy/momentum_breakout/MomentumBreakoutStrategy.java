@@ -8,6 +8,7 @@ import com.algotrade.algotradebackend.core.model.TradeOrder;
 import com.algotrade.algotradebackend.risk.PositionSizingEngine;
 import com.algotrade.algotradebackend.strategy.TradingStrategy;
 import com.algotrade.algotradebackend.core.service.MarketCalendarService;
+import com.algotrade.algotradebackend.core.service.EngineActivityFeedService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -40,6 +41,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
     private final PositionSizingEngine positionSizingEngine;
     private final BrokerGatewayManager brokerGatewayManager;
     private final MarketCalendarService marketCalendarService;
+    private final EngineActivityFeedService activityFeedService;
 
     private final ConcurrentHashMap<String, CandidateMetrics> metricsMap = new ConcurrentHashMap<>();
     private final CopyOnWriteArrayList<ScoredCandidate> latestTopCandidates = new CopyOnWriteArrayList<>();
@@ -52,12 +54,14 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         MomentumScoringEngine scoringEngine,
         PositionSizingEngine positionSizingEngine,
         BrokerGatewayManager brokerGatewayManager,
-        MarketCalendarService marketCalendarService
+        MarketCalendarService marketCalendarService,
+        EngineActivityFeedService activityFeedService
     ) {
         this.scoringEngine = scoringEngine;
         this.positionSizingEngine = positionSizingEngine;
         this.brokerGatewayManager = brokerGatewayManager;
         this.marketCalendarService = marketCalendarService;
+        this.activityFeedService = activityFeedService;
         initializeDefaultWatchlist();
     }
 
@@ -123,6 +127,14 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                         log.info("RATCHETING TRAIL STOP for {}: HWM=₹{}, New Trigger=₹{}, Limit=₹{}",
                             symbol, highWaterMark, targetTrailStop, limitPrice);
                         gateway.modifyOrder(activeSlOrderId, limitPrice, targetTrailStop);
+                        activityFeedService.record(
+                            "ORDER",
+                            "SUCCESS",
+                            "Trailing Stop Ratcheted",
+                            "HWM updated to ₹" + highWaterMark + ". Trailing stop raised to ₹" + targetTrailStop + " (Limit: ₹" + limitPrice + ")",
+                            symbol,
+                            Map.of("highWaterMark", highWaterMark, "triggerPrice", targetTrailStop, "limitPrice", limitPrice)
+                        );
                     }
                 }
             } else {
@@ -136,16 +148,34 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
     @Override
     public synchronized void evaluate0930() {
         log.info("=== RUNNING 09:30:00 SCORING EVALUATION ===");
+        activityFeedService.record(
+            "STRATEGY",
+            "INFO",
+            "09:30 Evaluation Started",
+            "Evaluating 15-min momentum breakout metrics across liquid Nifty watchlist."
+        );
         BrokerGateway gateway = brokerGatewayManager.getActiveGateway();
 
         // Safety Gate: Ensure no position is already open and daily limit is not reached
         if (gateway.getOpenPosition().isPresent()) {
             log.warn("Evaluation skipped: A position is already actively held.");
+            activityFeedService.record(
+                "STRATEGY",
+                "WARN",
+                "Evaluation Skipped",
+                "A trade position is already actively held. Engine strictly enforces 1 active position."
+            );
             return;
         }
 
         if (!positionSizingEngine.canTradeToday()) {
             log.warn("Evaluation skipped: 1-trade-per-day limit already reached.");
+            activityFeedService.record(
+                "RISK",
+                "WARN",
+                "Daily Trade Limit Enforced",
+                "Strict 1-trade-per-day limit reached for today. Standing down until tomorrow's session."
+            );
             return;
         }
 
@@ -165,12 +195,38 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
 
         // Step 3: Check qualification threshold (Score >= 75)
         if (ranked.isEmpty() || !ranked.get(0).isQualified()) {
+            String bestSym = ranked.isEmpty() ? "NONE" : ranked.get(0).symbol();
+            int bestScore = ranked.isEmpty() ? 0 : ranked.get(0).totalScore();
             log.warn("NO TRADE TODAY: Top candidate did not meet the 75-point qualification threshold.");
+            activityFeedService.record(
+                "STRATEGY",
+                "WARN",
+                "No Qualified Candidates (Score < 75)",
+                "Top candidate was " + bestSym + " with score " + bestScore + "/100. Minimum threshold is 75. No trade executed.",
+                bestSym,
+                Map.of("topScore", bestScore, "threshold", 75, "totalEvaluated", ranked.size())
+            );
             return;
         }
 
         ScoredCandidate winner = ranked.get(0);
         CandidateMetrics winnerMetrics = metricsMap.get(winner.symbol());
+
+        activityFeedService.record(
+            "STRATEGY",
+            "SUCCESS",
+            "Breakout Candidate Qualified",
+            winner.symbol() + " passed qualification with score " + winner.totalScore() + "/100 >= 75.",
+            winner.symbol(),
+            Map.of(
+                "totalScore", winner.totalScore(),
+                "rvolScore", winner.rvolScore(),
+                "vwapScore", winner.vwapScore(),
+                "depthScore", winner.depthImbalanceScore(),
+                "pdhScore", winner.pdhScore(),
+                "ltp", winner.ltp()
+            )
+        );
 
         // Step 4: Calculate Structural Stop and Position Size
         double entryPrice = winner.ltp();
@@ -180,8 +236,24 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         int quantity = positionSizingEngine.calculateQuantity(winner.symbol(), entryPrice, initialStop, gateway);
         if (quantity < 1) {
             log.warn("Trade aborted for {}: Calculated quantity is 0 shares.", winner.symbol());
+            activityFeedService.record(
+                "RISK",
+                "WARN",
+                "Trade Aborted: 0 Shares",
+                "Risk constraints or stop distance resulted in 0 shares calculated for " + winner.symbol(),
+                winner.symbol()
+            );
             return;
         }
+
+        activityFeedService.record(
+            "RISK",
+            "INFO",
+            "Position Sizing Computed",
+            "Calculated size: " + quantity + " shares. Entry ~₹" + entryPrice + ", Initial Stop: ₹" + initialStop,
+            winner.symbol(),
+            Map.of("quantity", quantity, "entryPrice", entryPrice, "initialStop", initialStop)
+        );
 
         // Step 5: Place Marketable Limit Buy Order
         double marketableBuyLimit = Math.round((entryPrice * 1.0005) * 20.0) / 20.0; // LTP + 0.05%
@@ -189,6 +261,14 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
 
         TradeOrder buyOrder = gateway.placeOrder(winner.symbol(), "BUY", quantity, marketableBuyLimit, 0.0, "LIMIT");
         activeSymbol = winner.symbol();
+        activityFeedService.record(
+            "ORDER",
+            "SUCCESS",
+            "Entry Order Dispatched",
+            "BUY " + quantity + " x " + winner.symbol() + " @ Marketable Limit ₹" + marketableBuyLimit,
+            winner.symbol(),
+            Map.of("orderId", buyOrder.orderId(), "quantity", quantity, "limitPrice", marketableBuyLimit)
+        );
 
         // Step 6: Place Immediate Protective Stop-Loss Order
         double slLimitPrice = Math.round((initialStop * 0.998) * 20.0) / 20.0;
@@ -196,6 +276,14 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         activeSlOrderId = slOrder.orderId();
 
         log.info("PROTECTIVE SL ENGAGED: OrderId={}, Trigger=₹{}, Limit=₹{}", activeSlOrderId, initialStop, slLimitPrice);
+        activityFeedService.record(
+            "ORDER",
+            "SUCCESS",
+            "Protective Stop-Loss Armed",
+            "Stop-Loss order engaged: Trigger=₹" + initialStop + ", Limit=₹" + slLimitPrice,
+            winner.symbol(),
+            Map.of("slOrderId", activeSlOrderId, "triggerPrice", initialStop, "limitPrice", slLimitPrice)
+        );
     }
 
     @Override
@@ -207,6 +295,14 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         if (optPos.isPresent()) {
             Position pos = optPos.get();
             log.warn("SQUARING OFF ACTIVE POSITION: {} x {}", pos.quantity(), pos.symbol());
+            activityFeedService.record(
+                "LIFECYCLE",
+                "WARN",
+                "15:15 Mandatory Square-Off",
+                "Closing active position " + pos.symbol() + " (" + pos.quantity() + " shares) at EOD market limit.",
+                pos.symbol(),
+                Map.of("quantity", pos.quantity(), "entryPrice", pos.entryPrice(), "currentPrice", pos.currentPrice())
+            );
 
             // Cancel resting stop order first
             if (activeSlOrderId != null) {
@@ -221,6 +317,12 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             activeSlOrderId = null;
         } else {
             log.info("Square-off complete: No open position found.");
+            activityFeedService.record(
+                "LIFECYCLE",
+                "INFO",
+                "15:15 Square-Off Check",
+                "Square-off triggered: No open positions to exit."
+            );
         }
     }
 

@@ -12,9 +12,10 @@ import OverviewTab from "@/components/dashboard/OverviewTab";
 import LeaderboardTab from "@/components/dashboard/LeaderboardTab";
 import AnalyticsTab from "@/components/dashboard/AnalyticsTab";
 import StockExplorerTab from "@/components/explorer/StockExplorerTab";
+import DecisionFeedTerminal from "@/components/dashboard/DecisionFeedTerminal";
 
 export default function Dashboard() {
-  const [activeTab, setActiveTab] = useState<"overview" | "leaderboard" | "analytics" | "explorer">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "leaderboard" | "analytics" | "explorer" | "decisions">("overview");
   const [overview, setOverview] = useState<OverviewData | null>(null);
   const [leaderboard, setLeaderboard] = useState<ScoredCandidate[]>([]);
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
@@ -355,10 +356,21 @@ export default function Dashboard() {
               {zerodhaSession?.active ? "LIVE KITE" : "CONNECT"}
             </span>
           </button>
+          <button
+            onClick={() => setActiveTab("decisions")}
+            className={`px-4 py-2 rounded-lg font-medium whitespace-nowrap transition-all flex items-center gap-2 cursor-pointer ${
+              activeTab === "decisions"
+                ? "bg-emerald-500 text-slate-950 font-bold shadow-md shadow-emerald-950"
+                : "text-slate-400 hover:text-white hover:bg-slate-900"
+            }`}
+          >
+            ⚡ Live Engine Decisions
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          </button>
         </div>
 
         {/* Tab 1: Overview */}
-        {activeTab === "overview" && <OverviewTab overview={overview} />}
+        {activeTab === "overview" && <OverviewTab overview={overview} backendUrl={BACKEND_URL} />}
 
         {/* Tab 2: Leaderboard */}
         {activeTab === "leaderboard" && (
@@ -386,6 +398,13 @@ export default function Dashboard() {
             autoLoggingIn={autoLoggingIn}
             popularStocks={popularStocks}
           />
+        )}
+
+        {/* Tab 5: Live Engine Decisions Terminal Fullscreen */}
+        {activeTab === "decisions" && (
+          <div className="flex flex-col gap-6 animate-fadeIn">
+            <DecisionFeedTerminal backendUrl={BACKEND_URL} />
+          </div>
         )}
       </main>
 
