@@ -310,13 +310,23 @@ export default function StockExplorerTab({
                   <span className="text-3xl sm:text-4xl font-mono font-black text-white">
                     ₹{quote.lastPrice ? quote.lastPrice.toFixed(2) : "0.00"}
                   </span>
-                  {typeof quote.change === "number" && (
-                    <span className={`text-sm sm:text-base font-mono font-bold ${
-                      quote.change >= 0 ? "text-emerald-400" : "text-rose-400"
-                    }`}>
-                      {quote.change >= 0 ? "+" : ""}₹{quote.change.toFixed(2)} ({quote.changePct ? (quote.changePct >= 0 ? "+" : "") + quote.changePct.toFixed(2) + "%" : "0.00%"})
-                    </span>
-                  )}
+                  {(() => {
+                    const prevClose = quote.ohlc?.close;
+                    const change = (typeof quote.change === "number" && quote.change !== 0)
+                      ? quote.change
+                      : (prevClose && prevClose > 0 ? quote.lastPrice - prevClose : quote.change || 0);
+                    const changePct = (typeof quote.changePct === "number" && quote.changePct !== 0)
+                      ? quote.changePct
+                      : (prevClose && prevClose > 0 ? (change / prevClose) * 100 : quote.changePct || 0);
+
+                    return (
+                      <span className={`text-sm sm:text-base font-mono font-bold ${
+                        change >= 0 ? "text-emerald-400" : "text-rose-400"
+                      }`}>
+                        {change >= 0 ? "+" : ""}₹{change.toFixed(2)} ({changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%)
+                      </span>
+                    );
+                  })()}
                 </div>
               </div>
             </div>

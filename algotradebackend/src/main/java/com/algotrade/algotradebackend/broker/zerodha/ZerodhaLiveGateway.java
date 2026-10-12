@@ -445,10 +445,13 @@ public class ZerodhaLiveGateway implements BrokerGateway {
                 return result;
             }
 
-            result.put("lastPrice", q.lastPrice);
-            result.put("change", q.change);
-            double prevClose = (q.ohlc != null && q.ohlc.close > 0) ? q.ohlc.close : (q.lastPrice - q.change);
-            double changePct = prevClose > 0 ? (q.change / prevClose) * 100.0 : 0.0;
+            double lastPrice = q.lastPrice;
+            double prevClose = (q.ohlc != null && q.ohlc.close > 0) ? q.ohlc.close : 0.0;
+            // Zerodha Kite API consistently returns net_change as 0.0; calculate from prevClose if available
+            double change = (prevClose > 0) ? (lastPrice - prevClose) : q.change;
+            double changePct = prevClose > 0 ? (change / prevClose) * 100.0 : 0.0;
+            result.put("lastPrice", lastPrice);
+            result.put("change", Math.round(change * 100.0) / 100.0);
             result.put("changePct", Math.round(changePct * 100.0) / 100.0);
             result.put("volume", (long) q.volumeTradedToday);
             result.put("averagePrice", q.averagePrice);
@@ -545,15 +548,16 @@ public class ZerodhaLiveGateway implements BrokerGateway {
                     if (data != null && data.has(instrumentKey)) {
                         JSONObject q = data.getJSONObject(instrumentKey);
                         double lastPrice = q.optDouble("last_price", 0.0);
-                        double change = q.optDouble("net_change", 0.0);
-                        result.put("lastPrice", lastPrice);
-                        result.put("change", change);
-
                         JSONObject ohlcJson = q.optJSONObject("ohlc");
                         double prevClose = (ohlcJson != null && ohlcJson.optDouble("close", 0.0) > 0)
                                 ? ohlcJson.optDouble("close", 0.0)
-                                : (lastPrice - change);
+                                : 0.0;
+                        // Zerodha Kite API consistently returns net_change as 0.0; calculate from prevClose if available
+                        double change = (prevClose > 0) ? (lastPrice - prevClose) : q.optDouble("net_change", 0.0);
                         double changePct = prevClose > 0 ? (change / prevClose) * 100.0 : 0.0;
+
+                        result.put("lastPrice", lastPrice);
+                        result.put("change", Math.round(change * 100.0) / 100.0);
                         result.put("changePct", Math.round(changePct * 100.0) / 100.0);
 
                         result.put("volume", q.optLong("volume", 0L));
