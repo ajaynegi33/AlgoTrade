@@ -78,9 +78,9 @@ public class BacktestEngineService {
 
             List<ScoredCandidate> ranked = scoringEngine.rankCandidates(scoredList);
 
-            // Filter qualified candidates meeting minimum score threshold
+            // Filter qualified candidates meeting hard gates and minimum score threshold
             Optional<ScoredCandidate> topPick = ranked.stream()
-                .filter(c -> c.totalScore() >= req.minScoreThreshold())
+                .filter(c -> c.isQualified() && c.totalScore() >= req.minScoreThreshold())
                 .findFirst();
 
             if (topPick.isEmpty()) {
@@ -116,7 +116,7 @@ public class BacktestEngineService {
             int maxLeveragedQty = (int) Math.floor((currentCapital * 5.0) / entryPrice);
             quantity = Math.max(1, Math.min(quantity, Math.max(1, maxLeveragedQty)));
 
-            // Intraday 1-minute trajectory replay (09:30 to 15:15)
+            // Intraday 1-minute trajectory replay (09:30 to 15:05)
             List<HistoricalMarketDataService.IntradayBar> bars = dataService.getIntradayTrajectory(
                 date, winner.symbol(), entryPrice, initialSl
             );
@@ -124,8 +124,8 @@ public class BacktestEngineService {
             double activeSl = initialSl;
             double highWaterMark = entryPrice;
             double exitPrice = entryPrice;
-            String exitTime = "15:15";
-            String exitReason = "MARKET_CLOSE_1515";
+            String exitTime = "15:05";
+            String exitReason = "MARKET_CLOSE_1505";
 
             for (HistoricalMarketDataService.IntradayBar bar : bars) {
                 highWaterMark = Math.max(highWaterMark, bar.high());
@@ -145,8 +145,8 @@ public class BacktestEngineService {
                 }
             }
 
-            // Mandatory 15:15 PM exit if SL not triggered
-            if ("MARKET_CLOSE_1515".equals(exitReason) && !bars.isEmpty()) {
+            // Mandatory 15:05 PM exit if SL not triggered
+            if (exitReason.startsWith("MARKET_CLOSE") && !bars.isEmpty()) {
                 exitPrice = round2(bars.get(bars.size() - 1).close());
             }
 

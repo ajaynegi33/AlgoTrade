@@ -22,35 +22,46 @@ import java.util.List;
 public class MomentumScoringEngine {
 
     /**
-     * Evaluates a single candidate and outputs an immutable ScoredCandidate record.
+     * Evaluates a single candidate from CandidateMetrics by extracting an atomic snapshot.
      */
     public ScoredCandidate evaluate(CandidateMetrics m) {
+        return evaluate(m.getSnapshot());
+    }
+
+    /**
+     * Evaluates a single candidate snapshot and outputs an immutable ScoredCandidate record.
+     * Enforces mandatory hard eligibility gates (PDH breakout, above VWAP, positive volume)
+     * independently of points awarded.
+     */
+    public ScoredCandidate evaluate(CandidateSnapshot s) {
         // Metric 1: RVOL Score (Max 30)
-        // Expected opening 15-min volume is ~10% of total daily volume
-        double expectedOpeningVol = m.getAvgDailyVolume10Day() * 0.10;
-        double rvol = expectedOpeningVol > 0 ? (double) m.getWindowVolume() / expectedOpeningVol : 0.0;
+        double expectedOpeningVol = s.avgDailyVolume10Day() * 0.10;
+        double rvol = expectedOpeningVol > 0 ? (double) s.windowVolume() / expectedOpeningVol : 0.0;
         int rvolScore = calculateRvolScore(rvol);
 
         // Metric 2: VWAP Distance Score (Max 25)
-        double vwap = m.getVwap();
-        double ltp = m.getLtp();
+        double vwap = s.vwap();
+        double ltp = s.ltp();
         int vwapScore = calculateVwapScore(ltp, vwap);
 
         // Metric 3: Depth Imbalance Score (Max 25)
-        double di = m.getDepthImbalance();
+        double di = s.depthImbalance();
         int depthScore = calculateDepthScore(di);
 
         // Metric 4: PDH Breakout & ATR Score (Max 20)
-        int pdhScore = calculatePdhScore(ltp, m.getPreviousDayHigh(), m.getAtrPct());
+        int pdhScore = calculatePdhScore(ltp, s.previousDayHigh(), s.atrPct());
 
         int totalScore = rvolScore + vwapScore + depthScore + pdhScore;
-        String status = totalScore >= 75 ? "QUALIFIED" : "DISQUALIFIED";
+
+        // Hard Eligibility Gate: Price must be strictly above VWAP and strictly breaking previous day high
+        boolean passesGates = passesHardGates(s);
+        String status = (passesGates && totalScore >= 75) ? "QUALIFIED" : "DISQUALIFIED";
 
         return new ScoredCandidate(
             0, // Rank to be populated after sorting
-            m.getSymbol(),
+            s.symbol(),
             ltp,
-            Math.round(m.getGapPct() * 100.0) / 100.0,
+            Math.round(s.gapPct() * 100.0) / 100.0,
             rvolScore,
             vwapScore,
             depthScore,
@@ -58,6 +69,20 @@ public class MomentumScoringEngine {
             totalScore,
             status
         );
+    }
+
+    /**
+     * Strict hard eligibility gates.
+     * Candidates must satisfy all mandatory conditions to be eligible for trading.
+     */
+    public boolean passesHardGates(CandidateSnapshot s) {
+        return s.ltp() > 0
+            && s.vwap() > 0
+            && s.previousDayHigh() > 0
+            && s.ltp() > s.vwap()                // Must be trading above VWAP
+            && s.ltp() > s.previousDayHigh()     // Breakout above PDH
+            && s.windowVolume() > 0
+            && s.avgDailyVolume10Day() > 0;
     }
 
     /**

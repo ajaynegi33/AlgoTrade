@@ -158,7 +158,7 @@ export interface BacktestTrade {
   quantity: number;
   entryTime: string;
   exitTime: string;
-  exitReason: "INITIAL_SL" | "TRAILING_SL" | "MARKET_CLOSE_1515" | string;
+  exitReason: "INITIAL_SL" | "TRAILING_SL" | "MARKET_CLOSE_1505" | "MARKET_CLOSE_1515" | string;
   grossPnL: number;
   totalCharges: number;
   netPnL: number;

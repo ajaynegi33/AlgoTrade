@@ -52,4 +52,24 @@ public class MomentumScoringEngineTest {
         assertEquals(2, ranked.get(1).rank());
         assertEquals("WEAKSTOCK", ranked.get(1).symbol());
     }
+
+    @Test
+    void testHardGateDisqualifiesHighScoringCandidateWithoutPDHBreakout() {
+        // Candidate: RVOL=30, VWAP=25, Depth=25 -> Total Score = 80!
+        // BUT Price (705) has NOT broken Previous Day High (710)!
+        CandidateMetrics candidate = new CandidateMetrics("NOBREAKOUT", 700.0, 710.0, 10_000_000, 2.5);
+        candidate.updateTick(701.0, 100_000, 2_000_000, 500_000);
+        candidate.updateTick(704.0, 3_000_000, 2_000_000, 500_000);
+        candidate.updateTick(707.0, 3_100_000, 2_000_000, 500_000); // LTP 707 < PDH 710, VD ~0.42% (25 pts)
+
+        ScoredCandidate score = engine.evaluate(candidate);
+        assertEquals(80, score.totalScore());
+        assertEquals("DISQUALIFIED", score.status());
+        assertFalse(score.isQualified(), "Candidate with score 80 must be disqualified if no PDH breakout occurs");
+
+        // Verify ranking does not mark it as SELECTED FOR TRADE
+        List<ScoredCandidate> ranked = engine.rankCandidates(List.of(score));
+        assertEquals("DISQUALIFIED", ranked.get(0).status());
+        assertFalse(ranked.get(0).isQualified());
+    }
 }

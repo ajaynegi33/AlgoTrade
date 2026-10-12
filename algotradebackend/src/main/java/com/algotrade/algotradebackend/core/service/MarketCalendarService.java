@@ -15,7 +15,7 @@ import java.time.ZonedDateTime;
  *   <li>Pre-open matching: 09:00 AM - 09:15 AM IST</li>
  *   <li>Regular market open: 09:15:00 AM IST</li>
  *   <li>15-Minute Observation Window: 09:15:00 AM - 09:30:00 AM IST</li>
- *   <li>Square-Off cutoff: 03:15:00 PM IST</li>
+ *   <li>Square-Off cutoff: 03:05:00 PM IST (avoids broker CAS auto square-off at 03:12 PM)</li>
  *   <li>Normal market close: 03:30:00 PM IST</li>
  *   <li>Trading Days: Monday through Friday (excluding weekends and public holidays)</li>
  * </ul>
@@ -27,7 +27,7 @@ public class MarketCalendarService {
     public static final ZoneId IST_ZONE = ZoneId.of("Asia/Kolkata");
     public static final LocalTime MARKET_OPEN_TIME = LocalTime.of(9, 15);
     public static final LocalTime OBSERVATION_END_TIME = LocalTime.of(9, 30);
-    public static final LocalTime SQUARE_OFF_TIME = LocalTime.of(15, 15);
+    public static final LocalTime SQUARE_OFF_TIME = LocalTime.of(15, 5);
     public static final LocalTime MARKET_CLOSE_TIME = LocalTime.of(15, 30);
 
     /**

@@ -95,7 +95,7 @@ public class HistoricalMarketDataService {
     }
 
     /**
-     * Generates a realistic minute-by-minute trajectory (09:30 to 15:15) for an entered trade.
+     * Generates a realistic minute-by-minute trajectory (09:30 to 15:05) for an entered trade.
      */
     public List<IntradayBar> getIntradayTrajectory(LocalDate date, String symbol, double entryPrice, double initialSl) {
         List<IntradayBar> trajectory = new ArrayList<>();
@@ -106,7 +106,7 @@ public class HistoricalMarketDataService {
         // Intraday trend bias: ~60% of breakout trades trend upwards initially
         double trendBias = (rng.nextDouble() < 0.60) ? 0.00015 : -0.00012;
 
-        int totalMinutes = 345; // 09:30 to 15:15 is 345 minutes
+        int totalMinutes = 335; // 09:30 to 15:05 is 335 minutes
         for (int m = 1; m <= totalMinutes; m++) {
             int hour = 9 + (30 + m) / 60;
             int minute = (30 + m) % 60;

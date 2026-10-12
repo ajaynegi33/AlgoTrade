@@ -1,0 +1,205 @@
+package com.algotrade.algotradebackend.strategy.momentum_breakout;
+
+import com.algotrade.algotradebackend.broker.BrokerGateway;
+import com.algotrade.algotradebackend.broker.BrokerGatewayManager;
+import com.algotrade.algotradebackend.core.model.ExecutionMode;
+import com.algotrade.algotradebackend.core.model.Position;
+import com.algotrade.algotradebackend.core.model.TradeOrder;
+import com.algotrade.algotradebackend.core.service.EngineActivityFeedService;
+import com.algotrade.algotradebackend.core.service.MarketCalendarService;
+import com.algotrade.algotradebackend.risk.PositionSizingEngine;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.time.Instant;
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+public class MomentumBreakoutStrategyLifecycleTest {
+
+    private MomentumScoringEngine scoringEngine;
+    private PositionSizingEngine positionSizingEngine;
+    private BrokerGatewayManager brokerGatewayManager;
+    private BrokerGateway mockGateway;
+    private MarketCalendarService marketCalendarService;
+    private EngineActivityFeedService activityFeedService;
+    private MomentumBreakoutStrategy strategy;
+
+    @BeforeEach
+    void setUp() {
+        scoringEngine = new MomentumScoringEngine();
+        positionSizingEngine = mock(PositionSizingEngine.class);
+        brokerGatewayManager = mock(BrokerGatewayManager.class);
+        mockGateway = mock(BrokerGateway.class);
+        marketCalendarService = mock(MarketCalendarService.class);
+        activityFeedService = new EngineActivityFeedService();
+
+        when(brokerGatewayManager.getActiveGateway()).thenReturn(mockGateway);
+        when(marketCalendarService.isMarketOpen()).thenReturn(true);
+        when(marketCalendarService.isObservationWindow()).thenReturn(true);
+        when(mockGateway.getExecutionMode()).thenReturn(ExecutionMode.PAPER);
+
+        strategy = new MomentumBreakoutStrategy(
+            scoringEngine,
+            positionSizingEngine,
+            brokerGatewayManager,
+            marketCalendarService,
+            activityFeedService
+        );
+    }
+
+    @Test
+    void testPendingEntryDoesNotAbandonTradeOnTicks() {
+        // Setup a qualifying candidate
+        strategy.updateReferenceData("RELIANCE", 1000.0, 1010.0, 10_000_000, 2.5);
+        strategy.onTick("RELIANCE", 1005.0, 100_000, 2_000_000, 500_000);
+        strategy.onTick("RELIANCE", 1015.0, 3_000_000, 2_000_000, 500_000); // Breaks PDH (1010)
+        strategy.onTick("RELIANCE", 1020.0, 3_100_000, 2_000_000, 500_000);
+
+        when(positionSizingEngine.canTradeToday()).thenReturn(true);
+        when(positionSizingEngine.calculateQuantity(eq("RELIANCE"), anyDouble(), anyDouble(), any())).thenReturn(10);
+        when(mockGateway.placeOrder(eq("RELIANCE"), eq("BUY"), eq(10), anyDouble(), eq(0.0), eq("LIMIT")))
+            .thenReturn(new TradeOrder("ORD-BUY-1", "RELIANCE", "BUY", 10, 1020.0, 0.0, "LIMIT", "SUBMITTED", ExecutionMode.PAPER, Instant.now()));
+
+        // In live trading, buy order is submitted, but not yet filled when evaluate0930 finishes
+        when(mockGateway.getOpenPosition()).thenReturn(Optional.empty());
+
+        strategy.evaluate0930();
+
+        assertEquals(TradeLifecycleState.PENDING_ENTRY, strategy.getLifecycleState());
+        assertEquals("RELIANCE", strategy.getActiveSymbol());
+
+        // A tick arrives while buy order is still pending at the exchange
+        // This previously triggered the else branch and cleared activeSymbol!
+        strategy.onTick("RELIANCE", 1021.0, 3_150_000, 2_000_000, 500_000);
+
+        // Verify activeSymbol is NOT abandoned
+        assertEquals(TradeLifecycleState.PENDING_ENTRY, strategy.getLifecycleState(), "Strategy must stay in PENDING_ENTRY");
+        assertEquals("RELIANCE", strategy.getActiveSymbol(), "activeSymbol must NOT be cleared while order is pending");
+
+        // Now simulate order fill confirmed by broker
+        Position filledPosition = new Position("RELIANCE", 10, 1020.0, 1021.0, 1004.95, 1004.95, 1021.0, Instant.now(), ExecutionMode.PAPER);
+        when(mockGateway.getOpenPosition()).thenReturn(Optional.of(filledPosition));
+        when(mockGateway.placeOrder(eq("RELIANCE"), eq("SELL"), eq(10), anyDouble(), anyDouble(), eq("SL")))
+            .thenReturn(new TradeOrder("ORD-SL-1", "RELIANCE", "SELL", 10, 1002.9, 1004.95, "SL", "TRIGGER PENDING", ExecutionMode.PAPER, Instant.now()));
+
+        // Next tick triggers fill confirmation and places protective SL
+        strategy.onTick("RELIANCE", 1022.0, 3_200_000, 2_000_000, 500_000);
+
+        assertEquals(TradeLifecycleState.ACTIVE_POSITION, strategy.getLifecycleState());
+        verify(mockGateway, times(1)).placeOrder(eq("RELIANCE"), eq("SELL"), eq(10), anyDouble(), anyDouble(), eq("SL"));
+        assertTrue(strategy.getStrategyHighWaterMark() >= 1022.0, "Persistent High-Water Mark must track highest price");
+    }
+
+    @Test
+    void testTrailingStopRatchetsWithPersistentHwmAfter11AM() {
+        // Setup active position directly
+        strategy.updateReferenceData("RELIANCE", 1000.0, 1010.0, 10_000_000, 2.5);
+        strategy.onTick("RELIANCE", 1005.0, 100_000, 2_000_000, 500_000);
+        strategy.onTick("RELIANCE", 1015.0, 3_000_000, 2_000_000, 500_000);
+        strategy.onTick("RELIANCE", 1020.0, 3_100_000, 2_000_000, 500_000);
+
+        when(positionSizingEngine.canTradeToday()).thenReturn(true);
+        when(positionSizingEngine.calculateQuantity(eq("RELIANCE"), anyDouble(), anyDouble(), any())).thenReturn(10);
+        when(mockGateway.placeOrder(eq("RELIANCE"), eq("BUY"), anyInt(), anyDouble(), anyDouble(), eq("LIMIT")))
+            .thenReturn(new TradeOrder("ORD-BUY-1", "RELIANCE", "BUY", 10, 1020.0, 0.0, "LIMIT", "FILLED", ExecutionMode.PAPER, Instant.now()));
+        when(mockGateway.placeOrder(eq("RELIANCE"), eq("SELL"), anyInt(), anyDouble(), anyDouble(), eq("SL")))
+            .thenReturn(new TradeOrder("ORD-SL-1", "RELIANCE", "SELL", 10, 1002.9, 1004.95, "SL", "TRIGGER PENDING", ExecutionMode.PAPER, Instant.now()));
+
+        // Pre-entry: empty. Post-entry: initPos
+        Position initPos = new Position("RELIANCE", 10, 1020.0, 1020.0, 1004.95, 1004.95, 1020.0, Instant.now(), ExecutionMode.PAPER);
+        when(mockGateway.getOpenPosition())
+            .thenReturn(Optional.empty())       // At evaluate0930 start
+            .thenReturn(Optional.of(initPos));  // Immediate fill check
+
+        strategy.evaluate0930();
+        assertEquals(TradeLifecycleState.ACTIVE_POSITION, strategy.getLifecycleState());
+
+        // Price rises to 1050.0 at 11:30 AM
+        Position peakPos = new Position("RELIANCE", 10, 1020.0, 1050.0, 1004.95, 1004.95, 1050.0, Instant.now(), ExecutionMode.PAPER);
+        when(mockGateway.getOpenPosition()).thenReturn(Optional.of(peakPos));
+
+        java.time.LocalTime time1130 = java.time.LocalTime.of(11, 30);
+        strategy.onTick("RELIANCE", 1050.0, 4_000_000, 2_000_000, 500_000, false, time1130);
+
+        // Trail stop is 2% below 1050 = 1050 * 0.98 = 1029.0
+        verify(mockGateway, atLeastOnce()).modifyOrder(eq("ORD-SL-1"), anyDouble(), eq(1029.0));
+        assertEquals(1050.0, strategy.getStrategyHighWaterMark(), "Strategy HWM must be 1050.0");
+
+        // Price pulls back to 1035.0 at 11:45 AM.
+        // Even if broker's getOpenPosition lastPrice is 1035, HWM must stay 1050.0!
+        Position pullbackPos = new Position("RELIANCE", 10, 1020.0, 1035.0, 1004.95, 1029.0, 1035.0, Instant.now(), ExecutionMode.PAPER);
+        when(mockGateway.getOpenPosition()).thenReturn(Optional.of(pullbackPos));
+
+        strategy.onTick("RELIANCE", 1035.0, 4_200_000, 2_000_000, 500_000, false, java.time.LocalTime.of(11, 45));
+        assertEquals(1050.0, strategy.getStrategyHighWaterMark(), "HWM must NOT decrease on pullback!");
+    }
+
+    @Test
+    void testSquareOffCancelsSlAndFlattensPosition() {
+        strategy.updateReferenceData("RELIANCE", 1000.0, 1010.0, 10_000_000, 2.5);
+        strategy.onTick("RELIANCE", 1005.0, 100_000, 2_000_000, 500_000);
+        strategy.onTick("RELIANCE", 1015.0, 3_000_000, 2_000_000, 500_000);
+        strategy.onTick("RELIANCE", 1020.0, 3_100_000, 2_000_000, 500_000);
+
+        when(positionSizingEngine.canTradeToday()).thenReturn(true);
+        when(positionSizingEngine.calculateQuantity(eq("RELIANCE"), anyDouble(), anyDouble(), any())).thenReturn(10);
+        when(mockGateway.placeOrder(eq("RELIANCE"), eq("BUY"), anyInt(), anyDouble(), anyDouble(), eq("LIMIT")))
+            .thenReturn(new TradeOrder("ORD-BUY-1", "RELIANCE", "BUY", 10, 1020.0, 0.0, "LIMIT", "FILLED", ExecutionMode.PAPER, Instant.now()));
+        when(mockGateway.placeOrder(eq("RELIANCE"), eq("SELL"), anyInt(), anyDouble(), anyDouble(), eq("SL")))
+            .thenReturn(new TradeOrder("ORD-SL-1", "RELIANCE", "SELL", 10, 1002.9, 1004.95, "SL", "TRIGGER PENDING", ExecutionMode.PAPER, Instant.now()));
+
+        Position pos = new Position("RELIANCE", 10, 1020.0, 1025.0, 1004.95, 1004.95, 1025.0, Instant.now(), ExecutionMode.PAPER);
+        when(mockGateway.getOpenPosition())
+            .thenReturn(Optional.empty())       // At evaluate0930 start
+            .thenReturn(Optional.of(pos));      // After fill
+
+        strategy.evaluate0930();
+        assertEquals(TradeLifecycleState.ACTIVE_POSITION, strategy.getLifecycleState());
+
+        // Now trigger 15:05 square-off
+        when(mockGateway.placeOrder(eq("RELIANCE"), eq("SELL"), eq(10), anyDouble(), eq(0.0), eq("LIMIT")))
+            .thenReturn(new TradeOrder("ORD-EXIT-1", "RELIANCE", "SELL", 10, 1023.95, 0.0, "LIMIT", "FILLED", ExecutionMode.PAPER, Instant.now()));
+        // Broker confirms position flat after exit
+        when(mockGateway.getOpenPosition())
+            .thenReturn(Optional.of(pos))  // First read in square-off
+            .thenReturn(Optional.empty()); // Check after exit
+
+        strategy.executeSquareOff();
+
+        verify(mockGateway, times(1)).cancelOrder("ORD-SL-1");
+        verify(mockGateway, times(1)).placeOrder(eq("RELIANCE"), eq("SELL"), eq(10), anyDouble(), eq(0.0), eq("LIMIT"));
+        assertEquals(TradeLifecycleState.FLAT, strategy.getLifecycleState());
+        assertNull(strategy.getActiveSymbol());
+    }
+
+    @Test
+    void testSquareOffCancelsPendingEntryOrder() {
+        strategy.updateReferenceData("RELIANCE", 1000.0, 1010.0, 10_000_000, 2.5);
+        strategy.onTick("RELIANCE", 1005.0, 100_000, 2_000_000, 500_000);
+        strategy.onTick("RELIANCE", 1015.0, 3_000_000, 2_000_000, 500_000);
+        strategy.onTick("RELIANCE", 1020.0, 3_100_000, 2_000_000, 500_000);
+
+        when(positionSizingEngine.canTradeToday()).thenReturn(true);
+        when(positionSizingEngine.calculateQuantity(eq("RELIANCE"), anyDouble(), anyDouble(), any())).thenReturn(10);
+        when(mockGateway.placeOrder(eq("RELIANCE"), eq("BUY"), anyInt(), anyDouble(), anyDouble(), eq("LIMIT")))
+            .thenReturn(new TradeOrder("ORD-BUY-1", "RELIANCE", "BUY", 10, 1020.0, 0.0, "LIMIT", "SUBMITTED", ExecutionMode.PAPER, Instant.now()));
+
+        // Entry is submitted, but remains unfilled throughout the session
+        when(mockGateway.getOpenPosition()).thenReturn(Optional.empty());
+
+        strategy.evaluate0930();
+        assertEquals(TradeLifecycleState.PENDING_ENTRY, strategy.getLifecycleState());
+
+        // At 15:05 cutoff, square-off triggers
+        strategy.executeSquareOff();
+
+        // Must cancel the resting buy order to prevent late accidental fill
+        verify(mockGateway, times(1)).cancelOrder("ORD-BUY-1");
+        assertEquals(TradeLifecycleState.FLAT, strategy.getLifecycleState());
+        assertNull(strategy.getActiveSymbol());
+    }
+}

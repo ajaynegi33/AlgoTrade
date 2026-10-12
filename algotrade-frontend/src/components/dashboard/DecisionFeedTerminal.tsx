@@ -319,7 +319,7 @@ export default function DecisionFeedTerminal({ backendUrl }: DecisionFeedTermina
                 : `No events matching "${selectedFilter}"`}
             </p>
             <p className="text-xs text-slate-400 max-w-md mt-1 leading-relaxed">
-              The engine automatically logs all strategy candidate scoring, risk evaluations, order dispatches, trailing stop ratchets, and 15:15 square-offs.
+              The engine automatically logs all strategy candidate scoring, risk evaluations, order dispatches, trailing stop ratchets, and 15:05 square-offs.
             </p>
           </div>
         ) : (

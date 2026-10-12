@@ -42,9 +42,16 @@ public interface TradingStrategy {
     void evaluate0930();
 
     /**
-     * Triggered at 15:15:00 PM IST for mandatory intraday square-off.
+     * Triggered at 15:05:00 PM IST for mandatory intraday square-off ahead of broker CAS cutoffs.
      */
-    void executeSquareOff1515();
+    void executeSquareOff();
+
+    /**
+     * Backwards-compatible alias for executeSquareOff.
+     */
+    default void executeSquareOff1515() {
+        executeSquareOff();
+    }
 
     /**
      * Exposes the latest evaluated Top 10 stocks and their score breakdowns

@@ -17,6 +17,6 @@ public record ScoredCandidate(
     String status            // "SELECTED FOR TRADE", "DISQUALIFIED", "RUNNER UP"
 ) {
     public boolean isQualified() {
-        return totalScore >= 75;
+        return totalScore >= 75 && status != null && !status.startsWith("DISQUALIFIED");
     }
 }

@@ -64,11 +64,15 @@ public class StrategyManager {
         }
     }
 
-    public void executeSquareOff1515() {
+    public void executeSquareOff() {
         TradingStrategy strategy = getActiveStrategy();
         if (strategy != null) {
-            strategy.executeSquareOff1515();
+            strategy.executeSquareOff();
         }
+    }
+
+    public void executeSquareOff1515() {
+        executeSquareOff();
     }
 
     public List<ScoredCandidate> getLatestTopCandidates() {

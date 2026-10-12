@@ -211,7 +211,7 @@ public class TradingDashboardController {
             null,
             Map.of("action", "SQUARE_OFF_ALL", "source", "USER_OPERATOR")
         );
-        strategyManager.executeSquareOff1515();
+        strategyManager.executeSquareOff();
         return ResponseEntity.ok(Map.of("success", true, "message", "Emergency square-off executed"));
     }
 

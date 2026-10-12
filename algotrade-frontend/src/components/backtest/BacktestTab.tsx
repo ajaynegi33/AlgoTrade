@@ -274,7 +274,7 @@ export default function BacktestTab({ backendUrl }: BacktestTabProps) {
         {/* Run Action Button */}
         <div className="flex items-center justify-between mt-6 pt-4 border-t border-slate-800">
           <div className="text-xs text-slate-400 hidden sm:block font-mono">
-            Simulates Nifty 100 constituents • Models 0.05% slippage • 15:15 mandatory exit
+            Simulates Nifty 100 constituents • Models 0.05% slippage • 15:05 mandatory exit
           </div>
           <button
             onClick={handleRunBacktest}
@@ -651,7 +651,7 @@ export default function BacktestTab({ backendUrl }: BacktestTabProps) {
                             ? "Trailing SL"
                             : t.exitReason === "INITIAL_SL"
                             ? "Initial SL"
-                            : "15:15 Close"}
+                            : "15:05 Close"}
                         </span>
                       </td>
                       <td
