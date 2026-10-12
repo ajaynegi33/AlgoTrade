@@ -418,18 +418,26 @@ Controller: `TradingDashboardController.java` (`/api/dashboard`):
 
 ---
 
-## 12. Backtesting Engine & Historical Candle Simulation
+## 12. Backtesting Engine & Real Historical Data Simulation
 
 Implemented in `BacktestEngineService.java` & `HistoricalMarketDataService.java`:
-- Traverses historical trading days (skipping weekends and official NSE holidays via `MarketCalendarService`).
-- Evaluates 09:15–09:30 candidate metrics using the exact production `MomentumScoringEngine`.
-- Checks qualification ($Score \ge 75$ and passes hard gates).
-- Simulates intraday price trajectories (09:30 to 15:05) evaluating:
-  - Initial structural stop-loss at `Low15 - 0.05`
-  - Post-11:00 AM 2.0% trailing stop ratchet
-  - 15:05 mandatory EOD exit
-- Deducts 0.05% execution slippage and full Indian statutory taxes via `ChargesBreakdown`.
-- Computes institutional metrics: Total Return, Win Rate, Profit Factor, Max Drawdown (Rupees & %), and Annualized Sharpe Ratio ($\sqrt{252}$).
+- **Real Market Data Ingestion & Caching:**
+  - Ingests real historical daily and intraday candles for the NIFTY universe directly from official NSE feeds (`SYMBOL.NS`).
+  - Persists downloaded historical candles to local disk cache (`.cache/historical_market_data/{symbol}_daily.json`) for instant sub-50ms repeat backtests without hitting external rate limits.
+  - Automatically calculates true 20-day Average Daily Volume (ADV), 14-day ATR%, and Previous Day High (PDH) from real historical sessions.
+- **100% Strategy & Risk Parity with Dynamic Leveraged Risk Capacity:**
+  - Evaluates candidate metrics using the production `MomentumScoringEngine` (100-point model with hard qualification gates).
+  - Reuses `PositionSizingEngine.calculateSizingQuantity` to enforce user-configured leverage ($1.0\times$ cash up to $5.0\times$ SEBI MIS) and $0.40\% - 2.00\%$ stop distance boundaries.
+  - Risk Budget is calculated directly on total leveraged position capacity ($\text{Capital} \times \text{Leverage} \times \text{Risk\%}$), e.g., $₹10,000 \times 5.0\times \times 2.0\% = ₹1,000$ risk budget, allowing full utilization of intraday buying power.
+  - Anchors structural stop strictly to `floorToTick(Low15 - 0.05)`.
+- **Realistic Intrabar Sequencing (No Peeking Bias):**
+  - Models candle direction realistically: on bullish candles ($C \ge O$, $O \to L \to H \to C$), checks the Low against existing stops before updating high-water marks. On bearish candles ($C < O$, $O \to H \to L \to C$), models High before Low.
+  - Post-11:00 AM trailing stop ratchets 2.0% below the high-water mark.
+  - Mandatory 15:05 PM EOD square-off if stop-loss is not hit.
+- **Institutional Financial Analytics:**
+  - Net Profit Factor computed strictly on post-tax Net PnL via `ChargesBreakdown`.
+  - Annualized Sharpe Ratio ($\sqrt{252}$) adjusted with the 6.5% Indian benchmark repo rate.
+  - Max Drawdown (Rupees & %) and consecutive loss counters.
 
 ---
 

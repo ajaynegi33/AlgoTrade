@@ -30,6 +30,7 @@ export default function BacktestTab({ backendUrl }: BacktestTabProps) {
   const [minScoreThreshold, setMinScoreThreshold] = useState<number>(75);
   const [trailingSlPct, setTrailingSlPct] = useState<number>(2.0);
   const [slippagePct, setSlippagePct] = useState<number>(0.05);
+  const [leverageMultiplier, setLeverageMultiplier] = useState<number>(1.0);
 
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<BacktestResult | null>(null);
@@ -78,6 +79,7 @@ export default function BacktestTab({ backendUrl }: BacktestTabProps) {
         minScoreThreshold,
         trailingSlPct,
         slippagePct,
+        leverageMultiplier,
       };
 
       const res = await fetch(`${backendUrl}/api/backtest/run`, {
@@ -180,7 +182,7 @@ export default function BacktestTab({ backendUrl }: BacktestTabProps) {
         </div>
 
         {/* Parameter Inputs Grid */}
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4 mt-5">
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 sm:gap-4 mt-5">
           {/* Start Date */}
           <div>
             <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 block mb-1">
@@ -222,20 +224,106 @@ export default function BacktestTab({ backendUrl }: BacktestTabProps) {
             />
           </div>
 
+          {/* Intraday Leverage (SEBI MIS) */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                Leverage: {leverageMultiplier.toFixed(1)}x
+              </label>
+              <span className="text-[10px] font-mono font-medium text-emerald-400">
+                {leverageMultiplier === 1.0 ? "Cash" : `${leverageMultiplier}x MIS`}
+              </span>
+            </div>
+            <input
+              type="range"
+              min="1.0"
+              max="5.0"
+              step="0.5"
+              value={leverageMultiplier}
+              onChange={(e) => setLeverageMultiplier(parseFloat(e.target.value))}
+              className="w-full mt-2 accent-indigo-500 cursor-pointer"
+            />
+            <div className="flex items-center justify-between mt-1 text-[9px] font-mono text-slate-400">
+              <span
+                role="button"
+                onClick={() => setLeverageMultiplier(1.0)}
+                className={`cursor-pointer hover:text-white px-1 rounded ${leverageMultiplier === 1.0 ? "text-emerald-400 font-bold" : ""}`}
+              >
+                1x
+              </span>
+              <span
+                role="button"
+                onClick={() => setLeverageMultiplier(2.0)}
+                className={`cursor-pointer hover:text-white px-1 rounded ${leverageMultiplier === 2.0 ? "text-emerald-400 font-bold" : ""}`}
+              >
+                2x
+              </span>
+              <span
+                role="button"
+                onClick={() => setLeverageMultiplier(3.0)}
+                className={`cursor-pointer hover:text-white px-1 rounded ${leverageMultiplier === 3.0 ? "text-emerald-400 font-bold" : ""}`}
+              >
+                3x
+              </span>
+              <span
+                role="button"
+                onClick={() => setLeverageMultiplier(5.0)}
+                className={`cursor-pointer hover:text-white px-1 rounded ${leverageMultiplier === 5.0 ? "text-emerald-400 font-bold" : ""}`}
+              >
+                5x
+              </span>
+            </div>
+          </div>
+
           {/* Risk Per Trade % */}
           <div>
-            <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 block mb-1">
-              Risk Budget (%): {riskPerTradePct.toFixed(1)}%
-            </label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                Risk: {riskPerTradePct.toFixed(1)}%
+              </label>
+              <span className="text-[10px] font-mono font-medium text-emerald-400" title="Calculated from total position capacity (Capital × Leverage)">
+                ₹{Math.round(initialCapital * leverageMultiplier * (riskPerTradePct / 100)).toLocaleString("en-IN")} max loss
+              </span>
+            </div>
             <input
               type="range"
               min="0.5"
-              max="2.5"
+              max="5.0"
               step="0.1"
               value={riskPerTradePct}
               onChange={(e) => setRiskPerTradePct(parseFloat(e.target.value))}
               className="w-full mt-2 accent-emerald-500 cursor-pointer"
             />
+            <div className="flex items-center justify-between mt-1 text-[9px] font-mono text-slate-400">
+              <span
+                role="button"
+                onClick={() => setRiskPerTradePct(1.0)}
+                className={`cursor-pointer hover:text-white px-1 rounded ${riskPerTradePct === 1.0 ? "text-emerald-400 font-bold" : ""}`}
+              >
+                1%
+              </span>
+              <span
+                role="button"
+                onClick={() => setRiskPerTradePct(2.0)}
+                className={`cursor-pointer hover:text-white px-1 rounded ${riskPerTradePct === 2.0 ? "text-emerald-400 font-bold" : ""}`}
+              >
+                2%
+              </span>
+              <span
+                role="button"
+                onClick={() => setRiskPerTradePct(3.0)}
+                className={`cursor-pointer hover:text-white px-1 rounded ${riskPerTradePct === 3.0 ? "text-emerald-400 font-bold" : ""}`}
+              >
+                3%
+              </span>
+              <span
+                role="button"
+                onClick={() => setRiskPerTradePct(5.0)}
+                className={`cursor-pointer hover:text-white px-1 rounded ${riskPerTradePct === 5.0 ? "text-emerald-400 font-bold" : ""}`}
+              >
+                5%
+              </span>
+            </div>
           </div>
 
           {/* Trailing Stop % */}
@@ -274,7 +362,7 @@ export default function BacktestTab({ backendUrl }: BacktestTabProps) {
         {/* Run Action Button */}
         <div className="flex items-center justify-between mt-6 pt-4 border-t border-slate-800">
           <div className="text-xs text-slate-400 hidden sm:block font-mono">
-            Simulates Nifty 100 constituents • Models 0.05% slippage • 15:05 mandatory exit
+            Simulates Nifty 100 constituents • Up to 5x SEBI MIS leverage • Models 0.05% slippage • 15:05 mandatory exit
           </div>
           <button
             onClick={handleRunBacktest}

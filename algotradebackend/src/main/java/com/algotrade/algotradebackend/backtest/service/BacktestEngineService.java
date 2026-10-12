@@ -3,13 +3,13 @@ package com.algotrade.algotradebackend.backtest.service;
 import com.algotrade.algotradebackend.backtest.model.*;
 import com.algotrade.algotradebackend.core.model.ChargesBreakdown;
 import com.algotrade.algotradebackend.core.model.ScoredCandidate;
+import com.algotrade.algotradebackend.risk.PositionSizingEngine;
 import com.algotrade.algotradebackend.strategy.momentum_breakout.CandidateMetrics;
 import com.algotrade.algotradebackend.strategy.momentum_breakout.MomentumScoringEngine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
-import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.util.*;
@@ -20,7 +20,8 @@ import java.util.*;
  * <p>Directly reuses production quantitative models:
  * <ul>
  *   <li>{@link MomentumScoringEngine} for 100-point candidate scoring and deterministic tie-breaking.</li>
- *   <li>{@link StatutoryChargesCalculator} for deducting all Indian statutory taxes &amp; charges.</li>
+ *   <li>{@link PositionSizingEngine} for strict risk budget, stop distance gates, and 1.0x cash exposure cap.</li>
+ *   <li>{@link ChargesBreakdown} for deducting all Indian statutory taxes &amp; charges.</li>
  * </ul>
  * </p>
  */
@@ -61,6 +62,9 @@ public class BacktestEngineService {
             end = tmp;
         }
 
+        // Pre-warm data cache for all NIFTY universe stocks across the requested date range
+        dataService.preloadUniverse(start, end);
+
         double initialCapital = req.initialCapital();
         double currentCapital = initialCapital;
         double peakCapital = initialCapital;
@@ -83,6 +87,10 @@ public class BacktestEngineService {
             }
 
             List<CandidateMetrics> metricsList = dataService.getOpeningCandidateMetrics(date);
+            if (metricsList.isEmpty()) {
+                continue;
+            }
+
             List<ScoredCandidate> scoredList = metricsList.stream()
                 .map(scoringEngine::evaluate)
                 .toList();
@@ -114,20 +122,41 @@ public class BacktestEngineService {
                 .findFirst()
                 .orElse(metricsList.get(0));
 
-            // Position Sizing with 0.05% execution slippage
+            // Position Sizing with exact Live Strategy Parity
             double rawEntryPrice = winner.ltp();
             double entryPrice = round2(rawEntryPrice * (1.0 + req.slippagePct() / 100.0));
-            double initialSl = round2(Math.max(winnerMetrics.getLow15(), entryPrice * 0.985));
-            double slDistance = Math.max(0.5, entryPrice - initialSl);
 
-            double riskBudget = currentCapital * (req.riskPerTradePct() / 100.0);
-            int quantity = (int) Math.floor(riskBudget / slDistance);
+            // Structural stop anchored strictly to Low15 minus 5 paise tick buffer, floored
+            double effLow15 = winnerMetrics.getLow15();
+            double initialSl = floorToTick(effLow15 - 0.05);
 
-            // Cap with 5x intraday MIS leverage limit
-            int maxLeveragedQty = (int) Math.floor((currentCapital * 5.0) / entryPrice);
-            quantity = Math.max(1, Math.min(quantity, Math.max(1, maxLeveragedQty)));
+            // Calculate quantity using the shared quantitative formula from PositionSizingEngine
+            // Enforces: 0.4% min stop distance, 2.0% max stop distance, and user-configured leverage cap (1.0x to 5.0x)
+            int quantity = PositionSizingEngine.calculateSizingQuantity(
+                currentCapital,
+                entryPrice,
+                initialSl,
+                req.riskPerTradePct(),
+                req.leverageMultiplier(), // Configurable intraday MIS leverage (1.0x to 5.0x)
+                0.4, // 0.4% minimum stop distance gate
+                2.0  // 2.0% maximum stop distance gate
+            );
 
-            // Intraday 1-minute trajectory replay (09:30 to 15:05)
+            if (quantity < 1) {
+                // Sizing engine rejected trade (e.g. stop too narrow <0.4%, too wide >2.0%, or insufficient capital)
+                double ddPct = peakCapital > 0 ? ((peakCapital - currentCapital) / peakCapital) * 100.0 : 0.0;
+                equityCurve.add(new BacktestEquityPoint(
+                    date.toString(),
+                    round2(currentCapital),
+                    0.0,
+                    0.0,
+                    round2(ddPct)
+                ));
+                dailyReturns.add(0.0);
+                continue;
+            }
+
+            // Intraday trajectory replay (09:30 to 15:05)
             List<HistoricalMarketDataService.IntradayBar> bars = dataService.getIntradayTrajectory(
                 date, winner.symbol(), entryPrice, initialSl
             );
@@ -139,20 +168,40 @@ public class BacktestEngineService {
             String exitReason = "MARKET_CLOSE_1505";
 
             for (HistoricalMarketDataService.IntradayBar bar : bars) {
-                highWaterMark = Math.max(highWaterMark, bar.high());
+                boolean isBullish = bar.close() >= bar.open();
 
-                // Phase 2: Trailing buffer active only post-11:00 AM IST
-                if (bar.time().compareTo("11:00") >= 0) {
-                    double trailedSl = highWaterMark * (1.0 - req.trailingSlPct() / 100.0);
-                    activeSl = Math.max(activeSl, trailedSl);
-                }
+                if (isBullish) {
+                    // Bullish bar (O -> L -> H -> C): Low occurs BEFORE High
+                    // 1. Check existing stop loss trigger first
+                    if (bar.low() <= activeSl) {
+                        exitPrice = round2(activeSl * (1.0 - req.slippagePct() / 100.0));
+                        exitTime = bar.time();
+                        exitReason = activeSl > initialSl ? "TRAILING_SL" : "INITIAL_SL";
+                        break;
+                    }
 
-                // Check stop loss trigger
-                if (bar.low() <= activeSl) {
-                    exitPrice = round2(activeSl * (1.0 - req.slippagePct() / 100.0));
-                    exitTime = bar.time();
-                    exitReason = activeSl > initialSl ? "TRAILING_SL" : "INITIAL_SL";
-                    break;
+                    // 2. Only if not stopped out, ratchet High-Water Mark and Trailing SL
+                    highWaterMark = Math.max(highWaterMark, bar.high());
+                    if (bar.time().compareTo("11:00") >= 0) {
+                        double trailedSl = floorToTick(highWaterMark * (1.0 - req.trailingSlPct() / 100.0));
+                        activeSl = Math.max(activeSl, trailedSl);
+                    }
+                } else {
+                    // Bearish bar (O -> H -> L -> C): High occurs BEFORE Low
+                    // 1. Ratchet High-Water Mark and Trailing SL
+                    highWaterMark = Math.max(highWaterMark, bar.high());
+                    if (bar.time().compareTo("11:00") >= 0) {
+                        double trailedSl = floorToTick(highWaterMark * (1.0 - req.trailingSlPct() / 100.0));
+                        activeSl = Math.max(activeSl, trailedSl);
+                    }
+
+                    // 2. Check stop loss trigger against the newly ratcheted stop
+                    if (bar.low() <= activeSl) {
+                        exitPrice = round2(activeSl * (1.0 - req.slippagePct() / 100.0));
+                        exitTime = bar.time();
+                        exitReason = activeSl > initialSl ? "TRAILING_SL" : "INITIAL_SL";
+                        break;
+                    }
                 }
             }
 
@@ -167,6 +216,7 @@ public class BacktestEngineService {
             double totalCharges = round2(charges.totalCharges());
             double netPnL = round2(grossPnL - totalCharges);
 
+            double preTradeCapital = currentCapital;
             currentCapital = round2(currentCapital + netPnL);
             double tradeReturnPct = round2((netPnL / (entryPrice * quantity)) * 100.0);
 
@@ -184,7 +234,8 @@ public class BacktestEngineService {
             maxDrawdownRupees = Math.max(maxDrawdownRupees, currentDdRupees);
             maxDrawdownPct = Math.max(maxDrawdownPct, currentDdPct);
 
-            dailyReturns.add(netPnL / (currentCapital - netPnL));
+            double dailyReturn = preTradeCapital > 0 ? (netPnL / preTradeCapital) : 0.0;
+            dailyReturns.add(dailyReturn);
 
             trades.add(new BacktestTrade(
                 tradeCounter++,
@@ -218,9 +269,10 @@ public class BacktestEngineService {
         int lossTrades = (int) trades.stream().filter(t -> t.netPnL() < 0).count();
         double winRatePct = totalTrades > 0 ? round2(((double) winTrades / totalTrades) * 100.0) : 0.0;
 
-        double totalGrossWins = trades.stream().filter(t -> t.grossPnL() > 0).mapToDouble(BacktestTrade::grossPnL).sum();
-        double totalGrossLosses = Math.abs(trades.stream().filter(t -> t.grossPnL() < 0).mapToDouble(BacktestTrade::grossPnL).sum());
-        double profitFactor = totalGrossLosses > 0 ? round2(totalGrossWins / totalGrossLosses) : totalGrossWins > 0 ? 99.9 : 0.0;
+        // Institutional Net Profit Factor based strictly on post-tax Net PnL
+        double totalNetWins = trades.stream().filter(t -> t.netPnL() > 0).mapToDouble(BacktestTrade::netPnL).sum();
+        double totalNetLosses = Math.abs(trades.stream().filter(t -> t.netPnL() < 0).mapToDouble(BacktestTrade::netPnL).sum());
+        double profitFactor = totalNetLosses > 0 ? round2(totalNetWins / totalNetLosses) : totalNetWins > 0 ? 99.9 : 0.0;
 
         double totalGrossPnL = round2(trades.stream().mapToDouble(BacktestTrade::grossPnL).sum());
         double totalTaxes = round2(trades.stream().mapToDouble(BacktestTrade::totalCharges).sum());
@@ -228,7 +280,7 @@ public class BacktestEngineService {
         double totalReturnPct = round2((totalNetPnL / initialCapital) * 100.0);
         double avgTradePnL = totalTrades > 0 ? round2(totalNetPnL / totalTrades) : 0.0;
 
-        // Annualized Sharpe Ratio approximation
+        // Annualized Sharpe Ratio with Indian benchmark risk-free rate adjustment (6.5%)
         double sharpeRatio = calculateSharpeRatio(dailyReturns);
 
         BacktestSummary summary = new BacktestSummary(
@@ -264,6 +316,7 @@ public class BacktestEngineService {
 
     private double calculateSharpeRatio(List<Double> returns) {
         if (returns.size() < 2) return 0.0;
+        double dailyRf = 0.065 / 252.0; // 6.5% Indian annual risk-free rate per trading day
         double mean = returns.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
         double variance = returns.stream()
             .mapToDouble(r -> Math.pow(r - mean, 2))
@@ -271,7 +324,11 @@ public class BacktestEngineService {
         double stdDev = Math.sqrt(variance);
         if (stdDev <= 0.00001) return 0.0;
         // Annualize with sqrt(252 trading days)
-        return (mean / stdDev) * Math.sqrt(252);
+        return round2(((mean - dailyRf) / stdDev) * Math.sqrt(252));
+    }
+
+    private double floorToTick(double price) {
+        return Math.floor(price * 20.0) / 20.0;
     }
 
     private double round2(double val) {

@@ -93,6 +93,38 @@ public class PositionSizingEngine {
     }
 
     /**
+     * Pure quantitative mathematical sizing formula without gateway dependencies.
+     * Shared across live trading, paper execution, and backtesting simulations.
+     */
+    public static int calculateSizingQuantity(
+        double accountCapital,
+        double entryPrice,
+        double stopPrice,
+        double riskBudgetPct,
+        double maxExposureMultiplier,
+        double minStopDistancePct,
+        double maxStopDistancePct
+    ) {
+        if (entryPrice <= 0 || stopPrice <= 0 || accountCapital <= 0) return 0;
+        double stopDistance = entryPrice - stopPrice;
+        if (stopDistance <= 0) return 0;
+
+        double stopDistancePct = (stopDistance / entryPrice) * 100.0;
+        if (stopDistancePct < minStopDistancePct || stopDistancePct > maxStopDistancePct) {
+            return 0;
+        }
+
+        // Total leveraged purchasing power: e.g. ₹10,000 capital * 5x leverage = ₹50,000 position value
+        double maxPositionValue = accountCapital * maxExposureMultiplier;
+
+        // Risk capacity applied to overall invested amount (capital + leverage): e.g. ₹50,000 * 2.8% = ₹1,400 risk budget
+        double plannedRiskBudget = maxPositionValue * (riskBudgetPct / 100.0);
+        int qRisk = (int) Math.floor(plannedRiskBudget / stopDistance);
+
+        return Math.max(0, qRisk);
+    }
+
+    /**
      * Calculates the exact share quantity satisfying all 3 independent risk constraints.
      * 
      * @param entryPrice Estimated entry execution price
@@ -105,48 +137,28 @@ public class PositionSizingEngine {
             return 0;
         }
 
-        double stopDistance = entryPrice - stopPrice;
-        if (stopDistance <= 0) {
-            log.warn("INVALID STOP: Stop price (₹{}) must be strictly below entry price (₹{})", stopPrice, entryPrice);
+        int baseQty = calculateSizingQuantity(capital, entryPrice, stopPrice, riskBudgetPct, maxExposureMultiplier, minStopDistancePct, maxStopDistancePct);
+        if (baseQty <= 0) {
+            double stopDistance = entryPrice - stopPrice;
+            if (stopDistance <= 0) {
+                log.warn("INVALID STOP: Stop price (₹{}) must be strictly below entry price (₹{})", stopPrice, entryPrice);
+            } else {
+                double stopDistancePct = (stopDistance / entryPrice) * 100.0;
+                log.warn("REJECTED: Stop distance ({:.2f}%) outside allowed range [{:.2f}%, {:.2f}%]", stopDistancePct, minStopDistancePct, maxStopDistancePct);
+            }
             return 0;
         }
-
-        double stopDistancePct = (stopDistance / entryPrice) * 100.0;
-
-        // Gate 1: Min Stop Distance Check (Noise Guard)
-        if (stopDistancePct < minStopDistancePct) {
-            log.warn("REJECTED: Stop distance ({:.2f}%) too narrow (< {:.2f}%). Risk of market noise stop-out.",
-                stopDistancePct, minStopDistancePct);
-            return 0;
-        }
-
-        // Gate 2: Max Stop Distance Check (Budget Protection)
-        if (stopDistancePct > maxStopDistancePct) {
-            log.warn("REJECTED: Stop distance ({:.2f}%) too wide (> {:.2f}%). Exceeds planned risk tolerance.",
-                stopDistancePct, maxStopDistancePct);
-            return 0;
-        }
-
-        // Constraint 1: Risk-Based Quantity (Q_risk)
-        // Planned Risk Budget in INR = Capital * Risk% (e.g. ₹10,000 * 1% = ₹100)
-        double plannedRiskBudget = capital * (riskBudgetPct / 100.0);
-        int qRisk = (int) Math.floor(plannedRiskBudget / stopDistance);
 
         // Constraint 2: Available Margin Quantity (Q_margin)
         double availableCash = gateway.getAvailableCash();
         double marginPerShare = gateway.calculateOrderMargin(symbol, 1, entryPrice);
         int qMargin = marginPerShare > 0 ? (int) Math.floor(availableCash / marginPerShare) : 0;
 
-        // Constraint 3: Maximum Exposure Quantity (Q_exposure)
-        // Caps total position value to Authorized Exposure (e.g. ₹10,000 * 1.0x = ₹10,000)
-        double maxPositionValue = capital * maxExposureMultiplier;
-        int qExposure = (int) Math.floor(maxPositionValue / entryPrice);
+        // Final Sizing Resolution: Smallest of base risk/exposure and available margin
+        int finalQuantity = Math.min(baseQty, qMargin);
 
-        // Final Sizing Resolution: Smallest of the 3 constraints
-        int finalQuantity = Math.min(qRisk, Math.min(qMargin, qExposure));
-
-        log.info("SIZING RESOLUTION for {}: Q_risk={}, Q_margin={}, Q_exposure={} -> FINAL QUANTITY = {} shares (Total Value: ₹{})",
-            symbol, qRisk, qMargin, qExposure, finalQuantity, Math.round(finalQuantity * entryPrice));
+        log.info("SIZING RESOLUTION for {}: BaseQty={}, Q_margin={} -> FINAL QUANTITY = {} shares (Total Value: ₹{})",
+            symbol, baseQty, qMargin, finalQuantity, Math.round(finalQuantity * entryPrice));
 
         return finalQuantity;
     }

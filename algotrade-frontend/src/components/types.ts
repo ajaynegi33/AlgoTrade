@@ -147,6 +147,7 @@ export interface BacktestRequest {
   minScoreThreshold: number;
   trailingSlPct: number;
   slippagePct: number;
+  leverageMultiplier?: number;
 }
 
 export interface BacktestTrade {

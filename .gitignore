@@ -45,3 +45,5 @@ algotradebackend/src/main/resources/application.yaml
 algotradepaper.db
 algotradebackend/algotradepaper.db
 algotradebackend/.kite_session.json
+.cache/
+**/cache/
