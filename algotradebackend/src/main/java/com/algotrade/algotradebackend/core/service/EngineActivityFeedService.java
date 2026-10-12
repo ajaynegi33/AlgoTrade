@@ -1,8 +1,11 @@
 package com.algotrade.algotradebackend.core.service;
 
+import com.algotrade.algotradebackend.broker.BrokerGatewayManager;
 import com.algotrade.algotradebackend.core.model.EngineActivityEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
@@ -25,11 +28,30 @@ public class EngineActivityFeedService {
 
     private final AtomicLong sequence = new AtomicLong(1);
     private final ConcurrentLinkedDeque<EngineActivityEvent> eventBuffer = new ConcurrentLinkedDeque<>();
+    private final BrokerGatewayManager brokerGatewayManager;
 
-    public EngineActivityFeedService() {
+    @Autowired
+    public EngineActivityFeedService(ObjectProvider<BrokerGatewayManager> gatewayManagerProvider) {
+        this.brokerGatewayManager = gatewayManagerProvider.getIfAvailable();
         record(
             "SYSTEM",
             "INFO",
+            "SYSTEM",
+            null,
+            "Engine Initialized",
+            "AlgoTrade automated decision telemetry feed is active.",
+            null,
+            Map.of("bufferCapacity", MAX_CAPACITY, "status", "ONLINE")
+        );
+    }
+
+    public EngineActivityFeedService() {
+        this.brokerGatewayManager = null;
+        record(
+            "SYSTEM",
+            "INFO",
+            "SYSTEM",
+            null,
             "Engine Initialized",
             "AlgoTrade automated decision telemetry feed is active.",
             null,
@@ -38,17 +60,20 @@ public class EngineActivityFeedService {
     }
 
     /**
-     * Non-blocking O(1) telemetry recording.
+     * Master non-blocking O(1) telemetry recording method.
      */
     public EngineActivityEvent record(
             String category,
             String level,
+            String executionMode,
+            String tradeId,
             String title,
             String message,
             String symbol,
             Map<String, Object> metadata
     ) {
         long id = sequence.getAndIncrement();
+        String resolvedMode = resolveMode(executionMode);
         Map<String, Object> safeMeta = (metadata != null && !metadata.isEmpty())
                 ? Collections.unmodifiableMap(new LinkedHashMap<>(metadata))
                 : Collections.emptyMap();
@@ -58,6 +83,8 @@ public class EngineActivityFeedService {
                 Instant.now(),
                 category != null ? category : "SYSTEM",
                 level != null ? level : "INFO",
+                resolvedMode,
+                tradeId,
                 title != null ? title : "",
                 message != null ? message : "",
                 symbol,
@@ -73,22 +100,57 @@ public class EngineActivityFeedService {
 
         // Mirror to console log
         if ("WARN".equalsIgnoreCase(level)) {
-            log.warn("[{}] {}: {}", category, title, message);
+            log.warn("[{} | {}] {}: {}", category, resolvedMode, title, message);
         } else if ("ERROR".equalsIgnoreCase(level)) {
-            log.error("[{}] {}: {}", category, title, message);
+            log.error("[{} | {}] {}: {}", category, resolvedMode, title, message);
         } else {
-            log.info("[{}] {}: {}", category, title, message);
+            log.info("[{} | {}] {}: {}", category, resolvedMode, title, message);
         }
 
         return event;
     }
 
+    public EngineActivityEvent record(
+            String category,
+            String level,
+            String executionMode,
+            String tradeId,
+            String title,
+            String message,
+            String symbol
+    ) {
+        return record(category, level, executionMode, tradeId, title, message, symbol, Collections.emptyMap());
+    }
+
+    public EngineActivityEvent record(
+            String category,
+            String level,
+            String title,
+            String message,
+            String symbol,
+            Map<String, Object> metadata
+    ) {
+        return record(category, level, null, null, title, message, symbol, metadata);
+    }
+
     public EngineActivityEvent record(String category, String level, String title, String message, String symbol) {
-        return record(category, level, title, message, symbol, Collections.emptyMap());
+        return record(category, level, null, null, title, message, symbol, Collections.emptyMap());
     }
 
     public EngineActivityEvent record(String category, String level, String title, String message) {
-        return record(category, level, title, message, null, Collections.emptyMap());
+        return record(category, level, null, null, title, message, null, Collections.emptyMap());
+    }
+
+    private String resolveMode(String explicitMode) {
+        if (explicitMode != null && !explicitMode.isBlank()) {
+            return explicitMode.toUpperCase();
+        }
+        if (brokerGatewayManager != null) {
+            try {
+                return brokerGatewayManager.getActiveMode().name();
+            } catch (Exception ignored) {}
+        }
+        return "PAPER";
     }
 
     /**

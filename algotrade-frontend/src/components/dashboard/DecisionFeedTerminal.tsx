@@ -345,9 +345,28 @@ export default function DecisionFeedTerminal({ backendUrl }: DecisionFeedTermina
                       <span>{theme.icon}</span>
                       <span>{evt.category}</span>
                     </span>
+                    {evt.executionMode && (
+                      <span
+                        className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border ${
+                          evt.executionMode.toUpperCase() === "LIVE"
+                            ? "bg-rose-500/15 text-rose-300 border-rose-500/30"
+                            : "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                        }`}
+                      >
+                        {evt.executionMode.toUpperCase() === "LIVE" ? "● LIVE" : "● PAPER"}
+                      </span>
+                    )}
                     {evt.symbol && (
                       <span className="font-mono font-bold text-xs px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
                         {evt.symbol}
+                      </span>
+                    )}
+                    {evt.tradeId && (
+                      <span
+                        className="font-mono text-[10px] text-slate-400 bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5"
+                        title={`Trade ID: ${evt.tradeId}`}
+                      >
+                        #{evt.tradeId}
                       </span>
                     )}
                     <span className="font-semibold text-sm text-white">{evt.title}</span>

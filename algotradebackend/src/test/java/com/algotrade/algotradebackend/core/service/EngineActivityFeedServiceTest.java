@@ -41,4 +41,21 @@ class EngineActivityFeedServiceTest {
         assertEquals(e3.id(), delta.get(0).id());
         assertEquals(e2.id(), delta.get(1).id());
     }
+
+    @Test
+    void testExecutionModeAndTradeId() {
+        EngineActivityFeedService service = new EngineActivityFeedService();
+        EngineActivityEvent evt = service.record(
+            "ORDERS",
+            "SUCCESS",
+            "LIVE",
+            "TRD-2026-10-12-RELIANCE",
+            "Entry Order Dispatched",
+            "BUY 10 x RELIANCE",
+            "RELIANCE"
+        );
+        assertEquals("LIVE", evt.executionMode());
+        assertEquals("TRD-2026-10-12-RELIANCE", evt.tradeId());
+        assertEquals("RELIANCE", evt.symbol());
+    }
 }

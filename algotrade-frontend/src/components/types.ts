@@ -130,6 +130,8 @@ export interface EngineActivityEvent {
   timestamp: string;
   category: "ORDERS" | "STRATEGY" | "RISK" | "LIFECYCLE" | "SYSTEM" | string;
   level: "INFO" | "WARN" | "ERROR" | string;
+  executionMode?: "PAPER" | "LIVE" | string;
+  tradeId?: string | null;
   title: string;
   message: string;
   symbol?: string | null;

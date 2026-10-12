@@ -10,8 +10,10 @@ import java.util.Map;
 public record EngineActivityEvent(
     long id,
     Instant timestamp,
-    String category, // "STRATEGY", "RISK", "ORDER", "LIFECYCLE", "SYSTEM"
-    String level,    // "INFO", "SUCCESS", "WARN", "ERROR"
+    String category,      // "STRATEGY", "RISK", "ORDERS", "LIFECYCLE", "SYSTEM"
+    String level,         // "INFO", "SUCCESS", "WARN", "ERROR"
+    String executionMode, // "PAPER" or "LIVE"
+    String tradeId,       // Optional unique identifier correlating events belonging to the same trade lifecycle
     String title,
     String message,
     String symbol,

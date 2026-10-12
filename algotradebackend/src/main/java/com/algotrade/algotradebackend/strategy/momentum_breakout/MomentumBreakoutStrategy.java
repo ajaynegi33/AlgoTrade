@@ -49,6 +49,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
     // Active trade tracking
     private volatile String activeSymbol = null;
     private volatile String activeSlOrderId = null;
+    private volatile String activeTradeId = null;
 
     public MomentumBreakoutStrategy(
         MomentumScoringEngine scoringEngine,
@@ -128,8 +129,10 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                             symbol, highWaterMark, targetTrailStop, limitPrice);
                         gateway.modifyOrder(activeSlOrderId, limitPrice, targetTrailStop);
                         activityFeedService.record(
-                            "ORDER",
+                            "ORDERS",
                             "SUCCESS",
+                            gateway.getExecutionMode().name(),
+                            activeTradeId,
                             "Trailing Stop Ratcheted",
                             "HWM updated to ₹" + highWaterMark + ". Trailing stop raised to ₹" + targetTrailStop + " (Limit: ₹" + limitPrice + ")",
                             symbol,
@@ -141,6 +144,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                 // Position closed
                 activeSymbol = null;
                 activeSlOrderId = null;
+                activeTradeId = null;
             }
         }
     }
@@ -256,14 +260,19 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         );
 
         // Step 5: Place Marketable Limit Buy Order
+        String tradeId = "TRD-" + java.time.LocalDate.now() + "-" + winner.symbol();
+        activeTradeId = tradeId;
+        activeSymbol = winner.symbol();
+
         double marketableBuyLimit = Math.round((entryPrice * 1.0005) * 20.0) / 20.0; // LTP + 0.05%
         log.info("DISPATCHING ENTRY ORDER: BUY {} x {} @ Marketable Limit ₹{}", quantity, winner.symbol(), marketableBuyLimit);
 
         TradeOrder buyOrder = gateway.placeOrder(winner.symbol(), "BUY", quantity, marketableBuyLimit, 0.0, "LIMIT");
-        activeSymbol = winner.symbol();
         activityFeedService.record(
-            "ORDER",
+            "ORDERS",
             "SUCCESS",
+            gateway.getExecutionMode().name(),
+            activeTradeId,
             "Entry Order Dispatched",
             "BUY " + quantity + " x " + winner.symbol() + " @ Marketable Limit ₹" + marketableBuyLimit,
             winner.symbol(),
@@ -277,8 +286,10 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
 
         log.info("PROTECTIVE SL ENGAGED: OrderId={}, Trigger=₹{}, Limit=₹{}", activeSlOrderId, initialStop, slLimitPrice);
         activityFeedService.record(
-            "ORDER",
+            "ORDERS",
             "SUCCESS",
+            gateway.getExecutionMode().name(),
+            activeTradeId,
             "Protective Stop-Loss Armed",
             "Stop-Loss order engaged: Trigger=₹" + initialStop + ", Limit=₹" + slLimitPrice,
             winner.symbol(),
@@ -298,6 +309,8 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             activityFeedService.record(
                 "LIFECYCLE",
                 "WARN",
+                gateway.getExecutionMode().name(),
+                activeTradeId,
                 "15:15 Mandatory Square-Off",
                 "Closing active position " + pos.symbol() + " (" + pos.quantity() + " shares) at EOD market limit.",
                 pos.symbol(),
@@ -315,6 +328,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
 
             activeSymbol = null;
             activeSlOrderId = null;
+            activeTradeId = null;
         } else {
             log.info("Square-off complete: No open position found.");
             activityFeedService.record(
