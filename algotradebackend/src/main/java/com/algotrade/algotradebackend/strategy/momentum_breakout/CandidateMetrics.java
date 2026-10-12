@@ -19,10 +19,13 @@ public class CandidateMetrics {
 
     private long initialVolume = -1;
     private long currentVolume = 0;
+    private long openingBaselineVolume = -1;
+    private long accumulatedCandleVolume = 0;
 
     // VWAP Accumulators
     private double sumPriceVolume = 0.0;
     private long sumVolume = 0;
+    private double exchangeVwap = 0.0;
 
     // Depth accumulators
     private long totalBuyQty = 0;
@@ -51,6 +54,46 @@ public class CandidateMetrics {
     }
 
     /**
+     * Explicitly establishes the reliable 09:15:00 window-boundary volume baseline
+     * (e.g. from pre-open trade match volume or snapshot at 09:15:00.000).
+     */
+    public synchronized void setOpeningVolumeBaseline(long baselineVolume) {
+        this.openingBaselineVolume = baselineVolume;
+        if (this.currentVolume < baselineVolume) {
+            this.currentVolume = baselineVolume;
+        }
+    }
+
+    /**
+     * Injects the official exchange-calculated trade-weighted VWAP (Average Traded Price / ATP).
+     */
+    public synchronized void setExchangeVwap(double vwap) {
+        if (vwap > 0) {
+            this.exchangeVwap = vwap;
+        }
+    }
+
+    /**
+     * Aggregates 1-minute candle data over the 09:15–09:30 observation window.
+     * Accurately accumulates traded volume and trade-weighted VWAP using Typical Price ((H + L + C) / 3).
+     */
+    public synchronized void aggregateCandle(double open, double high, double low, double close, long candleVolume) {
+        if (openPrice == 0.0) {
+            this.openPrice = open;
+        }
+        this.ltp = close;
+        this.low15 = Math.min(this.low15, low);
+        this.high15 = Math.max(this.high15, high);
+        this.accumulatedCandleVolume += candleVolume;
+
+        if (candleVolume > 0) {
+            double typicalPrice = (high + low + close) / 3.0;
+            this.sumPriceVolume += (typicalPrice * candleVolume);
+            this.sumVolume += candleVolume;
+        }
+    }
+
+    /**
      * Resets observation metrics for a fresh trading day session while preserving
      * static/reference data (symbol, prevClose, PDH, avgDailyVolume, atrPct).
      */
@@ -61,8 +104,11 @@ public class CandidateMetrics {
         this.high15 = 0.0;
         this.initialVolume = -1;
         this.currentVolume = 0;
+        this.openingBaselineVolume = -1;
+        this.accumulatedCandleVolume = 0;
         this.sumPriceVolume = 0.0;
         this.sumVolume = 0;
+        this.exchangeVwap = 0.0;
         this.totalBuyQty = 0;
         this.totalSellQty = 0;
     }
@@ -71,18 +117,28 @@ public class CandidateMetrics {
      * Ingests a live tick update.
      */
     public synchronized void updateTick(double price, long volume, long buyQty, long sellQty) {
-        updateTick(price, volume, buyQty, sellQty, true);
+        updateTick(price, volume, buyQty, sellQty, 0.0, true);
     }
 
     /**
      * Ingests a live tick update with observation window gating.
+     */
+    public synchronized void updateTick(double price, long volume, long buyQty, long sellQty, boolean inObservationWindow) {
+        updateTick(price, volume, buyQty, sellQty, 0.0, inObservationWindow);
+    }
+
+    /**
+     * Ingests a live tick update with official exchange-calculated VWAP (ATP) and observation window gating.
      * When inObservationWindow is false, only real-time LTP and order-book depth are updated;
      * 15-minute range (low15, high15, window volume, VWAP) remain locked to the 09:15–09:30 window.
      */
-    public synchronized void updateTick(double price, long volume, long buyQty, long sellQty, boolean inObservationWindow) {
+    public synchronized void updateTick(double price, long volume, long buyQty, long sellQty, double tickExchangeVwap, boolean inObservationWindow) {
         this.ltp = price;
         this.totalBuyQty = buyQty;
         this.totalSellQty = sellQty;
+        if (tickExchangeVwap > 0) {
+            this.exchangeVwap = tickExchangeVwap;
+        }
 
         if (inObservationWindow) {
             if (openPrice == 0.0) {
@@ -93,10 +149,14 @@ public class CandidateMetrics {
             this.high15 = Math.max(this.high15, price);
 
             if (this.initialVolume == -1) {
-                // Baseline calibration: first tick sets the starting volume baseline.
-                // Do NOT count entire historical/pre-market volume as incremental intraday tick volume.
-                this.initialVolume = volume;
+                // Baseline calibration: If reliable window boundary baseline is set, use it
+                this.initialVolume = (this.openingBaselineVolume >= 0) ? this.openingBaselineVolume : volume;
                 this.currentVolume = volume;
+                long openingDelta = Math.max(0, volume - this.initialVolume);
+                if (openingDelta > 0) {
+                    this.sumPriceVolume += (price * openingDelta);
+                    this.sumVolume += openingDelta;
+                }
             } else {
                 long incrementalVol = Math.max(0, volume - this.currentVolume);
                 this.currentVolume = volume;
@@ -113,8 +173,8 @@ public class CandidateMetrics {
      * Captures an immutable, thread-safe point-in-time snapshot of metrics under lock.
      */
     public synchronized CandidateSnapshot getSnapshot() {
-        double currentVwap = sumVolume > 0 ? (sumPriceVolume / sumVolume) : ltp;
-        long windowVol = initialVolume == -1 ? 0 : Math.max(0, currentVolume - initialVolume);
+        double currentVwap = getVwap();
+        long windowVol = getWindowVolume();
         long totalDepth = totalBuyQty + totalSellQty;
         double depthImbalance = totalDepth > 0 ? (double) (totalBuyQty - totalSellQty) / totalDepth : 0.0;
         double gap = prevClose > 0 ? ((openPrice - prevClose) / prevClose) * 100.0 : 0.0;
@@ -153,11 +213,14 @@ public class CandidateMetrics {
     }
 
     public synchronized double getVwap() {
+        if (exchangeVwap > 0) return exchangeVwap;
         if (sumVolume <= 0) return ltp;
         return sumPriceVolume / sumVolume;
     }
 
     public synchronized long getWindowVolume() {
+        if (accumulatedCandleVolume > 0) return accumulatedCandleVolume;
+        if (openingBaselineVolume >= 0) return Math.max(0, currentVolume - openingBaselineVolume);
         if (initialVolume == -1) return 0;
         return Math.max(0, currentVolume - initialVolume);
     }

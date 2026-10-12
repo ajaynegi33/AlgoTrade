@@ -14,9 +14,10 @@ public record ScoredCandidate(
     int depthImbalanceScore, // Max 25
     int pdhScore,            // Max 20
     int totalScore,          // Max 100
+    boolean eligible,        // Passed all mandatory hard gates (PDH breakout, above VWAP, valid volume)
     String status            // "SELECTED FOR TRADE", "DISQUALIFIED", "RUNNER UP"
 ) {
     public boolean isQualified() {
-        return totalScore >= 75 && status != null && !status.startsWith("DISQUALIFIED");
+        return eligible && totalScore >= 75;
     }
 }

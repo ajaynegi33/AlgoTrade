@@ -52,4 +52,46 @@ public class CandidateMetricsTest {
         assertEquals(3500.0, m.getPrevClose());
         assertEquals(3550.0, m.getPreviousDayHigh());
     }
+
+    @Test
+    void testOpeningVolumeBaselineIncludesEarlySecondsVolume() {
+        CandidateMetrics m = new CandidateMetrics("INFY", 1500.0, 1520.0, 4_000_000, 1.8);
+
+        // Pre-open equilibrium at 09:08 establishes 50,000 baseline at 09:15:00
+        m.setOpeningVolumeBaseline(50_000);
+
+        // First tick arrives 5 seconds late at 09:15:05 with 65,000 cumulative volume traded
+        m.updateTick(1510.0, 65_000, 100_000, 20_000);
+
+        // Window volume must include the 15,000 shares traded between 09:15:00 and 09:15:05
+        assertEquals(15_000, m.getWindowVolume(), "Volume traded before first tick must be included when baseline is set");
+        assertEquals(1510.0, m.getVwap(), 0.001);
+    }
+
+    @Test
+    void testAggregateCandlesComputesTypicalPriceVwapAndWindowVolume() {
+        CandidateMetrics m = new CandidateMetrics("HDFCBANK", 1600.0, 1620.0, 8_000_000, 1.5);
+
+        // Aggregate 1-minute candle: Open=1605, High=1615, Low=1600, Close=1610, Vol=100,000
+        // Typical Price = (1615 + 1600 + 1610) / 3 = 4825 / 3 = 1608.3333
+        m.aggregateCandle(1605.0, 1615.0, 1600.0, 1610.0, 100_000);
+
+        assertEquals(100_000, m.getWindowVolume());
+        assertEquals(1605.0, m.getOpenPrice());
+        assertEquals(1600.0, m.getLow15());
+        assertEquals(1615.0, m.getHigh15());
+        assertEquals(1610.0, m.getLtp());
+        assertEquals(1608.333, m.getVwap(), 0.01);
+    }
+
+    @Test
+    void testExchangeVwapOverridesTickApproximation() {
+        CandidateMetrics m = new CandidateMetrics("SBIN", 800.0, 810.0, 15_000_000, 2.2);
+
+        // Official NSE exchange ATP is 806.45, while tick LTP is 808.0
+        m.updateTick(808.0, 200_000, 500_000, 100_000, 806.45, true);
+
+        assertEquals(806.45, m.getVwap(), 0.001, "Official exchange ATP must take precedence over tick approximation");
+        assertEquals(806.45, m.getSnapshot().vwap(), 0.001);
+    }
 }

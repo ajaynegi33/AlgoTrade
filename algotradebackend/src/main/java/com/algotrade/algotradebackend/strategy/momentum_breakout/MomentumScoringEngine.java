@@ -54,8 +54,8 @@ public class MomentumScoringEngine {
         int totalScore = rvolScore + vwapScore + depthScore + pdhScore;
 
         // Hard Eligibility Gate: Price must be strictly above VWAP and strictly breaking previous day high
-        boolean passesGates = passesHardGates(s);
-        String status = (passesGates && totalScore >= 75) ? "QUALIFIED" : "DISQUALIFIED";
+        boolean eligible = passesHardGates(s);
+        String status = (eligible && totalScore >= 75) ? "QUALIFIED" : "DISQUALIFIED";
 
         return new ScoredCandidate(
             0, // Rank to be populated after sorting
@@ -67,6 +67,7 @@ public class MomentumScoringEngine {
             depthScore,
             pdhScore,
             totalScore,
+            eligible,
             status
         );
     }
@@ -86,11 +87,14 @@ public class MomentumScoringEngine {
     }
 
     /**
-     * Ranks a list of scored candidates using the 4-level deterministic tie-breaker.
+     * Ranks a list of scored candidates using the 4-level deterministic tie-breaker,
+     * prioritizing eligible candidates first so that an ineligible stock with a higher score
+     * cannot block a valid candidate.
      */
     public List<ScoredCandidate> rankCandidates(List<ScoredCandidate> rawList) {
         Comparator<ScoredCandidate> comparator = Comparator
-            .comparingInt(ScoredCandidate::totalScore).reversed()
+            .comparing(ScoredCandidate::eligible).reversed() // Eligible candidates ranked above ineligible
+            .thenComparing(Comparator.comparingInt(ScoredCandidate::totalScore).reversed())
             .thenComparing(Comparator.comparingInt(ScoredCandidate::rvolScore).reversed())
             .thenComparing(Comparator.comparingInt(ScoredCandidate::depthImbalanceScore).reversed())
             .thenComparing(ScoredCandidate::symbol); // Alphabetical deterministic tie-breaker
@@ -111,7 +115,7 @@ public class MomentumScoringEngine {
                 return new ScoredCandidate(
                     rank, c.symbol(), c.ltp(), c.gapPct(),
                     c.rvolScore(), c.vwapScore(), c.depthImbalanceScore(), c.pdhScore(),
-                    c.totalScore(), status
+                    c.totalScore(), c.eligible(), status
                 );
             })
             .toList();

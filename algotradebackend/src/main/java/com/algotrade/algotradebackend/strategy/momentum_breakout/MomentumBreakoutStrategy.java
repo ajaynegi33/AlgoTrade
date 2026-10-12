@@ -138,6 +138,23 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         m.setReferenceData(prevClose, pdh, avgVol, atrPct);
     }
 
+    /**
+     * Sets the official 09:15:00 window-boundary volume baseline to prevent excluding opening volume.
+     */
+    public void setOpeningVolumeBaseline(String symbol, long baselineVolume) {
+        CandidateMetrics m = metricsMap.computeIfAbsent(symbol, CandidateMetrics::new);
+        m.setOpeningVolumeBaseline(baselineVolume);
+    }
+
+    /**
+     * Ingests 1-minute aggregated candle data over the 09:15–09:30 observation window.
+     */
+    public void aggregateCandle(String symbol, double open, double high, double low, double close, long candleVolume) {
+        ensureSessionCurrent();
+        CandidateMetrics m = metricsMap.computeIfAbsent(symbol, CandidateMetrics::new);
+        m.aggregateCandle(open, high, low, close, candleVolume);
+    }
+
     @Override
     public String getStrategyId() {
         return "MOMENTUM_BREAKOUT";
@@ -152,13 +169,20 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
     public void onTick(String symbol, double ltp, long volume, long totalBuyQty, long totalSellQty) {
         LocalTime now = LocalTime.now(ZoneId.of("Asia/Kolkata"));
         boolean inObservationWindow = marketCalendarService.isObservationWindow();
-        onTick(symbol, ltp, volume, totalBuyQty, totalSellQty, inObservationWindow, now);
+        onTick(symbol, ltp, volume, totalBuyQty, totalSellQty, 0.0, inObservationWindow, now);
     }
 
     /**
      * Overload supporting deterministic time injection for testing and market simulations.
      */
     public void onTick(String symbol, double ltp, long volume, long totalBuyQty, long totalSellQty, boolean inObservationWindow, LocalTime currentTime) {
+        onTick(symbol, ltp, volume, totalBuyQty, totalSellQty, 0.0, inObservationWindow, currentTime);
+    }
+
+    /**
+     * Overload supporting official exchange-calculated VWAP (ATP) and deterministic time injection.
+     */
+    public void onTick(String symbol, double ltp, long volume, long totalBuyQty, long totalSellQty, double exchangeVwap, boolean inObservationWindow, LocalTime currentTime) {
         ensureSessionCurrent();
 
         // (i) Stop stock observation and tick processing during off-market hours
@@ -168,7 +192,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
 
         CandidateMetrics metrics = metricsMap.get(symbol);
         if (metrics != null) {
-            metrics.updateTick(ltp, volume, totalBuyQty, totalSellQty, inObservationWindow);
+            metrics.updateTick(ltp, volume, totalBuyQty, totalSellQty, exchangeVwap, inObservationWindow);
         }
 
         // Active Trade Trailing & Lifecycle Management

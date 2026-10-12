@@ -34,6 +34,7 @@ export interface ScoredCandidate {
   depthImbalanceScore: number;
   pdhScore: number;
   totalScore: number;
+  eligible?: boolean;
   status: string;
 }
 

@@ -64,12 +64,27 @@ public class MomentumScoringEngineTest {
 
         ScoredCandidate score = engine.evaluate(candidate);
         assertEquals(80, score.totalScore());
+        assertFalse(score.eligible(), "Candidate without PDH breakout must have eligible=false");
         assertEquals("DISQUALIFIED", score.status());
         assertFalse(score.isQualified(), "Candidate with score 80 must be disqualified if no PDH breakout occurs");
 
-        // Verify ranking does not mark it as SELECTED FOR TRADE
-        List<ScoredCandidate> ranked = engine.rankCandidates(List.of(score));
-        assertEquals("DISQUALIFIED", ranked.get(0).status());
-        assertFalse(ranked.get(0).isQualified());
+        // Verify that an eligible candidate with lower score (75) is prioritized over an ineligible candidate with higher score (80)
+        CandidateMetrics valid75 = new CandidateMetrics("VALID75", 100.0, 102.0, 10_000_000, 2.0);
+        valid75.updateTick(103.0, 100_000, 2_000_000, 500_000);
+        valid75.updateTick(103.0, 2_500_000, 2_000_000, 500_000); // RVOL ~2.4 (20 pts), VWAP 103 (VD 0% -> 0 pts), Depth (25 pts), PDH 103>102 (20 pts)
+        valid75.updateTick(103.5, 3_100_000, 2_000_000, 500_000); // RVOL 30, VD 0.48% (25 pts), PDH 20 -> qualified
+        ScoredCandidate validScore = engine.evaluate(valid75);
+        assertTrue(validScore.eligible());
+        assertTrue(validScore.isQualified());
+
+        List<ScoredCandidate> ranked = engine.rankCandidates(List.of(score, validScore));
+        // Valid candidate must be rank 1 despite score comparison
+        assertEquals("VALID75", ranked.get(0).symbol());
+        assertEquals("SELECTED FOR TRADE", ranked.get(0).status());
+        assertTrue(ranked.get(0).isQualified());
+
+        assertEquals("NOBREAKOUT", ranked.get(1).symbol());
+        assertEquals("DISQUALIFIED", ranked.get(1).status());
+        assertFalse(ranked.get(1).isQualified());
     }
 }
