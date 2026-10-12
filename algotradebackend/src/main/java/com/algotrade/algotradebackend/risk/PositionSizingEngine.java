@@ -46,25 +46,47 @@ public class PositionSizingEngine {
     private int maxDailyTrades;
 
     private final PaperTradeRepository paperTradeRepository;
+    private final java.util.concurrent.atomic.AtomicInteger liveTradesToday = new java.util.concurrent.atomic.AtomicInteger(0);
+    private volatile java.time.LocalDate lastTradeDate;
 
     public PositionSizingEngine(PaperTradeRepository paperTradeRepository) {
         this.paperTradeRepository = paperTradeRepository;
     }
 
     /**
+     * Records a live or paper trade dispatch for the current trading day.
+     */
+    public void recordTradeDispatched() {
+        resetLiveTradesIfNewDay();
+        liveTradesToday.incrementAndGet();
+    }
+
+    private void resetLiveTradesIfNewDay() {
+        java.time.LocalDate today = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Kolkata"));
+        if (lastTradeDate == null || !lastTradeDate.equals(today)) {
+            lastTradeDate = today;
+            liveTradesToday.set(0);
+        }
+    }
+
+    /**
      * Determines whether the system is authorized to trade today based on the 1-trade-per-day rule.
+     * Enforces circuit-breaker across BOTH live broker dispatches and paper executions.
      * 
      * @return true if trades taken today < maxDailyTrades (1)
      */
     public boolean canTradeToday() {
+        resetLiveTradesIfNewDay();
         // Calculate start and end of today's session in IST
         ZoneId istZone = ZoneId.of("Asia/Kolkata");
         Instant startOfDay = LocalDate.now(istZone).atStartOfDay(istZone).toInstant();
         Instant endOfDay = startOfDay.plusSeconds(86400);
 
-        long tradesToday = paperTradeRepository.countByEntryTimeBetween(startOfDay, endOfDay);
-        if (tradesToday >= maxDailyTrades) {
-            log.warn("DAILY TRADE LIMIT REACHED: Executed {}/{} trades today. Standing down.", tradesToday, maxDailyTrades);
+        long paperTrades = paperTradeRepository.countByEntryTimeBetween(startOfDay, endOfDay);
+        long totalTrades = paperTrades + liveTradesToday.get();
+        if (totalTrades >= maxDailyTrades) {
+            log.warn("DAILY TRADE LIMIT REACHED: Executed {}/{} trades today (Paper: {}, Live: {}). Standing down.",
+                totalTrades, maxDailyTrades, paperTrades, liveTradesToday.get());
             return false;
         }
         return true;

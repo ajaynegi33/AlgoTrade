@@ -386,6 +386,7 @@ public class ZerodhaLiveGateway implements BrokerGateway {
             }
         } catch (Throwable e) {
             log.error("Failed to query Zerodha live positions: {}", e.getMessage());
+            throw new RuntimeException("Failed to query Zerodha live positions: " + e.getMessage(), e);
         }
         return Optional.empty();
     }

@@ -75,9 +75,13 @@ public class CandidateMetrics {
 
     /**
      * Aggregates 1-minute candle data over the 09:15–09:30 observation window.
-     * Accurately accumulates traded volume and trade-weighted VWAP using Typical Price ((H + L + C) / 3).
+     * Guards against double-counting if live tick stream is already actively accumulating this session.
      */
     public synchronized void aggregateCandle(double open, double high, double low, double close, long candleVolume) {
+        if (sumVolume > 0 && accumulatedCandleVolume == 0) {
+            // Tick stream is already active and authoritative; avoid double counting candle volume
+            return;
+        }
         if (openPrice == 0.0) {
             this.openPrice = open;
         }
@@ -130,17 +134,19 @@ public class CandidateMetrics {
     /**
      * Ingests a live tick update with official exchange-calculated VWAP (ATP) and observation window gating.
      * When inObservationWindow is false, only real-time LTP and order-book depth are updated;
-     * 15-minute range (low15, high15, window volume, VWAP) remain locked to the 09:15–09:30 window.
+     * 15-minute range (low15, high15, window volume, VWAP) remain strictly locked to the 09:15–09:30 window.
      */
     public synchronized void updateTick(double price, long volume, long buyQty, long sellQty, double tickExchangeVwap, boolean inObservationWindow) {
         this.ltp = price;
         this.totalBuyQty = buyQty;
         this.totalSellQty = sellQty;
-        if (tickExchangeVwap > 0) {
-            this.exchangeVwap = tickExchangeVwap;
-        }
 
         if (inObservationWindow) {
+            // Strictly freeze exchangeVwap at the end of the 09:15–09:30 observation window
+            if (tickExchangeVwap > 0) {
+                this.exchangeVwap = tickExchangeVwap;
+            }
+
             if (openPrice == 0.0) {
                 this.openPrice = price;
             }

@@ -202,4 +202,72 @@ public class MomentumBreakoutStrategyLifecycleTest {
         assertEquals(TradeLifecycleState.FLAT, strategy.getLifecycleState());
         assertNull(strategy.getActiveSymbol());
     }
+
+    @Test
+    void testSquareOffReconcilesPartialFillAfterCancellingPendingEntry() {
+        strategy.updateReferenceData("RELIANCE", 1000.0, 1010.0, 10_000_000, 2.5);
+        strategy.onTick("RELIANCE", 1005.0, 100_000, 2_000_000, 500_000);
+        strategy.onTick("RELIANCE", 1015.0, 3_000_000, 2_000_000, 500_000);
+        strategy.onTick("RELIANCE", 1020.0, 3_100_000, 2_000_000, 500_000);
+
+        when(positionSizingEngine.canTradeToday()).thenReturn(true);
+        when(positionSizingEngine.calculateQuantity(eq("RELIANCE"), anyDouble(), anyDouble(), any())).thenReturn(10);
+        when(mockGateway.placeOrder(eq("RELIANCE"), eq("BUY"), anyInt(), anyDouble(), anyDouble(), eq("LIMIT")))
+            .thenReturn(new TradeOrder("ORD-BUY-1", "RELIANCE", "BUY", 10, 1020.0, 0.0, "LIMIT", "SUBMITTED", ExecutionMode.PAPER, Instant.now()));
+
+        when(mockGateway.getOpenPosition()).thenReturn(Optional.empty());
+        strategy.evaluate0930();
+        assertEquals(TradeLifecycleState.PENDING_ENTRY, strategy.getLifecycleState());
+
+        // At 15:05, entry order had partially filled 4 shares!
+        Position partialPos = new Position("RELIANCE", 4, 1020.0, 1022.0, 1004.95, 1004.95, 1022.0, Instant.now(), ExecutionMode.PAPER);
+        when(mockGateway.getOpenPosition())
+            .thenReturn(Optional.of(partialPos))  // Found partial position during square-off reconciliation
+            .thenReturn(Optional.empty());        // Flat after limit exit
+
+        when(mockGateway.placeOrder(eq("RELIANCE"), eq("SELL"), eq(4), anyDouble(), eq(0.0), eq("LIMIT")))
+            .thenReturn(new TradeOrder("ORD-EXIT-1", "RELIANCE", "SELL", 4, 1021.0, 0.0, "LIMIT", "FILLED", ExecutionMode.PAPER, Instant.now()));
+
+        strategy.executeSquareOff();
+
+        // Must cancel the resting unfilled entry order portion
+        verify(mockGateway, times(1)).cancelOrder("ORD-BUY-1");
+        // Must immediately liquidate the 4 filled shares!
+        verify(mockGateway, times(1)).placeOrder(eq("RELIANCE"), eq("SELL"), eq(4), anyDouble(), eq(0.0), eq("LIMIT"));
+        assertEquals(TradeLifecycleState.FLAT, strategy.getLifecycleState());
+    }
+
+    @Test
+    void testFailedStopPlacementRetriesOnNextTickWithoutLeavingPositionUnprotected() {
+        strategy.updateReferenceData("RELIANCE", 1000.0, 1010.0, 10_000_000, 2.5);
+        strategy.onTick("RELIANCE", 1005.0, 100_000, 2_000_000, 500_000);
+        strategy.onTick("RELIANCE", 1015.0, 3_000_000, 2_000_000, 500_000);
+        strategy.onTick("RELIANCE", 1020.0, 3_100_000, 2_000_000, 500_000);
+
+        when(positionSizingEngine.canTradeToday()).thenReturn(true);
+        when(positionSizingEngine.calculateQuantity(eq("RELIANCE"), anyDouble(), anyDouble(), any())).thenReturn(10);
+        when(mockGateway.placeOrder(eq("RELIANCE"), eq("BUY"), anyInt(), anyDouble(), anyDouble(), eq("LIMIT")))
+            .thenReturn(new TradeOrder("ORD-BUY-1", "RELIANCE", "BUY", 10, 1020.0, 0.0, "LIMIT", "SUBMITTED", ExecutionMode.PAPER, Instant.now()));
+        when(mockGateway.getOpenPosition()).thenReturn(Optional.empty());
+
+        strategy.evaluate0930();
+        assertEquals(TradeLifecycleState.PENDING_ENTRY, strategy.getLifecycleState());
+
+        Position filledPos = new Position("RELIANCE", 10, 1020.0, 1021.0, 1004.95, 1004.95, 1021.0, Instant.now(), ExecutionMode.PAPER);
+        when(mockGateway.getOpenPosition()).thenReturn(Optional.of(filledPos));
+
+        // First attempt to place stop-loss fails due to transient broker error
+        when(mockGateway.placeOrder(eq("RELIANCE"), eq("SELL"), eq(10), anyDouble(), anyDouble(), eq("SL")))
+            .thenThrow(new RuntimeException("Broker Network Spike"))
+            .thenReturn(new TradeOrder("ORD-SL-1", "RELIANCE", "SELL", 10, 1002.9, 1004.95, "SL", "TRIGGER PENDING", ExecutionMode.PAPER, Instant.now()));
+
+        // Tick 1 arrives: stop placement throws, so state remains PENDING_ENTRY (not blindly ACTIVE_POSITION)
+        strategy.onTick("RELIANCE", 1021.0, 3_200_000, 2_000_000, 500_000);
+        assertEquals(TradeLifecycleState.PENDING_ENTRY, strategy.getLifecycleState(), "State must remain PENDING_ENTRY if SL placement fails");
+
+        // Tick 2 arrives: retries placing stop-loss, succeeds, now transitions to ACTIVE_POSITION
+        strategy.onTick("RELIANCE", 1022.0, 3_250_000, 2_000_000, 500_000);
+        assertEquals(TradeLifecycleState.ACTIVE_POSITION, strategy.getLifecycleState(), "State must transition to ACTIVE_POSITION once SL is armed");
+        verify(mockGateway, times(2)).placeOrder(eq("RELIANCE"), eq("SELL"), eq(10), anyDouble(), anyDouble(), eq("SL"));
+    }
 }
