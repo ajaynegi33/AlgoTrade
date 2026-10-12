@@ -1,0 +1,126 @@
+package com.algotrade.algotradebackend.strategy.momentum_breakout;
+
+import com.algotrade.algotradebackend.core.model.ScoredCandidate;
+import org.springframework.stereotype.Component;
+
+import java.util.Comparator;
+import java.util.List;
+
+/**
+ * Pure mathematical scoring engine for the Momentum Breakout Strategy.
+ * 
+ * <p>Implements the complete 100-point rubric with zero undefined bands:
+ * <ul>
+ *   <li><b>RVOL (Max 30 pts):</b> Relative opening volume expansion.</li>
+ *   <li><b>VWAP Distance (Max 25 pts):</b> Price above fair value without overextension.</li>
+ *   <li><b>Depth Imbalance (Max 25 pts):</b> Order-book buyers outnumbering sellers.</li>
+ *   <li><b>PDH Breakout & ATR (Max 20 pts):</b> Price above yesterday's high with sufficient daily volatility.</li>
+ * </ul>
+ * </p>
+ */
+@Component
+public class MomentumScoringEngine {
+
+    /**
+     * Evaluates a single candidate and outputs an immutable ScoredCandidate record.
+     */
+    public ScoredCandidate evaluate(CandidateMetrics m) {
+        // Metric 1: RVOL Score (Max 30)
+        // Expected opening 15-min volume is ~10% of total daily volume
+        double expectedOpeningVol = m.getAvgDailyVolume10Day() * 0.10;
+        double rvol = expectedOpeningVol > 0 ? (double) m.getWindowVolume() / expectedOpeningVol : 0.0;
+        int rvolScore = calculateRvolScore(rvol);
+
+        // Metric 2: VWAP Distance Score (Max 25)
+        double vwap = m.getVwap();
+        double ltp = m.getLtp();
+        int vwapScore = calculateVwapScore(ltp, vwap);
+
+        // Metric 3: Depth Imbalance Score (Max 25)
+        double di = m.getDepthImbalance();
+        int depthScore = calculateDepthScore(di);
+
+        // Metric 4: PDH Breakout & ATR Score (Max 20)
+        int pdhScore = calculatePdhScore(ltp, m.getPreviousDayHigh(), m.getAtrPct());
+
+        int totalScore = rvolScore + vwapScore + depthScore + pdhScore;
+        String status = totalScore >= 75 ? "QUALIFIED" : "DISQUALIFIED";
+
+        return new ScoredCandidate(
+            0, // Rank to be populated after sorting
+            m.getSymbol(),
+            ltp,
+            Math.round(m.getGapPct() * 100.0) / 100.0,
+            rvolScore,
+            vwapScore,
+            depthScore,
+            pdhScore,
+            totalScore,
+            status
+        );
+    }
+
+    /**
+     * Ranks a list of scored candidates using the 4-level deterministic tie-breaker.
+     */
+    public List<ScoredCandidate> rankCandidates(List<ScoredCandidate> rawList) {
+        Comparator<ScoredCandidate> comparator = Comparator
+            .comparingInt(ScoredCandidate::totalScore).reversed()
+            .thenComparing(Comparator.comparingInt(ScoredCandidate::rvolScore).reversed())
+            .thenComparing(Comparator.comparingInt(ScoredCandidate::depthImbalanceScore).reversed())
+            .thenComparing(ScoredCandidate::symbol); // Alphabetical deterministic tie-breaker
+
+        List<ScoredCandidate> sorted = rawList.stream()
+            .sorted(comparator)
+            .toList();
+
+        // Assign ranks (1 to N) and update top pick status
+        return java.util.stream.IntStream.range(0, sorted.size())
+            .mapToObj(i -> {
+                ScoredCandidate c = sorted.get(i);
+                int rank = i + 1;
+                String status = c.status();
+                if (c.isQualified()) {
+                    status = rank == 1 ? "SELECTED FOR TRADE" : "RUNNER UP";
+                }
+                return new ScoredCandidate(
+                    rank, c.symbol(), c.ltp(), c.gapPct(),
+                    c.rvolScore(), c.vwapScore(), c.depthImbalanceScore(), c.pdhScore(),
+                    c.totalScore(), status
+                );
+            })
+            .toList();
+    }
+
+    private int calculateRvolScore(double rvol) {
+        if (rvol >= 3.00) return 30;
+        if (rvol >= 2.00) return 20;
+        if (rvol >= 1.50) return 10;
+        return 0;
+    }
+
+    private int calculateVwapScore(double ltp, double vwap) {
+        // Hard Gate: Price must be above VWAP
+        if (ltp <= vwap || vwap <= 0) return 0;
+
+        double vdPct = ((ltp - vwap) / vwap) * 100.0;
+        if (vdPct >= 0.30 && vdPct <= 1.80) return 25; // Ideal expansion
+        if (vdPct > 0.00 && vdPct < 0.30) return 10;   // Weak expansion
+        if (vdPct > 1.80 && vdPct <= 2.20) return 10;  // Stretched
+        return 0; // Overextended (> 2.2%) mean-reversion trap
+    }
+
+    private int calculateDepthScore(double di) {
+        if (di >= 0.35) return 25;  // Buyers >= 2x Sellers
+        if (di >= 0.15) return 15;
+        if (di >= 0.00) return 5;
+        return 0; // Sellers dominate
+    }
+
+    private int calculatePdhScore(double ltp, double pdh, double atrPct) {
+        if (ltp > pdh && pdh > 0) {
+            return atrPct >= 1.80 ? 20 : 10;
+        }
+        return 0;
+    }
+}
