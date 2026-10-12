@@ -136,3 +136,72 @@ export interface EngineActivityEvent {
   metadata?: Record<string, any>;
 }
 
+export interface BacktestRequest {
+  startDate: string;
+  endDate: string;
+  initialCapital: number;
+  riskPerTradePct: number;
+  minScoreThreshold: number;
+  trailingSlPct: number;
+  slippagePct: number;
+}
+
+export interface BacktestTrade {
+  id: number;
+  date: string;
+  symbol: string;
+  score: number;
+  entryPrice: number;
+  exitPrice: number;
+  quantity: number;
+  entryTime: string;
+  exitTime: string;
+  exitReason: "INITIAL_SL" | "TRAILING_SL" | "MARKET_CLOSE_1515" | string;
+  grossPnL: number;
+  totalCharges: number;
+  netPnL: number;
+  returnPct: number;
+}
+
+export interface BacktestEquityPoint {
+  date: string;
+  capital: number;
+  grossPnL: number;
+  netPnL: number;
+  drawdownPct: number;
+}
+
+export interface BacktestSummary {
+  initialCapital: number;
+  finalCapital: number;
+  totalGrossPnL: number;
+  totalTaxes: number;
+  totalNetPnL: number;
+  totalReturnPct: number;
+  totalTrades: number;
+  winTrades: number;
+  lossTrades: number;
+  winRatePct: number;
+  profitFactor: number;
+  maxDrawdownPct: number;
+  maxDrawdownRupees: number;
+  maxConsecutiveLosses: number;
+  averageTradeNetPnL: number;
+  sharpeRatio: number;
+}
+
+export interface BacktestResult {
+  summary: BacktestSummary;
+  equityCurve: BacktestEquityPoint[];
+  trades: BacktestTrade[];
+}
+
+export interface BacktestPreset {
+  id: string;
+  label: string;
+  startDate: string;
+  endDate: string;
+  description: string;
+}
+
+
