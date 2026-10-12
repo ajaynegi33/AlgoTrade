@@ -286,6 +286,18 @@ public class ZerodhaLiveGateway implements BrokerGateway {
         return sessionActive;
     }
 
+    public KiteConnect getKiteConnect() {
+        return kiteConnect;
+    }
+
+    public String getAccessToken() {
+        return accessToken;
+    }
+
+    public String getApiKey() {
+        return apiKey;
+    }
+
     @Override
     public TradeOrder placeOrder(String symbol, String transactionType, int quantity, double price, double triggerPrice, String orderType) {
         if (!sessionActive) {

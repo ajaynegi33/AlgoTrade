@@ -270,4 +270,27 @@ public class MomentumBreakoutStrategyLifecycleTest {
         assertEquals(TradeLifecycleState.ACTIVE_POSITION, strategy.getLifecycleState(), "State must transition to ACTIVE_POSITION once SL is armed");
         verify(mockGateway, times(2)).placeOrder(eq("RELIANCE"), eq("SELL"), eq(10), anyDouble(), anyDouble(), eq("SL"));
     }
+
+    @Test
+    void testSessionResetWithCarriedOverPositionSetsDateWithoutLoop() {
+        Position openPos = new Position("INFY", 50, 1600.0, 1610.0, 1585.0, 1585.0, 1610.0, Instant.now(), ExecutionMode.PAPER);
+        when(mockGateway.getOpenPosition()).thenReturn(Optional.of(openPos));
+
+        // Call reset session
+        strategy.resetDailySession();
+
+        assertEquals(TradeLifecycleState.ACTIVE_POSITION, strategy.getLifecycleState());
+        assertEquals("INFY", strategy.getActiveSymbol());
+
+        // Now dispatch a tick for INFY. If lastSessionDate wasn't set, onTick would call ensureSessionCurrent()
+        // and invoke resetDailySession() again, wiping CandidateMetrics.
+        strategy.updateReferenceData("INFY", 1590.0, 1620.0, 5_000_000, 2.0);
+        strategy.onTick("INFY", 1612.0, 100_000, 500_000, 200_000);
+
+        // Verify high water mark is updated and active symbol remains INFY
+        assertEquals("INFY", strategy.getActiveSymbol());
+        assertEquals(1612.0, strategy.getStrategyHighWaterMark());
+        // Verify getOpenPosition was called during initial reset and during tick lifecycle management, but NOT in a reset loop
+        verify(mockGateway, atMost(3)).getOpenPosition();
+    }
 }

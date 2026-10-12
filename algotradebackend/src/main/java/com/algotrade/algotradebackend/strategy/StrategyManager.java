@@ -1,5 +1,6 @@
 package com.algotrade.algotradebackend.strategy;
 
+import com.algotrade.algotradebackend.broker.BrokerGatewayManager;
 import com.algotrade.algotradebackend.core.model.ScoredCandidate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,9 +22,11 @@ public class StrategyManager {
     private static final Logger log = LoggerFactory.getLogger(StrategyManager.class);
 
     private final Map<String, TradingStrategy> strategies = new ConcurrentHashMap<>();
+    private final BrokerGatewayManager brokerGatewayManager;
     private volatile String activeStrategyId;
 
-    public StrategyManager(List<TradingStrategy> strategyList) {
+    public StrategyManager(List<TradingStrategy> strategyList, BrokerGatewayManager brokerGatewayManager) {
+        this.brokerGatewayManager = brokerGatewayManager;
         for (TradingStrategy strategy : strategyList) {
             strategies.put(strategy.getStrategyId(), strategy);
             log.info("Registered Trading Strategy: [{}] - {}", strategy.getStrategyId(), strategy.getStrategyName());
@@ -54,6 +57,9 @@ public class StrategyManager {
         TradingStrategy strategy = getActiveStrategy();
         if (strategy != null) {
             strategy.onTick(symbol, ltp, volume, totalBuyQty, totalSellQty);
+        }
+        if (brokerGatewayManager != null && brokerGatewayManager.getPaperTradingGateway() != null) {
+            brokerGatewayManager.getPaperTradingGateway().onTick(symbol, ltp);
         }
     }
 

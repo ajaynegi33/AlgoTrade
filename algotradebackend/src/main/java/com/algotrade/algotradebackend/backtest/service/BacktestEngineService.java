@@ -31,13 +31,24 @@ public class BacktestEngineService {
 
     private final MomentumScoringEngine scoringEngine;
     private final HistoricalMarketDataService dataService;
+    private final com.algotrade.algotradebackend.core.service.MarketCalendarService marketCalendarService;
 
     public BacktestEngineService(
         MomentumScoringEngine scoringEngine,
         HistoricalMarketDataService dataService
     ) {
+        this(scoringEngine, dataService, new com.algotrade.algotradebackend.core.service.MarketCalendarService());
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public BacktestEngineService(
+        MomentumScoringEngine scoringEngine,
+        HistoricalMarketDataService dataService,
+        com.algotrade.algotradebackend.core.service.MarketCalendarService marketCalendarService
+    ) {
         this.scoringEngine = scoringEngine;
         this.dataService = dataService;
+        this.marketCalendarService = marketCalendarService;
     }
 
     public BacktestResult runBacktest(BacktestRequest req) {
@@ -66,8 +77,8 @@ public class BacktestEngineService {
         int tradeCounter = 1;
 
         for (LocalDate date = start; !date.isAfter(end); date = date.plusDays(1)) {
-            // Skip weekend sessions
-            if (date.getDayOfWeek() == DayOfWeek.SATURDAY || date.getDayOfWeek() == DayOfWeek.SUNDAY) {
+            // Skip non-trading sessions (weekends and official NSE holidays)
+            if (!marketCalendarService.isTradingDay(date)) {
                 continue;
             }
 

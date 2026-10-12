@@ -103,6 +103,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
     @Scheduled(cron = "0 0 9 * * MON-FRI", zone = "Asia/Kolkata")
     public synchronized void resetDailySession() {
         log.info("Resetting daily session for MomentumBreakoutStrategy...");
+        lastSessionDate = LocalDate.now(ZoneId.of("Asia/Kolkata"));
         for (CandidateMetrics m : metricsMap.values()) {
             m.resetSession();
         }
@@ -133,7 +134,6 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         plannedStopPrice = 0.0;
         currentArmedStopPrice = 0.0;
         plannedQuantity = 0;
-        lastSessionDate = LocalDate.now(ZoneId.of("Asia/Kolkata"));
         activityFeedService.record(
             "SYSTEM",
             "INFO",

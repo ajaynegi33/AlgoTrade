@@ -252,14 +252,19 @@ public class TradingDashboardController {
         }
     }
 
+    @org.springframework.beans.factory.annotation.Value("${algotrade.frontend-url:http://localhost:3000}")
+    private String frontendUrl;
+
+    public record AutoLoginRequest(String password, String totpSecret) {}
+
     /**
      * Headless Automated 2FA Login using TOTP.
      * Generates RFC 6238 TOTP, executes Zerodha web handshake, and sets active session.
      */
     @PostMapping("/zerodha/auto-login")
-    public ResponseEntity<Map<String, Object>> autoLoginZerodha(
-            @RequestParam(required = false) String password,
-            @RequestParam(required = false) String totpSecret) {
+    public ResponseEntity<Map<String, Object>> autoLoginZerodha(@RequestBody(required = false) AutoLoginRequest request) {
+        String password = request != null ? request.password() : null;
+        String totpSecret = request != null ? request.totpSecret() : null;
         try {
             var userData = brokerGatewayManager.getZerodhaLiveGateway().triggerAutoLogin(password, totpSecret);
             activityFeedService.record(
@@ -298,17 +303,18 @@ public class TradingDashboardController {
             @RequestParam(name = "request_token", required = false) String requestToken,
             @RequestParam(name = "status", required = false) String status,
             @RequestParam(name = "action", required = false) String action) {
+        String baseUrl = (frontendUrl != null && !frontendUrl.isBlank()) ? frontendUrl.replaceAll("/+$", "") : "http://localhost:3000";
         if (requestToken != null && !requestToken.isBlank()) {
             try {
                 brokerGatewayManager.getZerodhaLiveGateway().authenticateSession(requestToken);
-                return ResponseEntity.status(302).header("Location", "http://localhost:3000/?session=activated").build();
+                return ResponseEntity.status(302).header("Location", baseUrl + "/?session=activated").build();
             } catch (Throwable e) {
                 String errMsg = e.getMessage() != null ? e.getMessage() : "Authentication failed";
                 String encoded = java.net.URLEncoder.encode(errMsg, java.nio.charset.StandardCharsets.UTF_8);
-                return ResponseEntity.status(302).header("Location", "http://localhost:3000/?session=error&msg=" + encoded).build();
+                return ResponseEntity.status(302).header("Location", baseUrl + "/?session=error&msg=" + encoded).build();
             }
         }
-        return ResponseEntity.status(302).header("Location", "http://localhost:3000/?session=error&msg=No+request_token").build();
+        return ResponseEntity.status(302).header("Location", baseUrl + "/?session=error&msg=No+request_token").build();
     }
 
     /**

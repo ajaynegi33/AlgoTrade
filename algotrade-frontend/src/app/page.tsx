@@ -121,16 +121,13 @@ export default function Dashboard() {
     setAutoLoggingIn(true);
     setSessionAlert(null);
     try {
-      const params = new URLSearchParams();
-      if (password && password.trim()) {
-        params.append("password", password.trim());
-      }
-      if (totpSecret && totpSecret.trim()) {
-        params.append("totpSecret", totpSecret.trim());
-      }
-      const qs = params.toString();
-      const res = await fetch(`${BACKEND_URL}/api/dashboard/zerodha/auto-login${qs ? `?${qs}` : ""}`, {
-        method: "POST"
+      const res = await fetch(`${BACKEND_URL}/api/dashboard/zerodha/auto-login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          password: password && password.trim() ? password.trim() : undefined,
+          totpSecret: totpSecret && totpSecret.trim() ? totpSecret.trim() : undefined,
+        }),
       });
       const data = await res.json();
       if (res.ok && data.success) {

@@ -36,3 +36,12 @@ build/
 javakiteconnect-master
 
 algotradebackend/src/main/resources/application.yaml
+
+# Local database, credentials & session state
+.kite_session.json
+*.kite_session.json
+*.db
+*.db-journal
+algotradepaper.db
+algotradebackend/algotradepaper.db
+algotradebackend/.kite_session.json
