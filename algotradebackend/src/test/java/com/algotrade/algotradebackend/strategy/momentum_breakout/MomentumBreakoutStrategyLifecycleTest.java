@@ -12,6 +12,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -292,5 +293,22 @@ public class MomentumBreakoutStrategyLifecycleTest {
         assertEquals(1612.0, strategy.getStrategyHighWaterMark());
         // Verify getOpenPosition was called during initial reset and during tick lifecycle management, but NOT in a reset loop
         verify(mockGateway, atMost(3)).getOpenPosition();
+    }
+
+    @Test
+    void testSetPreMarketWatchlistFocusesStrategyPool() {
+        // Initially default watchlist has 10 symbols
+        assertEquals(10, strategy.getMetricsMap().size());
+
+        // Dynamic 09:12 scan provides top 3 shortlisted candidates
+        List<String> dynamicList = List.of("TCS", "ESCORTS", "ASHOKLEY");
+        strategy.setPreMarketWatchlist(dynamicList);
+
+        // Active metrics pool must now focus exclusively on the dynamic shortlisted candidates
+        assertEquals(3, strategy.getMetricsMap().size());
+        assertTrue(strategy.getMetricsMap().containsKey("TCS"));
+        assertTrue(strategy.getMetricsMap().containsKey("ESCORTS"));
+        assertTrue(strategy.getMetricsMap().containsKey("ASHOKLEY"));
+        assertFalse(strategy.getMetricsMap().containsKey("RELIANCE"));
     }
 }

@@ -7,6 +7,7 @@ import {
   AnalyticsData,
   ZerodhaSessionData,
 } from "@/components/types";
+import { useEngineWebSocket } from "@/hooks/useEngineWebSocket";
 import Header from "@/components/dashboard/Header";
 import OverviewTab from "@/components/dashboard/OverviewTab";
 import LeaderboardTab from "@/components/dashboard/LeaderboardTab";
@@ -14,16 +15,24 @@ import AnalyticsTab from "@/components/dashboard/AnalyticsTab";
 import StockExplorerTab from "@/components/explorer/StockExplorerTab";
 import DecisionFeedTerminal from "@/components/dashboard/DecisionFeedTerminal";
 import BacktestTab from "@/components/backtest/BacktestTab";
+import PreMarketScannerTab from "@/components/dashboard/PreMarketScannerTab";
 
 export default function Dashboard() {
-  const [activeTab, setActiveTab] = useState<"overview" | "leaderboard" | "analytics" | "explorer" | "decisions" | "backtest">("overview");
-  const [overview, setOverview] = useState<OverviewData | null>(null);
-  const [leaderboard, setLeaderboard] = useState<ScoredCandidate[]>([]);
+  const [activeTab, setActiveTab] = useState<"overview" | "leaderboard" | "scanner" | "analytics" | "explorer" | "decisions" | "backtest">("overview");
+  
+  // Real-time bidirectional WebSocket stream (0ms lag, zero HTTP polling)
+  const {
+    overview,
+    setOverview,
+    leaderboard,
+    recentDecisions,
+    connectionStatus,
+    lastUpdated,
+  } = useEngineWebSocket();
+
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
-  const [loading, setLoading] = useState(true);
   const [switchingMode, setSwitchingMode] = useState(false);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   // Zerodha Kite session state
   const [zerodhaSession, setZerodhaSession] = useState<ZerodhaSessionData | null>(null);
@@ -41,35 +50,16 @@ export default function Dashboard() {
 
   const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8080";
 
-  // Data fetcher connecting to the Java backend
-  const fetchData = async () => {
+  // Historical analytics fetcher (only called on mount or when switching to analytics tab)
+  const fetchAnalytics = async () => {
     try {
-      const [resOverview, resLeaderboard, resAnalytics] = await Promise.all([
-        fetch(`${BACKEND_URL}/api/dashboard/overview`).catch(() => null),
-        fetch(`${BACKEND_URL}/api/dashboard/leaderboard`).catch(() => null),
-        fetch(`${BACKEND_URL}/api/dashboard/analytics`).catch(() => null),
-      ]);
-
-      if (resOverview && resOverview.ok) {
-        const data = await resOverview.json();
-        setOverview(data);
-      }
-
-      if (resLeaderboard && resLeaderboard.ok) {
-        const data = await resLeaderboard.json();
-        setLeaderboard(data);
-      }
-
-      if (resAnalytics && resAnalytics.ok) {
-        const data = await resAnalytics.json();
+      const res = await fetch(`${BACKEND_URL}/api/dashboard/analytics`);
+      if (res.ok) {
+        const data = await res.json();
         setAnalytics(data);
       }
-
-      setLastUpdated(new Date());
     } catch (err) {
-      console.error("Dashboard fetch error:", err);
-    } finally {
-      setLoading(false);
+      console.error("Analytics fetch error:", err);
     }
   };
 
@@ -208,18 +198,20 @@ export default function Dashboard() {
     }
   }, []);
 
-  // Periodic polling for overview, leaderboard, analytics & Zerodha status
+  // Initial load for session and reference data (no periodic polling!)
   useEffect(() => {
-    fetchData();
+    fetchAnalytics();
     fetchZerodhaStatus();
     fetchLoginUrl();
     fetchPopularStocks();
-    const interval = setInterval(() => {
-      fetchData();
-      fetchZerodhaStatus();
-    }, 3000);
-    return () => clearInterval(interval);
   }, []);
+
+  // Refresh analytics metrics when user navigates to the analytics tab
+  useEffect(() => {
+    if (activeTab === "analytics") {
+      fetchAnalytics();
+    }
+  }, [activeTab]);
 
   const handleToggleMode = async () => {
     if (!overview) return;
@@ -229,9 +221,7 @@ export default function Dashboard() {
       const res = await fetch(`${BACKEND_URL}/api/dashboard/mode?mode=${nextMode}`, {
         method: "POST",
       });
-      if (res.ok) {
-        await fetchData();
-      } else {
+      if (!res.ok) {
         const err = await res.json();
         alert(err.error || "Cannot switch mode");
       }
@@ -249,7 +239,6 @@ export default function Dashboard() {
     }
     try {
       await fetch(`${BACKEND_URL}/api/dashboard/emergency-exit`, { method: "POST" });
-      fetchData();
     } catch (err) {
       alert("Failed to send emergency exit signal: " + err);
     }
@@ -257,10 +246,11 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-emerald-500 selection:text-black">
-      {/* Top Header Bar */}
+      {/* Top Header Bar with Live WebSocket Stream Badge */}
       <Header
         overview={overview}
         session={zerodhaSession}
+        wsStatus={connectionStatus}
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         onOpenModeModal={() => setShowConfirmModal(true)}
@@ -294,11 +284,11 @@ export default function Dashboard() {
         )}
 
         {/* Backend Disconnected Warning Banner */}
-        {!overview && !loading && (
+        {connectionStatus === "error" && !overview && (
           <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 flex items-center gap-3 text-amber-400 text-xs sm:text-sm">
             <span className="text-xl">⚠️</span>
             <div>
-              <p className="font-semibold text-white">Java Backend Offline ({BACKEND_URL})</p>
+              <p className="font-semibold text-white">Java Backend WebSocket Disconnected ({BACKEND_URL})</p>
               <p className="text-slate-400 mt-0.5">
                 Waiting for the Java trading engine to connect. All metrics, candidate scores, and trade logs reflect live backend data only.
               </p>
@@ -329,6 +319,19 @@ export default function Dashboard() {
             🏆 Top 10 Performers
             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">
               09:30
+            </span>
+          </button>
+          <button
+            onClick={() => setActiveTab("scanner")}
+            className={`px-4 py-2 rounded-lg font-medium whitespace-nowrap transition-all flex items-center gap-2 cursor-pointer ${
+              activeTab === "scanner"
+                ? "bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-950"
+                : "text-slate-400 hover:text-white hover:bg-slate-900"
+            }`}
+          >
+            🌅 09:12 Pre-Market
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800 text-amber-300 border border-amber-500/30 font-mono">
+              AUCTION
             </span>
           </button>
           <button
@@ -391,6 +394,9 @@ export default function Dashboard() {
           />
         )}
 
+        {/* Tab: Pre-Market Auction Scanner */}
+        {activeTab === "scanner" && <PreMarketScannerTab />}
+
         {/* Tab 3: Analytics */}
         {activeTab === "analytics" && <AnalyticsTab analytics={analytics} />}
 
@@ -408,10 +414,14 @@ export default function Dashboard() {
           />
         )}
 
-        {/* Tab 5: Live Engine Decisions Terminal Fullscreen */}
+        {/* Tab 5: Live Engine Decisions Terminal Fullscreen (Real-time WebSocket Stream) */}
         {activeTab === "decisions" && (
           <div className="flex flex-col gap-6 animate-fadeIn">
-            <DecisionFeedTerminal backendUrl={BACKEND_URL} />
+            <DecisionFeedTerminal
+              backendUrl={BACKEND_URL}
+              streamEvents={recentDecisions}
+              wsStatus={connectionStatus}
+            />
           </div>
         )}
 

@@ -9,6 +9,8 @@ import com.zerodhatech.kiteconnect.kitehttp.SessionExpiryHook;
 import com.zerodhatech.kiteconnect.kitehttp.exceptions.KiteException;
 import com.zerodhatech.kiteconnect.utils.Constants;
 import com.zerodhatech.models.Margin;
+import com.zerodhatech.models.MarginCalculationData;
+import com.zerodhatech.models.MarginCalculationParams;
 import com.zerodhatech.models.OrderParams;
 import com.zerodhatech.models.OrderResponse;
 import com.zerodhatech.models.Profile;
@@ -422,6 +424,29 @@ public class ZerodhaLiveGateway implements BrokerGateway {
 
     @Override
     public double calculateOrderMargin(String symbol, int quantity, double price) {
+        if (sessionActive && kiteConnect != null && quantity > 0 && price > 0) {
+            try {
+                MarginCalculationParams param = new MarginCalculationParams();
+                param.exchange = Constants.EXCHANGE_NSE;
+                param.tradingSymbol = symbol.replace("NSE:", "").trim();
+                param.transactionType = Constants.TRANSACTION_TYPE_BUY;
+                param.variety = Constants.VARIETY_REGULAR;
+                param.product = Constants.PRODUCT_MIS;
+                param.orderType = Constants.ORDER_TYPE_LIMIT;
+                param.quantity = quantity;
+                param.price = price;
+
+                List<MarginCalculationData> marginList = kiteConnect.getMarginCalculation(List.of(param));
+                if (marginList != null && !marginList.isEmpty() && marginList.get(0).total > 0) {
+                    double realMargin = marginList.get(0).total;
+                    log.info("KITE MARGIN CALCULATION for {} x {} @ ₹{}: Required Margin=₹{}, Leverage={}x",
+                        quantity, symbol, price, realMargin, marginList.get(0).leverage);
+                    return realMargin;
+                }
+            } catch (Throwable t) {
+                log.warn("Dynamic Kite margin query failed for {}: {}. Falling back to 20% estimate.", symbol, t.getMessage());
+            }
+        }
         // Fallback approximation of 20% margin for intraday equity if order margins API fails
         return (quantity * price) * 0.20;
     }

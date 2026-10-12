@@ -5,24 +5,45 @@ import { EngineActivityEvent } from "../types";
 
 interface DecisionFeedTerminalProps {
   backendUrl: string;
+  streamEvents?: EngineActivityEvent[];
+  wsStatus?: string;
 }
 
 type CategoryFilter = "ALL" | "ORDERS" | "STRATEGY" | "RISK" | "LIFECYCLE" | "SYSTEM";
 
-export default function DecisionFeedTerminal({ backendUrl }: DecisionFeedTerminalProps) {
-  const [events, setEvents] = useState<EngineActivityEvent[]>([]);
+export default function DecisionFeedTerminal({
+  backendUrl,
+  streamEvents,
+  wsStatus,
+}: DecisionFeedTerminalProps) {
+  const [events, setEvents] = useState<EngineActivityEvent[]>(streamEvents || []);
   const [isPaused, setIsPaused] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
   const [selectedFilter, setSelectedFilter] = useState<CategoryFilter>("ALL");
   const [expandedEventIds, setExpandedEventIds] = useState<Set<number>>(new Set());
   const [lastPollTime, setLastPollTime] = useState<Date | null>(null);
-  const [connectionStatus, setConnectionStatus] = useState<"connected" | "connecting" | "error">("connecting");
+  const [connectionStatus, setConnectionStatus] = useState<"connected" | "connecting" | "error">(
+    wsStatus === "connected" ? "connected" : "connecting"
+  );
 
   const terminalContainerRef = useRef<HTMLDivElement>(null);
   const maxEventIdRef = useRef<number>(0);
 
-  // Poll for telemetry events
+  // Sync incoming real-time WebSocket events if streaming is active
   useEffect(() => {
+    if (streamEvents && !isPaused) {
+      setEvents(streamEvents);
+      setConnectionStatus(
+        wsStatus === "connected" ? "connected" : wsStatus === "reconnecting" ? "connecting" : "error"
+      );
+      setLastPollTime(new Date());
+    }
+  }, [streamEvents, wsStatus, isPaused]);
+
+  // Fallback polling for telemetry events only when streamEvents is not provided
+  useEffect(() => {
+    if (streamEvents) return; // Completely decommission HTTP polling when WebSocket is active
+
     let isMounted = true;
 
     const pollEvents = async () => {
@@ -44,19 +65,16 @@ export default function DecisionFeedTerminal({ backendUrl }: DecisionFeedTermina
         setLastPollTime(new Date());
 
         if (Array.isArray(data) && data.length > 0) {
-          // Find newest ID among received items
           const incomingMaxId = Math.max(...data.map((e) => e.id));
           if (incomingMaxId > maxEventIdRef.current) {
             maxEventIdRef.current = incomingMaxId;
           }
 
           setEvents((prev) => {
-            // Deduplicate by ID
             const existingIds = new Set(prev.map((e) => e.id));
             const newUnique = data.filter((e) => !existingIds.has(e.id));
             if (newUnique.length === 0) return prev;
 
-            // Merge and keep sorted descending by ID, cap at 150 items in memory
             const merged = [...newUnique, ...prev]
               .sort((a, b) => b.id - a.id)
               .slice(0, 150);
@@ -68,15 +86,13 @@ export default function DecisionFeedTerminal({ backendUrl }: DecisionFeedTermina
       }
     };
 
-    // Initial fetch
     pollEvents();
-
     const interval = setInterval(pollEvents, 2000);
     return () => {
       isMounted = false;
       clearInterval(interval);
     };
-  }, [backendUrl, isPaused]);
+  }, [backendUrl, isPaused, streamEvents]);
 
   // Auto-scroll to top when new events arrive (since newest first)
   useEffect(() => {

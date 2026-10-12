@@ -5,8 +5,9 @@ import { OverviewData, ZerodhaSessionData } from "../types";
 interface HeaderProps {
   overview: OverviewData | null;
   session: ZerodhaSessionData | null;
-  activeTab: "overview" | "leaderboard" | "analytics" | "explorer" | "decisions" | "backtest";
-  setActiveTab: (tab: "overview" | "leaderboard" | "analytics" | "explorer" | "decisions" | "backtest") => void;
+  wsStatus?: "connected" | "connecting" | "reconnecting" | "disconnected" | "error";
+  activeTab: "overview" | "leaderboard" | "scanner" | "analytics" | "explorer" | "decisions" | "backtest";
+  setActiveTab: (tab: "overview" | "leaderboard" | "scanner" | "analytics" | "explorer" | "decisions" | "backtest") => void;
   onOpenModeModal: () => void;
   onEmergencyExit: () => void;
   onAutoLogin: () => Promise<void>;
@@ -16,6 +17,7 @@ interface HeaderProps {
 export default function Header({
   overview,
   session,
+  wsStatus = "connected",
   activeTab,
   setActiveTab,
   onOpenModeModal,
@@ -81,6 +83,39 @@ export default function Header({
               </button>
             )}
           </div>
+
+          {/* WebSocket Live Stream Badge */}
+          <span
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-medium border ${
+              wsStatus === "connected"
+                ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+                : wsStatus === "reconnecting"
+                ? "bg-amber-500/10 text-amber-300 border-amber-500/30 animate-pulse"
+                : "bg-rose-500/10 text-rose-400 border-rose-500/30"
+            }`}
+            title={
+              wsStatus === "connected"
+                ? "Live bidirectional WebSocket stream connected (0ms telemetry)"
+                : wsStatus === "reconnecting"
+                ? "Reconnecting to live WebSocket stream..."
+                : "WebSocket stream offline"
+            }
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                wsStatus === "connected"
+                  ? "bg-emerald-400 animate-pulse"
+                  : wsStatus === "reconnecting"
+                  ? "bg-amber-400 animate-ping"
+                  : "bg-rose-400"
+              }`}
+            ></span>
+            {wsStatus === "connected"
+              ? "Live WS"
+              : wsStatus === "reconnecting"
+              ? "Reconnecting"
+              : "WS Offline"}
+          </span>
 
           {/* Market Status Pill (Desktop) */}
           <span className="hidden sm:inline-block px-3 py-1 rounded-full text-xs font-semibold uppercase tracking-wider bg-slate-800/80 text-slate-300 border border-slate-700">

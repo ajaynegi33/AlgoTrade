@@ -29,10 +29,15 @@ public class EngineActivityFeedService {
     private final AtomicLong sequence = new AtomicLong(1);
     private final ConcurrentLinkedDeque<EngineActivityEvent> eventBuffer = new ConcurrentLinkedDeque<>();
     private final BrokerGatewayManager brokerGatewayManager;
+    private final ObjectProvider<com.algotrade.algotradebackend.websocket.LiveWebSocketBroadcastService> broadcastServiceProvider;
 
     @Autowired
-    public EngineActivityFeedService(ObjectProvider<BrokerGatewayManager> gatewayManagerProvider) {
+    public EngineActivityFeedService(
+        ObjectProvider<BrokerGatewayManager> gatewayManagerProvider,
+        ObjectProvider<com.algotrade.algotradebackend.websocket.LiveWebSocketBroadcastService> broadcastServiceProvider
+    ) {
         this.brokerGatewayManager = gatewayManagerProvider.getIfAvailable();
+        this.broadcastServiceProvider = broadcastServiceProvider;
         record(
             "SYSTEM",
             "INFO",
@@ -47,6 +52,7 @@ public class EngineActivityFeedService {
 
     public EngineActivityFeedService() {
         this.brokerGatewayManager = null;
+        this.broadcastServiceProvider = null;
         record(
             "SYSTEM",
             "INFO",
@@ -96,6 +102,19 @@ public class EngineActivityFeedService {
         // Evict oldest elements if exceeding maximum bounded capacity
         while (eventBuffer.size() > MAX_CAPACITY) {
             eventBuffer.pollFirst();
+        }
+
+        // Real-time broadcast to connected WebSocket clients
+        if (broadcastServiceProvider != null) {
+            try {
+                com.algotrade.algotradebackend.websocket.LiveWebSocketBroadcastService broadcastService = broadcastServiceProvider.getIfAvailable();
+                if (broadcastService != null) {
+                    broadcastService.broadcastDecisionEvent(event);
+                    if ("ORDER".equalsIgnoreCase(category) || "POSITION".equalsIgnoreCase(category) || "TRADE".equalsIgnoreCase(category)) {
+                        broadcastService.broadcastOverview();
+                    }
+                }
+            } catch (Throwable ignored) {}
         }
 
         // Mirror to console log
@@ -175,6 +194,10 @@ public class EngineActivityFeedService {
                     .limit(max)
                     .toList();
         }
+    }
+
+    public List<EngineActivityEvent> getRecentEvents(int limit) {
+        return getRecentEvents(null, limit);
     }
 
     public int getBufferSize() {

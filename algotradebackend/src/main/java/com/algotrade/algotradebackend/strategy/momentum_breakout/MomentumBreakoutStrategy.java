@@ -150,6 +150,30 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
     }
 
     /**
+     * Replaces the daily observation candidate watchlist with dynamically shortlisted pre-market candidates.
+     * Preserves active trade symbol if a trade is already open or pending.
+     */
+    public synchronized void setPreMarketWatchlist(List<String> symbols) {
+        if (symbols == null || symbols.isEmpty()) {
+            return;
+        }
+
+        CandidateMetrics activeMetrics = (activeSymbol != null) ? metricsMap.get(activeSymbol) : null;
+        metricsMap.clear();
+
+        if (activeMetrics != null && activeSymbol != null) {
+            metricsMap.put(activeSymbol, activeMetrics);
+        }
+
+        for (String sym : symbols) {
+            metricsMap.computeIfAbsent(sym, CandidateMetrics::new);
+        }
+
+        log.info("MomentumBreakoutStrategy watchlist focused to {} pre-market candidates: {}",
+            metricsMap.size(), metricsMap.keySet());
+    }
+
+    /**
      * Dynamically updates daily reference figures fetched from the broker market data API.
      */
     public void updateReferenceData(String symbol, double prevClose, double pdh, double avgVol, double atrPct) {

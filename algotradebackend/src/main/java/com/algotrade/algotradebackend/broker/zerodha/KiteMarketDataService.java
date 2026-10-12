@@ -199,11 +199,13 @@ public class KiteMarketDataService {
     /**
      * Resolves instrument tokens dynamically using KiteConnect getQuote API.
      */
-    public void resolveWatchlistTokens() {
+    public synchronized void resolveWatchlistTokens() {
         if (!liveGateway.isSessionActive()) return;
         try {
             KiteConnect client = liveGateway.getKiteConnect();
             Set<String> symbols = getWatchlistSymbols();
+            if (symbols == null || symbols.isEmpty()) return;
+
             String[] keys = symbols.stream().map(s -> "NSE:" + s).toArray(String[]::new);
             Map<String, Quote> quotes = client.getQuote(keys);
 
@@ -215,7 +217,15 @@ public class KiteMarketDataService {
                     symbolToTokenMap.put(cleanSym, q.instrumentToken);
                 }
             }
-            log.info("Resolved {} watchlist symbols to Kite instrument tokens.", symbolToTokenMap.size());
+            log.info("Resolved {} watchlist symbols to Kite instrument tokens: {}", symbolToTokenMap.size(), symbolToTokenMap.keySet());
+
+            // If KiteTicker is active and connected, update subscription to active tokens
+            if (kiteTicker != null && connected && !symbolToTokenMap.isEmpty()) {
+                ArrayList<Long> tokens = new ArrayList<>(symbolToTokenMap.values());
+                kiteTicker.subscribe(tokens);
+                kiteTicker.setMode(tokens, KiteTicker.modeFull);
+                log.info("Subscribed KiteTicker modeFull to {} dynamic tokens: {}", tokens.size(), tokens);
+            }
         } catch (Throwable t) {
             log.warn("Dynamic token resolution encountered error: {}. Using fallback mappings.", t.getMessage());
         }
