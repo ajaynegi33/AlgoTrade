@@ -100,6 +100,8 @@ export interface StockQuoteData {
   };
   lowerCircuitLimit?: number;
   upperCircuitLimit?: number;
+  pdh?: number;
+  pdl?: number;
   totalBuyQuantity?: number;
   totalSellQuantity?: number;
   buyDepthRatio?: number;
@@ -119,6 +121,7 @@ export interface StockChartPoint {
   low?: number;
   close?: number;
   volume?: number;
+  vwap?: number;
   rawDate?: string;
 }
 

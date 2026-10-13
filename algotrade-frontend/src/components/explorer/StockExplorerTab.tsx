@@ -549,6 +549,10 @@ export default function StockExplorerTab({
                 symbol={quote.symbol}
                 data={chartData}
                 prevClose={quote.ohlc?.close}
+                pdh={quote.pdh}
+                pdl={quote.pdl}
+                dayHigh={quote.ohlc?.high}
+                dayLow={quote.ohlc?.low}
                 currentPrice={quote.lastPrice}
                 loading={chartLoading}
                 selectedTimeframe={selectedTimeframe}
