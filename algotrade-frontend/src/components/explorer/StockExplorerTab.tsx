@@ -4,6 +4,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { StockQuoteData, StockChartPoint, ZerodhaSessionData } from "../types";
 import StockPriceChart from "./StockPriceChart";
 import MarketDepthWidget from "./MarketDepthWidget";
+import StockMetricsOverview from "./StockMetricsOverview";
 import ZerodhaAuthCard from "../auth/ZerodhaAuthCard";
 import { SkeletonStockExplorer } from "../common/Skeleton";
 import { TickUpdate } from "@/hooks/useEngineWebSocket";
@@ -191,12 +192,25 @@ export default function StockExplorerTab({
 
       const updatedOhlc = prevQuote.ohlc
         ? {
-            open: prevQuote.ohlc.open,
-            close: prevQuote.ohlc.close,
+            open: typeof tick.open === "number" && tick.open > 0 ? tick.open : prevQuote.ohlc.open,
+            close: typeof tick.close === "number" && tick.close > 0 ? tick.close : prevQuote.ohlc.close,
             high: tick.high ? Math.max(prevQuote.ohlc.high, tick.high) : prevQuote.ohlc.high,
             low: tick.low ? Math.min(prevQuote.ohlc.low, tick.low) : prevQuote.ohlc.low,
           }
         : undefined;
+
+      const updatedAveragePrice =
+        typeof tick.averagePrice === "number" && tick.averagePrice > 0
+          ? tick.averagePrice
+          : prevQuote.averagePrice;
+      const updatedLTQ =
+        typeof tick.lastTradedQuantity === "number" && tick.lastTradedQuantity > 0
+          ? tick.lastTradedQuantity
+          : prevQuote.lastTradedQuantity;
+      const updatedLTT =
+        tick.lastTradedTime && tick.lastTradedTime.trim() !== ""
+          ? tick.lastTradedTime
+          : prevQuote.lastTradedTime;
 
       const updatedTotalBuy =
         typeof tick.totalBuyQuantity === "number" && tick.totalBuyQuantity > 0
@@ -221,6 +235,9 @@ export default function StockExplorerTab({
         change: changeVal,
         changePct: changePctVal,
         volume: tick.volume || prevQuote.volume,
+        averagePrice: updatedAveragePrice,
+        lastTradedQuantity: updatedLTQ,
+        lastTradedTime: updatedLTT,
         ohlc: updatedOhlc,
         totalBuyQuantity: updatedTotalBuy,
         totalSellQuantity: updatedTotalSell,
@@ -511,61 +528,8 @@ export default function StockExplorerTab({
               />
             </div>
 
-            {/* Quick Metrics Grid */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4 mt-6">
-              <div className="bg-slate-950/60 rounded-xl p-3.5 border border-slate-800">
-                <p className="text-[11px] text-slate-400 uppercase font-mono">Open</p>
-                <p className="text-base sm:text-lg font-mono font-bold text-white mt-0.5">
-                  ₹{quote.ohlc?.open ? quote.ohlc.open.toFixed(2) : "--"}
-                </p>
-              </div>
-              <div className="bg-slate-950/60 rounded-xl p-3.5 border border-slate-800">
-                <p className="text-[11px] text-slate-400 uppercase font-mono">Day High</p>
-                <p className="text-base sm:text-lg font-mono font-bold text-emerald-400 mt-0.5">
-                  ₹{quote.ohlc?.high ? quote.ohlc.high.toFixed(2) : "--"}
-                </p>
-              </div>
-              <div className="bg-slate-950/60 rounded-xl p-3.5 border border-slate-800">
-                <p className="text-[11px] text-slate-400 uppercase font-mono">Day Low</p>
-                <p className="text-base sm:text-lg font-mono font-bold text-rose-400 mt-0.5">
-                  ₹{quote.ohlc?.low ? quote.ohlc.low.toFixed(2) : "--"}
-                </p>
-              </div>
-              <div className="bg-slate-950/60 rounded-xl p-3.5 border border-slate-800">
-                <p className="text-[11px] text-slate-400 uppercase font-mono">Previous Close</p>
-                <p className="text-base sm:text-lg font-mono font-bold text-amber-300 mt-0.5">
-                  ₹{quote.ohlc?.close ? quote.ohlc.close.toFixed(2) : "--"}
-                </p>
-              </div>
-            </div>
-
-            {/* Secondary Metrics */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4 mt-3">
-              <div className="bg-slate-950/40 rounded-xl p-3 border border-slate-800/80">
-                <p className="text-[11px] text-slate-400">Traded Volume</p>
-                <p className="text-sm sm:text-base font-mono font-semibold text-white mt-0.5">
-                  {quote.volume ? quote.volume.toLocaleString("en-IN") : "--"}
-                </p>
-              </div>
-              <div className="bg-slate-950/40 rounded-xl p-3 border border-slate-800/80">
-                <p className="text-[11px] text-slate-400">Average Traded Price (VWAP)</p>
-                <p className="text-sm sm:text-base font-mono font-semibold text-sky-400 mt-0.5">
-                  ₹{quote.averagePrice ? quote.averagePrice.toFixed(2) : "--"}
-                </p>
-              </div>
-              <div className="bg-slate-950/40 rounded-xl p-3 border border-slate-800/80">
-                <p className="text-[11px] text-slate-400">Lower Circuit</p>
-                <p className="text-sm sm:text-base font-mono font-semibold text-rose-400 mt-0.5">
-                  ₹{quote.lowerCircuitLimit ? quote.lowerCircuitLimit.toFixed(2) : "--"}
-                </p>
-              </div>
-              <div className="bg-slate-950/40 rounded-xl p-3 border border-slate-800/80">
-                <p className="text-[11px] text-slate-400">Upper Circuit</p>
-                <p className="text-sm sm:text-base font-mono font-semibold text-emerald-400 mt-0.5">
-                  ₹{quote.upperCircuitLimit ? quote.upperCircuitLimit.toFixed(2) : "--"}
-                </p>
-              </div>
-            </div>
+            {/* Comprehensive Market Metrics & Day's Range Thermometer */}
+            <StockMetricsOverview quote={quote} />
           </div>
 
           {/* Level-2 5-Level Market Depth (Bids & Offers) */}

@@ -18,6 +18,11 @@ export interface TickUpdate {
   changePct: number;
   high: number;
   low: number;
+  open?: number;
+  close?: number;
+  averagePrice?: number;
+  lastTradedQuantity?: number;
+  lastTradedTime?: string;
   time: number;
   totalBuyQuantity?: number;
   totalSellQuantity?: number;

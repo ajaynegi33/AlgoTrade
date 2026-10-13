@@ -115,6 +115,29 @@ public class LiveWebSocketBroadcastService {
         long totalSellQuantity,
         Map<String, Object> depth
     ) {
+        broadcastTick(symbol, ltp, volume, change, changePct, high, low, totalBuyQuantity, totalSellQuantity, depth, 0.0, 0.0, 0.0, 0, null);
+    }
+
+    /**
+     * Broadcasts comprehensive real-time price tick with full market metrics, depth, and timestamps.
+     */
+    public void broadcastTick(
+        String symbol,
+        double ltp,
+        long volume,
+        double change,
+        double changePct,
+        double high,
+        double low,
+        long totalBuyQuantity,
+        long totalSellQuantity,
+        Map<String, Object> depth,
+        double open,
+        double close,
+        double averagePrice,
+        int lastTradedQuantity,
+        String lastTradedTime
+    ) {
         Map<String, Object> tick = new LinkedHashMap<>();
         tick.put("symbol", symbol);
         tick.put("ltp", ltp);
@@ -123,6 +146,11 @@ public class LiveWebSocketBroadcastService {
         tick.put("changePct", changePct);
         tick.put("high", high);
         tick.put("low", low);
+        if (open > 0) tick.put("open", open);
+        if (close > 0) tick.put("close", close);
+        if (averagePrice > 0) tick.put("averagePrice", averagePrice);
+        if (lastTradedQuantity > 0) tick.put("lastTradedQuantity", lastTradedQuantity);
+        if (lastTradedTime != null && !lastTradedTime.isBlank()) tick.put("lastTradedTime", lastTradedTime);
         tick.put("totalBuyQuantity", totalBuyQuantity);
         tick.put("totalSellQuantity", totalSellQuantity);
         if (depth != null && !depth.isEmpty()) {

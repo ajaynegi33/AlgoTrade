@@ -320,6 +320,11 @@ public class KiteMarketDataService {
                 strategyManager.onTick(symbol, ltp, volume, buyQty, sellQty);
 
                 if (broadcastService != null) {
+                    double open = tick.getOpenPrice();
+                    double vwap = tick.getAverageTradePrice();
+                    int ltq = (int) tick.getLastTradedQuantity();
+                    String ltt = tick.getLastTradedTime() != null ? tick.getLastTradedTime().toString() : null;
+
                     broadcastService.broadcastTick(
                         symbol,
                         ltp,
@@ -330,7 +335,12 @@ public class KiteMarketDataService {
                         low,
                         buyQty,
                         sellQty,
-                        depthMap
+                        depthMap,
+                        open,
+                        prevClose,
+                        vwap,
+                        ltq,
+                        ltt
                     );
                 }
             }
