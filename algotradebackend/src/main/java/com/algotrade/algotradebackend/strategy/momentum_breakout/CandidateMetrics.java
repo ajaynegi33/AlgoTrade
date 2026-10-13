@@ -141,36 +141,35 @@ public class CandidateMetrics {
         this.totalBuyQty = buyQty;
         this.totalSellQty = sellQty;
 
-        if (inObservationWindow) {
-            // Strictly freeze exchangeVwap at the end of the 09:15–09:30 observation window
-            if (tickExchangeVwap > 0) {
-                this.exchangeVwap = tickExchangeVwap;
+        // Continuously update official exchange-calculated VWAP (ATP) whenever available
+        if (tickExchangeVwap > 0) {
+            this.exchangeVwap = tickExchangeVwap;
+        }
+
+        if (openPrice == 0.0) {
+            this.openPrice = price;
+        }
+
+        // Continuously track day's low and day's high
+        this.low15 = Math.min(this.low15, price);
+        this.high15 = Math.max(this.high15, price);
+
+        if (this.initialVolume == -1) {
+            // Baseline calibration: If reliable window boundary baseline is set, use it
+            this.initialVolume = (this.openingBaselineVolume >= 0) ? this.openingBaselineVolume : volume;
+            this.currentVolume = volume;
+            long openingDelta = Math.max(0, volume - this.initialVolume);
+            if (openingDelta > 0) {
+                this.sumPriceVolume += (price * openingDelta);
+                this.sumVolume += openingDelta;
             }
+        } else {
+            long incrementalVol = Math.max(0, volume - this.currentVolume);
+            this.currentVolume = volume;
 
-            if (openPrice == 0.0) {
-                this.openPrice = price;
-            }
-
-            this.low15 = Math.min(this.low15, price);
-            this.high15 = Math.max(this.high15, price);
-
-            if (this.initialVolume == -1) {
-                // Baseline calibration: If reliable window boundary baseline is set, use it
-                this.initialVolume = (this.openingBaselineVolume >= 0) ? this.openingBaselineVolume : volume;
-                this.currentVolume = volume;
-                long openingDelta = Math.max(0, volume - this.initialVolume);
-                if (openingDelta > 0) {
-                    this.sumPriceVolume += (price * openingDelta);
-                    this.sumVolume += openingDelta;
-                }
-            } else {
-                long incrementalVol = Math.max(0, volume - this.currentVolume);
-                this.currentVolume = volume;
-
-                if (incrementalVol > 0) {
-                    this.sumPriceVolume += (price * incrementalVol);
-                    this.sumVolume += incrementalVol;
-                }
+            if (incrementalVol > 0) {
+                this.sumPriceVolume += (price * incrementalVol);
+                this.sumVolume += incrementalVol;
             }
         }
     }

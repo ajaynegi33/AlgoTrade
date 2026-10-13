@@ -42,6 +42,20 @@ public interface TradingStrategy {
     void evaluate0930();
 
     /**
+     * Runs the continuous all-day intraday evaluation cycle across the universe.
+     */
+    default void evaluateContinuousCycle() {
+        evaluate0930();
+    }
+
+    /**
+     * Exposes the set of symbols already traded today.
+     */
+    default java.util.Set<String> getTradedSymbolsToday() {
+        return java.util.Collections.emptySet();
+    }
+
+    /**
      * Triggered at 15:05:00 PM IST for mandatory intraday square-off ahead of broker CAS cutoffs.
      */
     void executeSquareOff();

@@ -42,11 +42,15 @@ public class PositionSizingEngine {
     @Value("${algotrade.risk.max-stop-distance-pct:2.0}")
     private double maxStopDistancePct;
 
-    @Value("${algotrade.risk.max-daily-trades:1}")
+    @Value("${algotrade.risk.max-daily-trades:3}")
     private int maxDailyTrades;
+
+    @Value("${algotrade.risk.max-daily-losses:2}")
+    private int maxDailyLosses;
 
     private final PaperTradeRepository paperTradeRepository;
     private final java.util.concurrent.atomic.AtomicInteger liveTradesToday = new java.util.concurrent.atomic.AtomicInteger(0);
+    private final java.util.concurrent.atomic.AtomicInteger liveLossesToday = new java.util.concurrent.atomic.AtomicInteger(0);
     private volatile java.time.LocalDate lastTradeDate;
 
     public PositionSizingEngine(PaperTradeRepository paperTradeRepository) {
@@ -61,19 +65,26 @@ public class PositionSizingEngine {
         liveTradesToday.incrementAndGet();
     }
 
+    public void recordTradeLoss() {
+        resetLiveTradesIfNewDay();
+        liveLossesToday.incrementAndGet();
+    }
+
     private void resetLiveTradesIfNewDay() {
         java.time.LocalDate today = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Kolkata"));
         if (lastTradeDate == null || !lastTradeDate.equals(today)) {
             lastTradeDate = today;
             liveTradesToday.set(0);
+            liveLossesToday.set(0);
         }
     }
 
     /**
-     * Determines whether the system is authorized to trade today based on the 1-trade-per-day rule.
-     * Enforces circuit-breaker across BOTH live broker dispatches and paper executions.
+     * Determines whether the system is authorized to trade today based on:
+     * 1. Maximum total daily trades limit
+     * 2. Daily loss circuit-breaker (max 2 losses before emergency halt)
      * 
-     * @return true if trades taken today < maxDailyTrades (1)
+     * @return true if trades taken today < maxDailyTrades AND losses < maxDailyLosses
      */
     public boolean canTradeToday() {
         resetLiveTradesIfNewDay();
@@ -82,13 +93,26 @@ public class PositionSizingEngine {
         Instant startOfDay = LocalDate.now(istZone).atStartOfDay(istZone).toInstant();
         Instant endOfDay = startOfDay.plusSeconds(86400);
 
-        long paperTrades = paperTradeRepository.countByEntryTimeBetween(startOfDay, endOfDay);
+        var todayPaperTrades = paperTradeRepository.findByEntryTimeBetween(startOfDay, endOfDay);
+        long paperTrades = todayPaperTrades.size();
         long totalTrades = paperTrades + liveTradesToday.get();
         if (totalTrades >= maxDailyTrades) {
             log.warn("DAILY TRADE LIMIT REACHED: Executed {}/{} trades today (Paper: {}, Live: {}). Standing down.",
                 totalTrades, maxDailyTrades, paperTrades, liveTradesToday.get());
             return false;
         }
+
+        // Daily Loss Circuit Breaker
+        long paperLosses = todayPaperTrades.stream()
+            .filter(t -> t.getNetPnL() != null && t.getNetPnL() < 0)
+            .count();
+        long totalLosses = paperLosses + liveLossesToday.get();
+        if (totalLosses >= maxDailyLosses) {
+            log.warn("DAILY LOSS CIRCUIT BREAKER HIT: {}/{} losses incurred today (Paper: {}, Live: {}). Halting trading for capital preservation.",
+                totalLosses, maxDailyLosses, paperLosses, liveLossesToday.get());
+            return false;
+        }
+
         return true;
     }
 

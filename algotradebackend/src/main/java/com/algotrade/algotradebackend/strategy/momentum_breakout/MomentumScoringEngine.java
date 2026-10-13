@@ -25,7 +25,11 @@ public class MomentumScoringEngine {
      * Evaluates a single candidate from CandidateMetrics by extracting an atomic snapshot.
      */
     public ScoredCandidate evaluate(CandidateMetrics m) {
-        return evaluate(m.getSnapshot());
+        return evaluate(m.getSnapshot(), java.time.LocalTime.now(java.time.ZoneId.of("Asia/Kolkata")));
+    }
+
+    public ScoredCandidate evaluate(CandidateMetrics m, java.time.LocalTime currentTime) {
+        return evaluate(m.getSnapshot(), currentTime);
     }
 
     /**
@@ -34,9 +38,13 @@ public class MomentumScoringEngine {
      * independently of points awarded.
      */
     public ScoredCandidate evaluate(CandidateSnapshot s) {
-        // Metric 1: RVOL Score (Max 30)
-        double expectedOpeningVol = s.avgDailyVolume10Day() * 0.10;
-        double rvol = expectedOpeningVol > 0 ? (double) s.windowVolume() / expectedOpeningVol : 0.0;
+        return evaluate(s, java.time.LocalTime.now(java.time.ZoneId.of("Asia/Kolkata")));
+    }
+
+    public ScoredCandidate evaluate(CandidateSnapshot s, java.time.LocalTime currentTime) {
+        // Metric 1: Time-Normalized RVOL Score (Max 30)
+        double expectedVol = calculateExpectedCumulativeVolume(s.avgDailyVolume10Day(), currentTime);
+        double rvol = expectedVol > 0 ? (double) s.windowVolume() / expectedVol : 0.0;
         int rvolScore = calculateRvolScore(rvol);
 
         // Metric 2: VWAP Distance Score (Max 25)
@@ -48,8 +56,8 @@ public class MomentumScoringEngine {
         double di = s.depthImbalance();
         int depthScore = calculateDepthScore(di);
 
-        // Metric 4: PDH Breakout & ATR Score (Max 20)
-        int pdhScore = calculatePdhScore(ltp, s.previousDayHigh(), s.atrPct());
+        // Metric 4: PDH & HOD Breakout & ATR Score (Max 20)
+        int pdhScore = calculatePdhAndHodScore(ltp, s.previousDayHigh(), s.high15(), s.atrPct());
 
         int totalScore = rvolScore + vwapScore + depthScore + pdhScore;
 
@@ -146,7 +154,29 @@ public class MomentumScoringEngine {
         return 0; // Sellers dominate
     }
 
-    private int calculatePdhScore(double ltp, double pdh, double atrPct) {
+    public double calculateExpectedCumulativeVolume(double avgDailyVolume10Day, java.time.LocalTime time) {
+        if (avgDailyVolume10Day <= 0) return 0.0;
+        if (time == null || time.isBefore(java.time.LocalTime.of(9, 30))) {
+            return avgDailyVolume10Day * 0.10; // Opening 15-min baseline
+        }
+        // NSE Equities session: 09:15 to 15:30 = 375 trading minutes
+        int minutesElapsed = (time.getHour() * 60 + time.getMinute()) - (9 * 60 + 15);
+        double fraction = Math.min(1.0, Math.max(0.10, minutesElapsed / 375.0));
+        return avgDailyVolume10Day * fraction;
+    }
+
+    private int calculatePdhAndHodScore(double ltp, double pdh, double hod, double atrPct) {
+        if (ltp > pdh && pdh > 0) {
+            boolean isHodBreakout = hod > 0 && ltp >= hod * 0.998;
+            if (isHodBreakout && atrPct >= 1.80) return 20;
+            if (isHodBreakout || atrPct >= 1.80) return 15;
+            return 10;
+        }
+        return 0;
+    }
+
+    // Retain legacy method for testing backward compatibility
+    int calculatePdhScore(double ltp, double pdh, double atrPct) {
         if (ltp > pdh && pdh > 0) {
             return atrPct >= 1.80 ? 20 : 10;
         }

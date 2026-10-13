@@ -504,7 +504,7 @@ export default function StockExplorerTab({
                   onClick={() => {
                     setManualQty("");
                     if (quote.lastPrice) {
-                      setManualStopPrice((quote.lastPrice * 0.985).toFixed(2));
+                      setManualStopPrice((quote.lastPrice * 0.992).toFixed(2));
                     }
                     setManualEntryAlert(null);
                     setShowManualEntryModal(true);
@@ -633,7 +633,7 @@ export default function StockExplorerTab({
                 <div className="flex items-center justify-between text-xs mb-1.5">
                   <label className="text-slate-300 font-semibold">Quantity (Shares)</label>
                   <span className="text-slate-400 font-mono text-[11px]">
-                    Leave blank for Auto Risk Sizing (1.5% Risk + 5x Leverage)
+                    Leave blank for Auto Risk Sizing (2.0% Risk + 5x Leverage)
                   </span>
                 </div>
                 <input
@@ -651,7 +651,7 @@ export default function StockExplorerTab({
                 <div className="flex items-center justify-between text-xs mb-1.5">
                   <label className="text-slate-300 font-semibold">Initial Protective Stop Loss (₹)</label>
                   <span className="text-slate-400 font-mono text-[11px]">
-                    Default: 1.5% below market
+                    Default: 0.8% below market
                   </span>
                 </div>
                 <input

@@ -329,7 +329,7 @@ public class PreMarketScannerService {
     /**
      * Batch queries Kite quotes with non-blocking timeout handling.
      */
-    private Map<String, Quote> fetchQuotesWithTimeout(List<String> symbols) {
+    public Map<String, Quote> fetchQuotesWithTimeout(List<String> symbols) {
         if (!liveGateway.isSessionActive()) {
             log.info("Zerodha live gateway session is inactive. Scanner running in simulation mode.");
             return generateSimulatedPreOpenQuotes(symbols);
