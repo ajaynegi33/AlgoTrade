@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
-import { StockQuoteData, StockChartPoint, ZerodhaSessionData } from "../types";
+import { StockQuoteData, StockChartPoint, ZerodhaSessionData, ChartTimeframe, ChartType } from "../types";
 import StockPriceChart from "./StockPriceChart";
 import MarketDepthWidget from "./MarketDepthWidget";
 import StockMetricsOverview from "./StockMetricsOverview";
@@ -40,6 +40,8 @@ export default function StockExplorerTab({
   const [activeSymbol, setActiveSymbol] = useState("RELIANCE");
   const [quote, setQuote] = useState<StockQuoteData | null>(null);
   const [chartData, setChartData] = useState<StockChartPoint[]>([]);
+  const [selectedTimeframe, setSelectedTimeframe] = useState<ChartTimeframe>("1D");
+  const [chartType, setChartType] = useState<ChartType>("area");
   const [loading, setLoading] = useState(false);
   const [chartLoading, setChartLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -64,21 +66,22 @@ export default function StockExplorerTab({
   const activeSymbolRef = useRef(activeSymbol);
   activeSymbolRef.current = activeSymbol;
 
-  // Tracks the last symbol for which chart was loaded to avoid re-fetching on every poll
-  const lastChartSymbolRef = useRef<string>("");
+  // Tracks the last symbol and timeframe for which chart was loaded to avoid re-fetching on every poll
+  const lastChartKeyRef = useRef<string>("");
 
-  // Fetch chart data smoothly
-  const fetchChartData = async (clean: string, silent = false) => {
-    if (!silent && (chartData.length === 0 || lastChartSymbolRef.current !== clean)) {
+  // Fetch chart data smoothly with selected timeframe
+  const fetchChartData = async (clean: string, tf: ChartTimeframe = selectedTimeframe, silent = false) => {
+    const chartKey = `${clean}_${tf}`;
+    if (!silent && (chartData.length === 0 || lastChartKeyRef.current !== chartKey)) {
       setChartLoading(true);
     }
     try {
-      const res = await fetch(`${backendUrl}/api/dashboard/stock-chart?symbol=${encodeURIComponent(clean)}`);
+      const res = await fetch(`${backendUrl}/api/dashboard/stock-chart?symbol=${encodeURIComponent(clean)}&timeframe=${encodeURIComponent(tf)}`);
       if (res.ok) {
         const points: StockChartPoint[] = await res.json();
         if (Array.isArray(points)) {
           setChartData(points);
-          lastChartSymbolRef.current = clean;
+          lastChartKeyRef.current = chartKey;
         }
       }
     } catch (err) {
@@ -87,6 +90,14 @@ export default function StockExplorerTab({
       setChartLoading(false);
     }
   };
+
+  // Re-fetch chart data whenever the user toggles timeframe (1D, 1W, 1M, etc.)
+  useEffect(() => {
+    if (activeSymbol) {
+      const clean = activeSymbol.trim().toUpperCase().replace("NSE:", "");
+      fetchChartData(clean, selectedTimeframe, false);
+    }
+  }, [selectedTimeframe]);
 
   // Fetch quote & chart data with seamless in-place validation (no loader flashes)
   const fetchSymbolData = async (symbolToFetch: string, isSilent = false) => {
@@ -125,9 +136,10 @@ export default function StockExplorerTab({
           setError(null);
           setLastRefreshed(new Date());
 
-          // 2. Fetch chart data if symbol changed or not yet loaded
-          if (lastChartSymbolRef.current !== clean || chartData.length === 0) {
-            fetchChartData(clean, isSilent);
+          // 2. Fetch chart data if symbol/timeframe changed or not yet loaded
+          const chartKey = `${clean}_${selectedTimeframe}`;
+          if (lastChartKeyRef.current !== chartKey || chartData.length === 0) {
+            fetchChartData(clean, selectedTimeframe, isSilent);
           }
         }
       } else {
@@ -248,19 +260,33 @@ export default function StockExplorerTab({
 
     setLastRefreshed(new Date());
 
-    // Update intraday price trajectory smoothly without re-fetching HTTP endpoints
-    setChartData((prev) => {
-      if (!prev || prev.length === 0) return prev;
-      const lastPoint = prev[prev.length - 1];
-      const nowStr = new Date().toLocaleTimeString("en-IN", { hour12: false, hour: "2-digit", minute: "2-digit" });
+    // Update intraday price trajectory smoothly without re-fetching HTTP endpoints (only for 1D timeframe)
+    if (selectedTimeframe === "1D") {
+      setChartData((prev) => {
+        if (!prev || prev.length === 0) return prev;
+        const lastPoint = prev[prev.length - 1];
+        const nowStr = new Date().toLocaleTimeString("en-IN", { hour12: false, hour: "2-digit", minute: "2-digit" });
 
-      if (lastPoint.time === nowStr) {
-        return [...prev.slice(0, -1), { ...lastPoint, price: tick.ltp, volume: tick.volume }];
-      } else {
-        return [...prev, { time: nowStr, price: tick.ltp, volume: tick.volume }];
-      }
-    });
-  }, [latestTicks, activeSymbol, isLiveStreaming]);
+        const openVal = lastPoint.open ?? lastPoint.price;
+        const highVal = Math.max(lastPoint.high ?? lastPoint.price, tick.ltp);
+        const lowVal = Math.min(lastPoint.low ?? lastPoint.price, tick.ltp);
+        const closeVal = tick.ltp;
+
+        const nowIso = new Date().toISOString();
+        if (lastPoint.time === nowStr) {
+          return [
+            ...prev.slice(0, -1),
+            { ...lastPoint, rawDate: lastPoint.rawDate || nowIso, price: tick.ltp, high: highVal, low: lowVal, close: closeVal, volume: tick.volume },
+          ];
+        } else {
+          return [
+            ...prev,
+            { time: nowStr, rawDate: nowIso, price: tick.ltp, open: tick.ltp, high: tick.ltp, low: tick.ltp, close: tick.ltp, volume: tick.volume },
+          ];
+        }
+      });
+    }
+  }, [latestTicks, activeSymbol, isLiveStreaming, selectedTimeframe]);
 
   // Discretionary manual order dispatch
   const handleExecuteManualEntry = async () => {
@@ -517,7 +543,7 @@ export default function StockExplorerTab({
               </div>
             </div>
 
-            {/* Curvy Interactive Price Chart (Height increased, skeleton fallback, no flash) */}
+            {/* Curvy Interactive Price Chart with Multi-Timeframe and Candlestick Toggle */}
             <div className="mt-6">
               <StockPriceChart
                 symbol={quote.symbol}
@@ -525,6 +551,10 @@ export default function StockExplorerTab({
                 prevClose={quote.ohlc?.close}
                 currentPrice={quote.lastPrice}
                 loading={chartLoading}
+                selectedTimeframe={selectedTimeframe}
+                onTimeframeChange={setSelectedTimeframe}
+                chartType={chartType}
+                onChartTypeChange={setChartType}
               />
             </div>
 

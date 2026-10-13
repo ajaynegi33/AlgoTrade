@@ -114,8 +114,16 @@ export interface StockQuoteData {
 export interface StockChartPoint {
   time: string;
   price: number;
+  open?: number;
+  high?: number;
+  low?: number;
+  close?: number;
   volume?: number;
+  rawDate?: string;
 }
+
+export type ChartTimeframe = "1D" | "1W" | "1M" | "3M" | "6M" | "1Y" | "3Y" | "5Y" | "ALL";
+export type ChartType = "area" | "candle";
 
 export interface ZerodhaSessionData {
   active: boolean;

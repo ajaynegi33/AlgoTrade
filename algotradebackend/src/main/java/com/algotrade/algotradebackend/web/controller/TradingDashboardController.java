@@ -407,11 +407,15 @@ public class TradingDashboardController {
     }
 
     /**
-     * Time-series intraday price trajectory for curvy Recharts chart.
+     * Time-series historical price trajectory for curvy Recharts chart & candlesticks.
+     * Supports multi-timeframe intervals: 1D, 1W, 1M, 3M, 6M, 1Y, 3Y, 5Y, ALL.
      */
     @GetMapping("/stock-chart")
-    public ResponseEntity<List<Map<String, Object>>> getStockChart(@RequestParam(defaultValue = "RELIANCE") String symbol) {
-        return ResponseEntity.ok(brokerGatewayManager.getZerodhaLiveGateway().getStockChart(symbol));
+    public ResponseEntity<List<Map<String, Object>>> getStockChart(
+        @RequestParam(defaultValue = "RELIANCE") String symbol,
+        @RequestParam(defaultValue = "1D") String timeframe
+    ) {
+        return ResponseEntity.ok(brokerGatewayManager.getZerodhaLiveGateway().getStockChart(symbol, timeframe));
     }
 
     /**
