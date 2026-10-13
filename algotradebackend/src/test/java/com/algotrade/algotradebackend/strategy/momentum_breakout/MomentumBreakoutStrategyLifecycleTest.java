@@ -126,17 +126,51 @@ public class MomentumBreakoutStrategyLifecycleTest {
         java.time.LocalTime time1130 = java.time.LocalTime.of(11, 30);
         strategy.onTick("RELIANCE", 1050.0, 4_000_000, 2_000_000, 500_000, false, time1130);
 
-        // Trail stop is 2% below 1050 = 1050 * 0.98 = 1029.0
-        verify(mockGateway, atLeastOnce()).modifyOrder(eq("ORD-SL-1"), anyDouble(), eq(1029.0));
+        // Trail stop is 0.8% below 1050 = 1050 * (1 - 0.008) = 1041.60
+        verify(mockGateway, atLeastOnce()).modifyOrder(eq("ORD-SL-1"), anyDouble(), eq(1041.60));
         assertEquals(1050.0, strategy.getStrategyHighWaterMark(), "Strategy HWM must be 1050.0");
 
         // Price pulls back to 1035.0 at 11:45 AM.
         // Even if broker's getOpenPosition lastPrice is 1035, HWM must stay 1050.0!
-        Position pullbackPos = new Position("RELIANCE", 10, 1020.0, 1035.0, 1004.95, 1029.0, 1035.0, Instant.now(), ExecutionMode.PAPER);
+        Position pullbackPos = new Position("RELIANCE", 10, 1020.0, 1035.0, 1004.95, 1041.60, 1035.0, Instant.now(), ExecutionMode.PAPER);
         when(mockGateway.getOpenPosition()).thenReturn(Optional.of(pullbackPos));
 
         strategy.onTick("RELIANCE", 1035.0, 4_200_000, 2_000_000, 500_000, false, java.time.LocalTime.of(11, 45));
         assertEquals(1050.0, strategy.getStrategyHighWaterMark(), "HWM must NOT decrease on pullback!");
+    }
+
+    @Test
+    void testBreakevenLockTriggerAtOnePercentGain() {
+        // Setup active position at 1020.0 entry with 1004.95 initial stop
+        strategy.updateReferenceData("RELIANCE", 1000.0, 1010.0, 10_000_000, 2.5);
+        strategy.onTick("RELIANCE", 1005.0, 100_000, 2_000_000, 500_000);
+        strategy.onTick("RELIANCE", 1015.0, 3_000_000, 2_000_000, 500_000);
+        strategy.onTick("RELIANCE", 1020.0, 3_100_000, 2_000_000, 500_000);
+
+        when(positionSizingEngine.canTradeToday()).thenReturn(true);
+        when(positionSizingEngine.calculateQuantity(eq("RELIANCE"), anyDouble(), anyDouble(), any())).thenReturn(10);
+        when(mockGateway.placeOrder(eq("RELIANCE"), eq("BUY"), anyInt(), anyDouble(), anyDouble(), eq("LIMIT")))
+            .thenReturn(new TradeOrder("ORD-BUY-1", "RELIANCE", "BUY", 10, 1020.0, 0.0, "LIMIT", "FILLED", ExecutionMode.PAPER, Instant.now()));
+        when(mockGateway.placeOrder(eq("RELIANCE"), eq("SELL"), anyInt(), anyDouble(), anyDouble(), eq("SL")))
+            .thenReturn(new TradeOrder("ORD-SL-1", "RELIANCE", "SELL", 10, 1002.9, 1004.95, "SL", "TRIGGER PENDING", ExecutionMode.PAPER, Instant.now()));
+
+        Position initPos = new Position("RELIANCE", 10, 1020.0, 1020.0, 1004.95, 1004.95, 1020.0, Instant.now(), ExecutionMode.PAPER);
+        when(mockGateway.getOpenPosition())
+            .thenReturn(Optional.empty())
+            .thenReturn(Optional.of(initPos));
+
+        strategy.evaluate0930();
+        assertEquals(TradeLifecycleState.ACTIVE_POSITION, strategy.getLifecycleState());
+
+        // Price rises to 1031.0 (+1.08% gain) at 10:15 AM (Before 11:00 AM trailing window)
+        Position gainPos = new Position("RELIANCE", 10, 1020.0, 1031.0, 1004.95, 1004.95, 1031.0, Instant.now(), ExecutionMode.PAPER);
+        when(mockGateway.getOpenPosition()).thenReturn(Optional.of(gainPos));
+
+        java.time.LocalTime time1015 = java.time.LocalTime.of(10, 15);
+        strategy.onTick("RELIANCE", 1031.0, 3_500_000, 2_000_000, 500_000, false, time1015);
+
+        // Breakeven target = floorToTick(1020.0 * 1.0015) = 1021.50
+        verify(mockGateway, times(1)).modifyOrder(eq("ORD-SL-1"), anyDouble(), eq(1021.50));
     }
 
     @Test

@@ -182,7 +182,11 @@ public class BacktestEngineService {
 
                     // 2. Only if not stopped out, ratchet High-Water Mark and Trailing SL
                     highWaterMark = Math.max(highWaterMark, bar.high());
-                    if (bar.time().compareTo("11:00") >= 0) {
+                    if (highWaterMark >= entryPrice * 1.010) {
+                        double beSl = floorToTick(entryPrice * 1.0015);
+                        activeSl = Math.max(activeSl, beSl);
+                    }
+                    if (bar.time().compareTo("11:00") >= 0 || highWaterMark >= entryPrice * 1.015) {
                         double trailedSl = floorToTick(highWaterMark * (1.0 - req.trailingSlPct() / 100.0));
                         activeSl = Math.max(activeSl, trailedSl);
                     }
@@ -190,7 +194,11 @@ public class BacktestEngineService {
                     // Bearish bar (O -> H -> L -> C): High occurs BEFORE Low
                     // 1. Ratchet High-Water Mark and Trailing SL
                     highWaterMark = Math.max(highWaterMark, bar.high());
-                    if (bar.time().compareTo("11:00") >= 0) {
+                    if (highWaterMark >= entryPrice * 1.010) {
+                        double beSl = floorToTick(entryPrice * 1.0015);
+                        activeSl = Math.max(activeSl, beSl);
+                    }
+                    if (bar.time().compareTo("11:00") >= 0 || highWaterMark >= entryPrice * 1.015) {
                         double trailedSl = floorToTick(highWaterMark * (1.0 - req.trailingSlPct() / 100.0));
                         activeSl = Math.max(activeSl, trailedSl);
                     }

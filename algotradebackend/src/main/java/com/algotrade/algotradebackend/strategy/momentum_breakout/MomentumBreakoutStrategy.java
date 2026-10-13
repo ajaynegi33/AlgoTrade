@@ -11,6 +11,7 @@ import com.algotrade.algotradebackend.core.service.MarketCalendarService;
 import com.algotrade.algotradebackend.core.service.EngineActivityFeedService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -31,8 +32,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
  *   <li><b>09:30:00 AM:</b> Scores candidates via 100-pt rubric. Enforces hard eligibility gates (PDH breakout + VWAP).</li>
  *   <li><b>09:30:05 AM:</b> Sizes position using 3 constraints (min Q_risk, Q_margin, Q_exposure). Places entry limit.</li>
  *   <li><b>Entry Fill:</b> Once broker confirms fill, arms protective stop-loss for exact confirmed quantity.</li>
- *   <li><b>09:30–11:00 AM:</b> Phase 1 "Let it breathe" (retains initial structural stop at 15-min low).</li>
- *   <li><b>11:00–15:05 PM:</b> Phase 2 Trailing buffer (ratchets stop at 2% below persistent High-Water Mark).</li>
+ *   <li><b>09:30–11:00 AM:</b> Phase 1 "Let it breathe" (retains initial structural stop at 15-min low, unless +1.0% breakeven triggers).</li>
+ *   <li><b>11:00–15:05 PM:</b> Phase 2 Dynamic trailing buffer (ratchets stop 0.8% below persistent High-Water Mark).</li>
  *   <li><b>15:05:00 PM:</b> Phase 3 Mandatory square-off. Cancels pending entry/SL orders and exits position ahead of Zerodha CAS 15:12 cutoff.</li>
  * </ol>
  */
@@ -46,6 +47,15 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
     private final BrokerGatewayManager brokerGatewayManager;
     private final MarketCalendarService marketCalendarService;
     private final EngineActivityFeedService activityFeedService;
+
+    @Value("${algotrade.strategy.breakeven-trigger-pct:1.0}")
+    private double breakevenTriggerPct = 1.0;
+
+    @Value("${algotrade.strategy.breakeven-cost-buffer-pct:0.15}")
+    private double breakevenCostBufferPct = 0.15;
+
+    @Value("${algotrade.strategy.trailing-buffer-pct:0.8}")
+    private double trailingBufferPct = 0.8;
 
     private final ConcurrentHashMap<String, CandidateMetrics> metricsMap = new ConcurrentHashMap<>();
     private final CopyOnWriteArrayList<ScoredCandidate> latestTopCandidates = new CopyOnWriteArrayList<>();
@@ -61,6 +71,12 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
     private volatile double currentArmedStopPrice = 0.0;
     private volatile int plannedQuantity = 0;
     private volatile LocalDate lastSessionDate = null;
+
+    public void setTrailingParameters(double breakevenTriggerPct, double breakevenCostBufferPct, double trailingBufferPct) {
+        this.breakevenTriggerPct = breakevenTriggerPct;
+        this.breakevenCostBufferPct = breakevenCostBufferPct;
+        this.trailingBufferPct = trailingBufferPct;
+    }
 
     public MomentumBreakoutStrategy(
         MomentumScoringEngine scoringEngine,
@@ -311,27 +327,47 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                 // Update persistent high-water mark monotonically (never drops on pullbacks)
                 strategyHighWaterMark = Math.max(strategyHighWaterMark, ltp);
 
-                // Phase 2: Trailing Buffer active only after 11:00 AM IST
-                if (now.isAfter(LocalTime.of(11, 0)) && activeSlOrderId != null) {
-                    // Trail 2.0% below the highest price achieved since entry
-                    double targetTrailStop = floorToTick(strategyHighWaterMark * 0.980);
+                // Dynamic 2-Stage Breakeven & Progressive Trailing
+                if (activeSlOrderId != null) {
+                    double entryPrice = pos.entryPrice();
+                    double candidateStop = currentArmedStopPrice;
+                    String ratchetReason = null;
+
+                    // Stage 1: Breakeven Lock (+1.0% gain milestone)
+                    // Ratchet stop to entry + cost buffer (+0.15% covers all statutory taxes & Zerodha brokerage)
+                    if (strategyHighWaterMark >= entryPrice * (1.0 + breakevenTriggerPct / 100.0)) {
+                        double breakevenTarget = floorToTick(entryPrice * (1.0 + breakevenCostBufferPct / 100.0));
+                        if (breakevenTarget > candidateStop) {
+                            candidateStop = breakevenTarget;
+                            ratchetReason = "Breakeven Lock (+0.15% Regulatory Costs Covered)";
+                        }
+                    }
+
+                    // Stage 2: Progressive Trailing Buffer (Active after 11:00 AM IST or if gain >= 1.5%)
+                    if (now.isAfter(LocalTime.of(11, 0)) || strategyHighWaterMark >= entryPrice * 1.015) {
+                        double trailTarget = floorToTick(strategyHighWaterMark * (1.0 - trailingBufferPct / 100.0));
+                        if (trailTarget > candidateStop) {
+                            candidateStop = trailTarget;
+                            ratchetReason = "Trailing Stop Ratcheted (" + trailingBufferPct + "% Buffer)";
+                        }
+                    }
 
                     // Ratchet stop strictly upward if higher than current armed stop and above initial stop
-                    if (targetTrailStop > currentArmedStopPrice && targetTrailStop > plannedStopPrice) {
-                        double limitPrice = floorToTick(targetTrailStop * 0.998);
-                        log.info("RATCHETING TRAIL STOP for {}: Persistent HWM=₹{}, New Trigger=₹{}, Limit=₹{}",
-                            symbol, strategyHighWaterMark, targetTrailStop, limitPrice);
-                        gateway.modifyOrder(activeSlOrderId, limitPrice, targetTrailStop);
-                        currentArmedStopPrice = targetTrailStop; // Maintain local confirmed trigger to prevent repetitive modifications
+                    if (candidateStop > currentArmedStopPrice && candidateStop > plannedStopPrice) {
+                        double limitPrice = floorToTick(candidateStop * 0.998);
+                        log.info("RATCHETING STOP for {}: Persistent HWM=₹{}, New Trigger=₹{}, Limit=₹{}, Reason={}",
+                            symbol, strategyHighWaterMark, candidateStop, limitPrice, ratchetReason);
+                        gateway.modifyOrder(activeSlOrderId, limitPrice, candidateStop);
+                        currentArmedStopPrice = candidateStop; // Maintain local confirmed trigger to prevent repetitive modifications
                         activityFeedService.record(
                             "ORDERS",
                             "SUCCESS",
                             gateway.getExecutionMode().name(),
                             activeTradeId,
-                            "Trailing Stop Ratcheted",
-                            "Persistent HWM updated to ₹" + strategyHighWaterMark + ". Trailing stop raised to ₹" + targetTrailStop + " (Limit: ₹" + limitPrice + ")",
+                            ratchetReason != null ? ratchetReason : "Trailing Stop Ratcheted",
+                            "Persistent HWM updated to ₹" + strategyHighWaterMark + ". Stop raised to ₹" + candidateStop + " (Limit: ₹" + limitPrice + ")",
                             symbol,
-                            Map.of("highWaterMark", strategyHighWaterMark, "triggerPrice", targetTrailStop, "limitPrice", limitPrice)
+                            Map.of("highWaterMark", strategyHighWaterMark, "triggerPrice", candidateStop, "limitPrice", limitPrice)
                         );
                     }
                 }
