@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useRef, useEffect } from "react";
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -226,16 +226,6 @@ function CandlestickBar(props: CandlestickBarProps) {
         rx={1}
         filter={glowFilter}
       />
-      {/* Real-time Breathing Beacon Pulse on Forming Candle tip */}
-      {isLive && (
-        <g className="pointer-events-none">
-          <circle cx={centerX} cy={yClose} r={3} fill={color} />
-          <circle cx={centerX} cy={yClose} r={6} fill="none" stroke={color} strokeWidth={1.5} opacity={0.75}>
-            <animate attributeName="r" values="3;10;3" dur="2s" repeatCount="indefinite" />
-            <animate attributeName="opacity" values="0.85;0.05;0.85" dur="2s" repeatCount="indefinite" />
-          </circle>
-        </g>
-      )}
     </g>
   );
 }
@@ -369,6 +359,17 @@ export default function StockPriceChart({
   } | null>(null);
   const [hoveredInfoKey, setHoveredInfoKey] = useState<string | null>(null);
 
+  // Real-time tick direction tracker for instant up/down color calibration
+  const prevPriceRef = useRef(currentPrice);
+  const [lastTickDir, setLastTickDir] = useState<"up" | "down" | null>(null);
+
+  useEffect(() => {
+    if (currentPrice > 0 && prevPriceRef.current > 0 && currentPrice !== prevPriceRef.current) {
+      setLastTickDir(currentPrice > prevPriceRef.current ? "up" : "down");
+      prevPriceRef.current = currentPrice;
+    }
+  }, [currentPrice]);
+
   // 1. Calculate Cumulative VWAP across intraday session (only for 1D)
   // MUST be called before any early returns to strictly satisfy React Rules of Hooks
   const enrichedData = useMemo(() => {
@@ -377,11 +378,17 @@ export default function StockPriceChart({
     let cumVal = 0;
     let cumVol = 0;
 
-    return data.map((d) => {
+    return data.map((d, index) => {
+      const isLast = index === data.length - 1;
+      const isLiveActive = selectedTimeframe === "1D" && currentPrice > 0 && isLast;
+
       const open = d.open ?? d.price;
-      const close = d.close ?? d.price;
-      const high = d.high ?? Math.max(open, close, d.price);
-      const low = d.low ?? Math.min(open, close, d.price);
+      const close = isLiveActive ? currentPrice : (d.close ?? d.price);
+      const price = isLiveActive ? currentPrice : d.price;
+      const rawHigh = d.high ?? Math.max(open, close, price);
+      const rawLow = d.low ?? Math.min(open, close, price);
+      const high = isLiveActive ? Math.max(rawHigh, currentPrice) : rawHigh;
+      const low = isLiveActive ? Math.min(rawLow, currentPrice) : rawLow;
       const typicalPrice = (high + low + close) / 3;
       const vol = d.volume && d.volume > 0 ? d.volume : 0;
 
@@ -393,6 +400,7 @@ export default function StockPriceChart({
 
       return {
         ...d,
+        price,
         open,
         close,
         high,
@@ -400,7 +408,7 @@ export default function StockPriceChart({
         vwap: selectedTimeframe === "1D" ? vwap : undefined,
       };
     });
-  }, [data, selectedTimeframe]);
+  }, [data, selectedTimeframe, currentPrice]);
 
   // 2. Max Volume for bottom 20% secondary Y-axis scaling
   const maxVolume = useMemo(() => {
@@ -475,6 +483,10 @@ export default function StockPriceChart({
         allLows.push(pdl);
       }
     }
+  }
+  if (currentPrice > 0) {
+    allHighs.push(currentPrice);
+    allLows.push(currentPrice);
   }
   const periodHigh = Math.max(...allHighs);
   const periodLow = Math.min(...allLows);
@@ -709,7 +721,7 @@ export default function StockPriceChart({
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart
             data={enrichedData}
-            margin={{ top: 10, right: 10, left: -15, bottom: 0 }}
+            margin={{ top: 10, right: 14, left: -15, bottom: 0 }}
             style={{ outline: "none", userSelect: "none" }}
             onMouseMove={handleMouseMove}
             onMouseLeave={() => setCrosshairPos(null)}
@@ -963,20 +975,58 @@ export default function StockPriceChart({
               />
             )}
 
-            {/* Live Current Price Reference Line (Forming Market Level) */}
+            {/* Live Current Price Reference Line with Flush End-Aligned Badge */}
             {currentPrice > 0 && selectedTimeframe === "1D" && (
               <ReferenceLine
                 yAxisId="priceAxis"
                 y={currentPrice}
-                stroke={currentPrice >= baselinePrice ? "#10b981" : "#f43f5e"}
-                strokeDasharray="2 3"
-                strokeWidth={1.2}
-                label={{
-                  value: `₹${currentPrice.toFixed(2)} ● LIVE`,
-                  fill: currentPrice >= baselinePrice ? "#10b981" : "#f43f5e",
-                  fontSize: 10,
-                  fontWeight: "bold",
-                  position: "insideBottomRight",
+                shape={(lineProps: unknown) => {
+                  const props = lineProps as { x1?: number; x2?: number; y1?: number };
+                  const { x1, x2, y1 } = props;
+                  if (typeof x1 !== "number" || typeof x2 !== "number" || typeof y1 !== "number") {
+                    return <g />;
+                  }
+                  const lastPoint = enrichedData.length > 0 ? enrichedData[enrichedData.length - 1] : null;
+                  const prevPoint = enrichedData.length > 1 ? enrichedData[enrichedData.length - 2] : null;
+                  const candleOpen = lastPoint?.open ?? prevPoint?.close ?? prevPoint?.price ?? baselinePrice;
+
+                  // Active interval direction: green when bullish/up, red when bearish/down
+                  const isFormingUp = currentPrice !== candleOpen
+                    ? currentPrice > candleOpen
+                    : lastTickDir === "up" || (lastTickDir === null && currentPrice >= baselinePrice);
+
+                  const liveColor = isFormingUp ? "#10b981" : "#f43f5e";
+
+                  return (
+                    <g className="pointer-events-none">
+                      {/* Dotted horizontal tracking line spanning completely from left to right */}
+                      <line
+                        x1={x1}
+                        y1={y1}
+                        x2={x2}
+                        y2={y1}
+                        stroke={liveColor}
+                        strokeDasharray="2 3"
+                        strokeWidth={1.2}
+                        opacity={0.85}
+                      />
+                      {/* Live beacon dot with smooth heartbeat pulsing animation at the tip */}
+                      <g transform={`translate(${x2}, ${y1})`}>
+                        {/* Solid center dot */}
+                        <circle cx={0} cy={0} r={3.5} fill={liveColor} />
+                        {/* Outer pulsing ring with heartbeat rhythm */}
+                        <circle cx={0} cy={0} r={6.5} fill="none" stroke={liveColor} strokeWidth={1.5} opacity={0.85}>
+                          <animate attributeName="r" values="3.5;8.5;3.5" dur="1.8s" repeatCount="indefinite" />
+                          <animate attributeName="opacity" values="0.9;0.05;0.9" dur="1.8s" repeatCount="indefinite" />
+                        </circle>
+                        {/* Soft ambient glow halo */}
+                        <circle cx={0} cy={0} r={12} fill={liveColor} opacity={0.15}>
+                          <animate attributeName="r" values="4;12;4" dur="1.8s" repeatCount="indefinite" />
+                          <animate attributeName="opacity" values="0.25;0.0;0.25" dur="1.8s" repeatCount="indefinite" />
+                        </circle>
+                      </g>
+                    </g>
+                  );
                 }}
               />
             )}
