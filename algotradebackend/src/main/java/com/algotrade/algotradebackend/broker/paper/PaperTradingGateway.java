@@ -191,6 +191,12 @@ public class PaperTradingGateway implements BrokerGateway {
         );
         paperTradeRepository.save(entity);
 
+        // Update resting SL order in orders map to FILLED
+        orders.values().stream()
+            .filter(o -> o.symbol().equals(symbol) && "TRIGGER PENDING".equals(o.status()))
+            .findFirst()
+            .ifPresent(o -> orders.put(o.orderId(), o.withStatus("FILLED")));
+
         log.info("PAPER TRADE CLOSED: Gross PnL: ₹{}, Taxes: ₹{}, Net PnL: ₹{}, New Balance: ₹{}",
             charges.grossPnL(), charges.totalCharges(), charges.netPnL(), virtualCash.get());
     }
@@ -202,7 +208,9 @@ public class PaperTradingGateway implements BrokerGateway {
 
     @Override
     public double getAvailableCash() {
-        return virtualCash.get();
+        Position current = openPosition.get();
+        double lockedMargin = (current != null) ? calculateOrderMargin(current.symbol(), current.quantity(), current.entryPrice()) : 0.0;
+        return Math.max(0.0, virtualCash.get() - lockedMargin);
     }
 
     @Override

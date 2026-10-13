@@ -111,8 +111,9 @@ public class PreMarketScannerService {
             return;
         }
 
-        if (!marketCalendarService.isMarketOpen()) {
-            log.info("Exchange is closed today (Weekend/Holiday). Skipping 09:12:05 AM pre-market scan.");
+        LocalDate today = LocalDate.now(IST_ZONE);
+        if (!marketCalendarService.isTradingDay(today)) {
+            log.info("Exchange is closed today (Weekend/Holiday: {}). Skipping 09:12:05 AM pre-market scan.", today);
             return;
         }
 

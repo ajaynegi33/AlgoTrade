@@ -216,6 +216,21 @@ public class TradingDashboardController {
     }
 
     /**
+     * Triggers manual scoring evaluation of the active trading strategy on demand (e.g. for testing/dry-run).
+     */
+    @PostMapping("/strategy/evaluate")
+    public ResponseEntity<Map<String, Object>> evaluateStrategyManually() {
+        strategyManager.evaluate0930();
+        List<ScoredCandidate> candidates = strategyManager.getLatestTopCandidates();
+        return ResponseEntity.ok(Map.of(
+            "success", true,
+            "message", "Strategy scoring evaluation triggered successfully.",
+            "topCandidate", candidates.isEmpty() ? "NONE" : candidates.get(0),
+            "candidatesCount", candidates.size()
+        ));
+    }
+
+    /**
      * Returns the official Zerodha login URL to initiate morning session authentication.
      */
     @GetMapping("/zerodha/login-url")

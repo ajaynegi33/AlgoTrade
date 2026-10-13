@@ -255,7 +255,8 @@ public class KiteMarketDataService {
      */
     @Scheduled(cron = "0 5 9 * * MON-FRI", zone = "Asia/Kolkata")
     public void scheduledPreMarketSync() {
-        if (!marketCalendarService.isMarketOpen() && !liveGateway.isSessionActive()) {
+        java.time.LocalDate today = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Kolkata"));
+        if (!marketCalendarService.isTradingDay(today) || !liveGateway.isSessionActive()) {
             return;
         }
         log.info("=== RUNNING PRE-MARKET REFERENCE DATA SYNC (09:05 AM IST) ===");

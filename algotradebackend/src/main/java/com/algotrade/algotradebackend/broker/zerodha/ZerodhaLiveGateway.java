@@ -58,6 +58,9 @@ public class ZerodhaLiveGateway implements BrokerGateway {
     @Autowired
     private KiteAutoLoginService autoLoginService;
 
+    @Autowired(required = false)
+    private org.springframework.beans.factory.ObjectProvider<KiteMarketDataService> marketDataServiceProvider;
+
     @Value("${algotrade.zerodha.api-key:}")
     private String apiKey;
 
@@ -187,6 +190,7 @@ public class ZerodhaLiveGateway implements BrokerGateway {
                             Profile profile = kiteConnect.getProfile();
                             this.sessionActive = true;
                             log.info("RESTORED ACTIVE ZERODHA SESSION: User={} ({})", profile.userName, profile.userShortname != null ? profile.userShortname : userId);
+                            onSessionActivated();
                             return;
                         } catch (Throwable t) {
                             log.warn("Persisted Kite access token rejected by Zerodha (expired): {}", t.getMessage());
@@ -200,6 +204,18 @@ public class ZerodhaLiveGateway implements BrokerGateway {
             }
         } catch (Throwable e) {
             log.warn("Could not restore persisted Kite session: {}", e.getMessage());
+        }
+    }
+
+    private void onSessionActivated() {
+        if (marketDataServiceProvider != null && marketDataServiceProvider.getIfAvailable() != null) {
+            try {
+                KiteMarketDataService mds = marketDataServiceProvider.getIfAvailable();
+                mds.resolveWatchlistTokens();
+                mds.startLiveTicker();
+            } catch (Throwable t) {
+                log.warn("Could not start KiteTicker on session activation: {}", t.getMessage());
+            }
         }
     }
 
@@ -250,6 +266,7 @@ public class ZerodhaLiveGateway implements BrokerGateway {
         log.info("ZERODHA SESSION AUTHENTICATED: User={}, AccessToken Set Successfully", user.userName);
 
         persistDailySession(user.accessToken, user.publicToken, user.userId, user.userName, user.email);
+        onSessionActivated();
 
         Map<String, Object> userData = new LinkedHashMap<>();
         userData.put("userName", user.userName != null ? user.userName : "");
