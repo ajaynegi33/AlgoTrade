@@ -92,4 +92,19 @@ public class LiveWebSocketBroadcastService {
     public void broadcastScannerUpdate(Object scannerData) {
         broadcast("SCANNER_UPDATE", scannerData);
     }
+
+    /**
+     * Broadcasts real-time price tick for a symbol to active clients.
+     */
+    public void broadcastTick(String symbol, double ltp, long volume, double change, double changePct, double high, double low) {
+        Map<String, Object> tick = new LinkedHashMap<>();
+        tick.put("symbol", symbol);
+        tick.put("ltp", ltp);
+        tick.put("volume", volume);
+        tick.put("change", change);
+        tick.put("changePct", changePct);
+        tick.put("high", high);
+        tick.put("low", low);
+        broadcast("TICK_UPDATE", tick);
+    }
 }

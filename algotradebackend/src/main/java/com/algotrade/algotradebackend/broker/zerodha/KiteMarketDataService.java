@@ -51,6 +51,9 @@ public class KiteMarketDataService {
     private volatile KiteTicker kiteTicker = null;
     private volatile boolean connected = false;
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.algotrade.algotradebackend.websocket.LiveWebSocketBroadcastService broadcastService;
+
     // Default static tokens for high-liquidity NSE constituents (fallback if quote API is offline)
     private static final Map<String, Long> DEFAULT_NSE_TOKENS = Map.of(
         "RELIANCE", 738561L,
@@ -231,6 +234,42 @@ public class KiteMarketDataService {
         }
     }
 
+    /**
+     * Dynamically registers and subscribes a specific stock symbol to the live KiteTicker stream.
+     */
+    public synchronized void subscribeSymbol(String symbol) {
+        if (symbol == null || symbol.isBlank() || !liveGateway.isSessionActive()) return;
+        String cleanSym = symbol.trim().toUpperCase().replace("NSE:", "");
+        if (symbolToTokenMap.containsKey(cleanSym)) {
+            Long token = symbolToTokenMap.get(cleanSym);
+            if (kiteTicker != null && connected && token != null) {
+                ArrayList<Long> list = new ArrayList<>(List.of(token));
+                kiteTicker.subscribe(list);
+                kiteTicker.setMode(list, KiteTicker.modeFull);
+            }
+            return;
+        }
+
+        try {
+            KiteConnect client = liveGateway.getKiteConnect();
+            if (client == null) return;
+            Map<String, Quote> quotes = client.getQuote(new String[]{"NSE:" + cleanSym});
+            Quote q = (quotes != null) ? quotes.get("NSE:" + cleanSym) : null;
+            if (q != null && q.instrumentToken > 0) {
+                tokenToSymbolMap.put(q.instrumentToken, cleanSym);
+                symbolToTokenMap.put(cleanSym, q.instrumentToken);
+                if (kiteTicker != null && connected) {
+                    ArrayList<Long> list = new ArrayList<>(List.of(q.instrumentToken));
+                    kiteTicker.subscribe(list);
+                    kiteTicker.setMode(list, KiteTicker.modeFull);
+                    log.info("Dynamically subscribed KiteTicker to searched symbol: {} (token={})", cleanSym, q.instrumentToken);
+                }
+            }
+        } catch (Throwable t) {
+            log.warn("Failed to subscribe symbol {} to KiteTicker: {}", cleanSym, t.getMessage());
+        }
+    }
+
     private void handleIncomingTicks(List<Tick> ticks) {
         if (ticks == null || ticks.isEmpty()) return;
 
@@ -242,9 +281,26 @@ public class KiteMarketDataService {
             long volume = tick.getVolumeTradedToday();
             long buyQty = (long) tick.getTotalBuyQuantity();
             long sellQty = (long) tick.getTotalSellQuantity();
+            double changePct = tick.getChange();
+            double prevClose = tick.getClosePrice();
+            double change = prevClose > 0 ? (ltp - prevClose) : (ltp * (changePct / 100.0));
+            double high = tick.getHighPrice();
+            double low = tick.getLowPrice();
 
             if (ltp > 0) {
                 strategyManager.onTick(symbol, ltp, volume, buyQty, sellQty);
+
+                if (broadcastService != null) {
+                    broadcastService.broadcastTick(
+                        symbol,
+                        ltp,
+                        volume,
+                        Math.round(change * 100.0) / 100.0,
+                        Math.round(changePct * 100.0) / 100.0,
+                        high,
+                        low
+                    );
+                }
             }
         }
     }

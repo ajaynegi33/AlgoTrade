@@ -58,4 +58,15 @@ public interface TradingStrategy {
      * to be displayed on the Next.js frontend leaderboard.
      */
     List<ScoredCandidate> getLatestTopCandidates();
+
+    /**
+     * Executes a manual discretionary entry and hands over trade management to the strategy.
+     */
+    default java.util.Map<String, Object> executeManualEntry(String symbol, Integer quantity, Double customStopPrice) {
+        return executeManualEntry(symbol, quantity, customStopPrice, null);
+    }
+
+    default java.util.Map<String, Object> executeManualEntry(String symbol, Integer quantity, Double customStopPrice, Double entryPrice) {
+        throw new UnsupportedOperationException("Manual entry is not supported by " + getStrategyId());
+    }
 }

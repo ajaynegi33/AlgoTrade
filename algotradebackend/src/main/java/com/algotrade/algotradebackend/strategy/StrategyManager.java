@@ -85,4 +85,16 @@ public class StrategyManager {
         TradingStrategy strategy = getActiveStrategy();
         return strategy != null ? strategy.getLatestTopCandidates() : List.of();
     }
+
+    public java.util.Map<String, Object> executeManualEntry(String symbol, Integer quantity, Double customStopPrice) {
+        return executeManualEntry(symbol, quantity, customStopPrice, null);
+    }
+
+    public java.util.Map<String, Object> executeManualEntry(String symbol, Integer quantity, Double customStopPrice, Double entryPrice) {
+        TradingStrategy strategy = getActiveStrategy();
+        if (strategy == null) {
+            throw new IllegalStateException("No active trading strategy is currently configured.");
+        }
+        return strategy.executeManualEntry(symbol, quantity, customStopPrice, entryPrice);
+    }
 }

@@ -701,4 +701,117 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
     public String getActiveTradeId() {
         return activeTradeId;
     }
+
+    @Override
+    public synchronized Map<String, Object> executeManualEntry(String rawSymbol, Integer customQuantity, Double customStopPrice) {
+        return executeManualEntry(rawSymbol, customQuantity, customStopPrice, null);
+    }
+
+    @Override
+    public synchronized Map<String, Object> executeManualEntry(String rawSymbol, Integer customQuantity, Double customStopPrice, Double customEntryPrice) {
+        ensureSessionCurrent();
+        String symbol = rawSymbol.trim().toUpperCase().replace("NSE:", "");
+        BrokerGateway gateway = brokerGatewayManager.getActiveGateway();
+
+        // Safety Gate: Ensure no position is already open and engine is flat
+        if (gateway.getOpenPosition().isPresent() || lifecycleState != TradeLifecycleState.FLAT) {
+            throw new IllegalStateException("Cannot take manual entry: A trade position or order is already actively held!");
+        }
+
+        Map<String, Object> quote = gateway.getStockQuote(symbol);
+        double entryPrice = (quote != null && quote.get("lastPrice") instanceof Number)
+            ? ((Number) quote.get("lastPrice")).doubleValue()
+            : 0.0;
+
+        // Fallback to ZerodhaLiveGateway directly if active gateway returned 0.0
+        if (entryPrice <= 0.0) {
+            try {
+                Map<String, Object> liveQuote = brokerGatewayManager.getZerodhaLiveGateway().getStockQuote(symbol);
+                if (liveQuote != null && liveQuote.get("lastPrice") instanceof Number) {
+                    entryPrice = ((Number) liveQuote.get("lastPrice")).doubleValue();
+                }
+            } catch (Throwable ignored) {}
+        }
+
+        // Fallback to client-provided entry price (e.g. from UI modal) if still 0.0
+        if (entryPrice <= 0.0 && customEntryPrice != null && customEntryPrice > 0.0) {
+            entryPrice = customEntryPrice;
+        }
+
+        if (entryPrice <= 0.0) {
+            throw new IllegalArgumentException("Unable to fetch live execution price for symbol: " + symbol);
+        }
+
+        // Determine Stop Loss
+        double initialStop;
+        if (customStopPrice != null && customStopPrice > 0 && customStopPrice < entryPrice) {
+            initialStop = floorToTick(customStopPrice);
+        } else {
+            // Default 1.0% structural stop below entry
+            initialStop = floorToTick(entryPrice * 0.990);
+        }
+
+        // Determine Quantity
+        int quantity;
+        if (customQuantity != null && customQuantity > 0) {
+            quantity = customQuantity;
+        } else {
+            quantity = positionSizingEngine.calculateQuantity(symbol, entryPrice, initialStop, gateway);
+            if (quantity < 1) {
+                throw new IllegalStateException("Risk sizing calculated 0 shares for " + symbol + " (check margin / cash / stop distance)");
+            }
+        }
+
+        String tradeId = "MAN-" + LocalDate.now(ZoneId.of("Asia/Kolkata")) + "-" + symbol;
+        activeTradeId = tradeId;
+        activeSymbol = symbol;
+        plannedStopPrice = initialStop;
+        plannedQuantity = quantity;
+        lifecycleState = TradeLifecycleState.PENDING_ENTRY;
+
+        double marketableBuyLimit = ceilToTick(entryPrice * 1.0005);
+        log.info("DISPATCHING MANUAL ENTRY ORDER: BUY {} x {} @ Marketable Limit ₹{}", quantity, symbol, marketableBuyLimit);
+
+        TradeOrder buyOrder = gateway.placeOrder(symbol, "BUY", quantity, marketableBuyLimit, 0.0, "LIMIT");
+        activeEntryOrderId = buyOrder.orderId();
+        positionSizingEngine.recordTradeDispatched();
+
+        activityFeedService.record(
+            "ORDERS",
+            "SUCCESS",
+            gateway.getExecutionMode().name(),
+            activeTradeId,
+            "Manual Entry Dispatched",
+            "BUY " + quantity + " x " + symbol + " @ Marketable Limit ₹" + marketableBuyLimit + ". Handed over to Strategy Lifecycle.",
+            symbol,
+            Map.of("orderId", buyOrder.orderId(), "quantity", quantity, "limitPrice", marketableBuyLimit, "initialStop", initialStop)
+        );
+
+        // Immediate fill check (e.g. Paper Trading)
+        Optional<Position> immediatePos = gateway.getOpenPosition();
+        if (immediatePos.isPresent() && immediatePos.get().symbol().equals(symbol)) {
+            Position pos = immediatePos.get();
+            strategyHighWaterMark = Math.max(entryPrice, pos.currentPrice());
+            double slLimitPrice = floorToTick(initialStop * 0.998);
+            try {
+                TradeOrder slOrder = gateway.placeOrder(symbol, "SELL", pos.quantity(), slLimitPrice, initialStop, "SL");
+                activeSlOrderId = slOrder.orderId();
+                currentArmedStopPrice = initialStop;
+                lifecycleState = TradeLifecycleState.ACTIVE_POSITION;
+                log.info("PROTECTIVE SL ENGAGED FOR MANUAL TRADE: OrderId={}, Trigger=₹{}, Limit=₹{}", activeSlOrderId, initialStop, slLimitPrice);
+            } catch (Throwable t) {
+                log.warn("Immediate SL placement for manual trade failed: {}. Will retry on incoming tick stream.", t.getMessage());
+            }
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("success", true);
+        result.put("tradeId", tradeId);
+        result.put("symbol", symbol);
+        result.put("quantity", quantity);
+        result.put("entryPrice", entryPrice);
+        result.put("initialStop", initialStop);
+        result.put("executionMode", gateway.getExecutionMode().name());
+        return result;
+    }
 }

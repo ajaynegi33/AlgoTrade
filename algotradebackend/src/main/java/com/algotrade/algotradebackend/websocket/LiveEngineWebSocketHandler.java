@@ -86,12 +86,28 @@ public class LiveEngineWebSocketHandler extends TextWebSocketHandler {
         sendInitialSnapshot(session);
     }
 
+    @Autowired(required = false)
+    private ObjectProvider<com.algotrade.algotradebackend.broker.zerodha.KiteMarketDataService> kiteMarketDataProvider;
+
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) {
         String payload = message.getPayload().trim();
         if (payload.contains("PING") || payload.equalsIgnoreCase("ping")) {
             sendSafeMessage(session, "{\"type\":\"PONG\",\"timestamp\":\"" + Instant.now() + "\"}");
+            return;
         }
+
+        try {
+            com.google.gson.JsonObject json = com.google.gson.JsonParser.parseString(payload).getAsJsonObject();
+            if (json.has("action") && "SUBSCRIBE_SYMBOL".equalsIgnoreCase(json.get("action").getAsString())) {
+                if (json.has("symbol")) {
+                    String sym = json.get("symbol").getAsString();
+                    if (kiteMarketDataProvider != null && kiteMarketDataProvider.getIfAvailable() != null) {
+                        kiteMarketDataProvider.getIfAvailable().subscribeSymbol(sym);
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
     }
 
     @Override

@@ -37,6 +37,9 @@ public class PaperTradingGateway implements BrokerGateway {
     private final ConcurrentHashMap<String, TradeOrder> orders = new ConcurrentHashMap<>();
     private final AtomicReference<Double> virtualCash;
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private org.springframework.beans.factory.ObjectProvider<com.algotrade.algotradebackend.broker.zerodha.ZerodhaLiveGateway> zerodhaLiveGatewayProvider;
+
     public PaperTradingGateway(
         PaperTradeRepository paperTradeRepository,
         @Value("${algotrade.risk.capital:10000.00}") double initialCapital
@@ -226,6 +229,15 @@ public class PaperTradingGateway implements BrokerGateway {
 
     @Override
     public java.util.Map<String, Object> getStockQuote(String rawSymbol) {
+        if (zerodhaLiveGatewayProvider != null) {
+            var liveGateway = zerodhaLiveGatewayProvider.getIfAvailable();
+            if (liveGateway != null) {
+                java.util.Map<String, Object> liveQuote = liveGateway.getStockQuote(rawSymbol);
+                if (liveQuote != null && liveQuote.get("lastPrice") instanceof Number) {
+                    return liveQuote;
+                }
+            }
+        }
         String cleanSymbol = rawSymbol.trim().toUpperCase().replace("NSE:", "");
         java.util.Map<String, Object> result = new java.util.LinkedHashMap<>();
         result.put("symbol", cleanSymbol);

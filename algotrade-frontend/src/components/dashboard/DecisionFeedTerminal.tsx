@@ -449,7 +449,7 @@ export default function DecisionFeedTerminal({
           Showing {filteredEvents.length} of {events.length} events in memory (ring buffer: 200 max)
         </div>
         <div className="flex items-center gap-2">
-          <span>Polling: 2000ms</span>
+          <span>{streamEvents ? "⚡ WebSocket Active (0ms lag)" : "Polling: 2000ms"}</span>
           <span>•</span>
           <span className="text-emerald-400">Lock-free RAM</span>
         </div>

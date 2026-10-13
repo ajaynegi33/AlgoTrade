@@ -44,6 +44,9 @@ public class TradingDashboardController {
     private final MarketCalendarService marketCalendarService;
     private final EngineActivityFeedService activityFeedService;
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private org.springframework.beans.factory.ObjectProvider<com.algotrade.algotradebackend.broker.zerodha.KiteMarketDataService> kiteMarketDataProvider;
+
     public TradingDashboardController(
         BrokerGatewayManager brokerGatewayManager,
         StrategyManager strategyManager,
@@ -231,6 +234,65 @@ public class TradingDashboardController {
     }
 
     /**
+     * Discretionary Manual Entry: Initiates a buy order on any requested symbol
+     * and immediately transfers trade lifecycle custody to the strategy.
+     */
+    @PostMapping("/strategy/manual-entry")
+    public ResponseEntity<Map<String, Object>> executeManualEntry(
+        @RequestParam String symbol,
+        @RequestParam(required = false) Integer quantity,
+        @RequestParam(required = false) Double stopPrice,
+        @RequestParam(required = false) Double entryPrice
+    ) {
+        try {
+            var result = strategyManager.executeManualEntry(symbol, quantity, stopPrice, entryPrice);
+            return ResponseEntity.ok(result);
+        } catch (Throwable t) {
+            return ResponseEntity.badRequest().body(Map.of("success", false, "error", t.getMessage()));
+        }
+    }
+
+    /**
+     * Exports full trade journal as a downloadable RFC 4180 CSV file with paise-level tax breakdowns.
+     */
+    @GetMapping("/export-trades")
+    public ResponseEntity<String> exportTradeJournalCsv() {
+        List<com.algotrade.algotradebackend.persistence.entity.PaperTradeEntity> trades = paperTradeRepository.findAllByOrderByExitTimeDesc();
+        StringBuilder csv = new StringBuilder();
+        csv.append("Trade ID,Date,Symbol,Quantity,Buy Price,Sell Price,Gross PnL,Total Taxes,Net PnL,Brokerage,STT,Exchange Charges,SEBI,Stamp Duty,GST,Entry Time,Exit Time,Exit Reason\n");
+
+        for (var t : trades) {
+            String dateStr = t.getEntryTime() != null ? LocalDate.ofInstant(t.getEntryTime(), ZoneId.of("Asia/Kolkata")).toString() : "";
+            csv.append(String.format("%s,%s,%s,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%s,%s,%s\n",
+                t.getId() != null ? t.getId() : "",
+                dateStr,
+                t.getSymbol(),
+                t.getQuantity(),
+                t.getBuyPrice(),
+                t.getSellPrice(),
+                t.getGrossPnL(),
+                t.getTotalCharges(),
+                t.getNetPnL(),
+                t.getBrokerage(),
+                t.getStt(),
+                t.getExchangeCharges(),
+                t.getSebiCharges(),
+                t.getStampDuty(),
+                t.getGst(),
+                t.getEntryTime() != null ? t.getEntryTime().toString() : "",
+                t.getExitTime() != null ? t.getExitTime().toString() : "",
+                t.getExitReason() != null ? t.getExitReason() : ""
+            ));
+        }
+
+        String filename = "AlgoTrade_Journal_" + LocalDate.now(ZoneId.of("Asia/Kolkata")) + ".csv";
+        return ResponseEntity.ok()
+            .header(org.springframework.http.HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
+            .header(org.springframework.http.HttpHeaders.CONTENT_TYPE, "text/csv; charset=UTF-8")
+            .body(csv.toString());
+    }
+
+    /**
      * Returns the official Zerodha login URL to initiate morning session authentication.
      */
     @GetMapping("/zerodha/login-url")
@@ -338,6 +400,9 @@ public class TradingDashboardController {
      */
     @GetMapping("/stock-quote")
     public ResponseEntity<Map<String, Object>> getStockQuote(@RequestParam(defaultValue = "RELIANCE") String symbol) {
+        if (kiteMarketDataProvider != null && kiteMarketDataProvider.getIfAvailable() != null) {
+            kiteMarketDataProvider.getIfAvailable().subscribeSymbol(symbol);
+        }
         return ResponseEntity.ok(brokerGatewayManager.getZerodhaLiveGateway().getStockQuote(symbol));
     }
 

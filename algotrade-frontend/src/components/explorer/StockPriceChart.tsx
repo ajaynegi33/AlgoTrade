@@ -158,6 +158,9 @@ export default function StockPriceChart({
               fill={`url(#${gradientId})`}
               dot={false}
               activeDot={{ r: 5, fill: strokeColor, stroke: "#0f172a", strokeWidth: 2 }}
+              isAnimationActive={true}
+              animationDuration={300}
+              animationEasing="ease-out"
             />
           </AreaChart>
         </ResponsiveContainer>

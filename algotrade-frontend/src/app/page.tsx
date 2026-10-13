@@ -28,6 +28,8 @@ export default function Dashboard() {
     recentDecisions,
     connectionStatus,
     lastUpdated,
+    latestTicks,
+    subscribeSymbol,
   } = useEngineWebSocket();
 
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
@@ -398,7 +400,9 @@ export default function Dashboard() {
         {activeTab === "scanner" && <PreMarketScannerTab />}
 
         {/* Tab 3: Analytics */}
-        {activeTab === "analytics" && <AnalyticsTab analytics={analytics} />}
+        {activeTab === "analytics" && (
+          <AnalyticsTab analytics={analytics} backendUrl={BACKEND_URL} />
+        )}
 
         {/* Tab 4: Stock Explorer */}
         {activeTab === "explorer" && (
@@ -411,6 +415,8 @@ export default function Dashboard() {
             activatingToken={activatingToken}
             autoLoggingIn={autoLoggingIn}
             popularStocks={popularStocks}
+            latestTicks={latestTicks}
+            subscribeSymbol={subscribeSymbol}
           />
         )}
 

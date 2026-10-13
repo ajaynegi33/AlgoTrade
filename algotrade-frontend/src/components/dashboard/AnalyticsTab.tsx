@@ -5,9 +5,10 @@ import { SkeletonAnalytics } from "../common/Skeleton";
 
 interface AnalyticsTabProps {
   analytics: AnalyticsData | null;
+  backendUrl?: string;
 }
 
-export function AnalyticsTab({ analytics }: AnalyticsTabProps) {
+export function AnalyticsTab({ analytics, backendUrl }: AnalyticsTabProps) {
   if (!analytics) {
     return <SkeletonAnalytics />;
   }
@@ -123,12 +124,23 @@ export function AnalyticsTab({ analytics }: AnalyticsTabProps) {
       {/* Trade History Audit Trail */}
       <div className="bg-slate-900/60 border border-slate-800 rounded-2xl overflow-hidden shadow-xl backdrop-blur-sm">
         <div className="p-4 sm:p-5 border-b border-slate-800 flex items-center justify-between">
-          <h3 className="text-base font-bold text-white">Execution Audit Log &amp; Settle Records</h3>
-          {analytics && analytics.allTradesHistory.length > 0 && (
-            <span className="text-xs text-slate-400 font-mono">
-              Total Trades: {analytics.allTradesHistory.length}
-            </span>
-          )}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between w-full gap-3">
+            <div>
+              <h3 className="text-base font-bold text-white">Execution Audit Log &amp; Settle Records</h3>
+              {analytics && analytics.allTradesHistory.length > 0 && (
+                <p className="text-xs text-slate-400 font-mono mt-0.5">
+                  Total Completed Trades: {analytics.allTradesHistory.length}
+                </p>
+              )}
+            </div>
+            <a
+              href={`${backendUrl || "http://localhost:8080"}/api/dashboard/export-trades`}
+              download="algotrade_trade_journal.csv"
+              className="px-3.5 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 hover:border-emerald-500/50 text-emerald-400 hover:text-emerald-300 text-xs font-semibold flex items-center gap-2 transition cursor-pointer self-start sm:self-auto shadow-sm"
+            >
+              <span>📥 Export Trade Journal (CSV)</span>
+            </a>
+          </div>
         </div>
         {analytics && analytics.allTradesHistory.length > 0 ? (
           <div className="overflow-x-auto">

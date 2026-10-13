@@ -10,6 +10,17 @@ export type WebSocketConnectionStatus =
   | "disconnected"
   | "error";
 
+export interface TickUpdate {
+  symbol: string;
+  ltp: number;
+  volume: number;
+  change: number;
+  changePct: number;
+  high: number;
+  low: number;
+  time: number;
+}
+
 interface UseEngineWebSocketReturn {
   overview: OverviewData | null;
   setOverview: React.Dispatch<React.SetStateAction<OverviewData | null>>;
@@ -18,6 +29,8 @@ interface UseEngineWebSocketReturn {
   connectionStatus: WebSocketConnectionStatus;
   lastUpdated: Date | null;
   reconnect: () => void;
+  latestTicks: Record<string, TickUpdate>;
+  subscribeSymbol: (symbol: string) => void;
 }
 
 /**
@@ -25,7 +38,8 @@ interface UseEngineWebSocketReturn {
  * 
  * Features:
  * - Immediate initial snapshot delivery on connect (0ms UI lag)
- * - Event-driven streaming updates (OVERVIEW_UPDATE, DECISION_EVENT, LEADERBOARD_UPDATE)
+ * - Event-driven streaming updates (OVERVIEW_UPDATE, DECISION_EVENT, LEADERBOARD_UPDATE, TICK_UPDATE)
+ * - Dynamic symbol subscription over WebSocket (SUBSCRIBE_SYMBOL)
  * - Heartbeat PING every 15s to prevent proxy/NAT timeout
  * - Exponential backoff auto-reconnect (1s to 10s)
  * - Explicit, clean socket closure on unmount (code 1000)
@@ -36,12 +50,14 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
   const [recentDecisions, setRecentDecisions] = useState<EngineActivityEvent[]>([]);
   const [connectionStatus, setConnectionStatus] = useState<WebSocketConnectionStatus>("connecting");
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [latestTicks, setLatestTicks] = useState<Record<string, TickUpdate>>({});
 
   const socketRef = useRef<WebSocket | null>(null);
   const pingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const retryCountRef = useRef<number>(0);
   const isIntentionalCloseRef = useRef<boolean>(false);
+  const subscribedSymbolsRef = useRef<Set<string>>(new Set());
 
   // Helper to resolve ws:// or wss:// URL from backend environment variable
   const getWebSocketUrl = useCallback((): string => {
@@ -83,6 +99,15 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
         setConnectionStatus("connected");
         retryCountRef.current = 0;
 
+        // Resubscribe any previously tracked symbols on reconnect
+        if (subscribedSymbolsRef.current.size > 0) {
+          subscribedSymbolsRef.current.forEach((sym) => {
+            try {
+              ws.send(JSON.stringify({ action: "SUBSCRIBE_SYMBOL", symbol: sym }));
+            } catch {}
+          });
+        }
+
         // Start 15-second heartbeat ping
         if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
         pingIntervalRef.current = setInterval(() => {
@@ -107,6 +132,12 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
             setLastUpdated(new Date());
           } else if (type === "OVERVIEW_UPDATE" && data) {
             setOverview(data);
+            setLastUpdated(new Date());
+          } else if (type === "TICK_UPDATE" && data && data.symbol) {
+            setLatestTicks((prev) => ({
+              ...prev,
+              [data.symbol]: data as TickUpdate,
+            }));
             setLastUpdated(new Date());
           } else if (type === "DECISION_EVENT" && data) {
             setRecentDecisions((prev) => {
@@ -171,6 +202,20 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
     connect();
   }, [connect]);
 
+  // Dynamic on-demand symbol subscription over WebSocket
+  const subscribeSymbol = useCallback((symbol: string) => {
+    if (!symbol) return;
+    const clean = symbol.trim().toUpperCase().replace("NSE:", "");
+    subscribedSymbolsRef.current.add(clean);
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      try {
+        socketRef.current.send(JSON.stringify({ action: "SUBSCRIBE_SYMBOL", symbol: clean }));
+      } catch (err) {
+        console.warn("Failed to send SUBSCRIBE_SYMBOL:", err);
+      }
+    }
+  }, []);
+
   // Mount & unmount lifecycle
   useEffect(() => {
     connect();
@@ -200,5 +245,7 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
     connectionStatus,
     lastUpdated,
     reconnect,
+    latestTicks,
+    subscribeSymbol,
   };
 }
