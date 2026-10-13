@@ -240,9 +240,16 @@ export default function PreMarketScannerTab() {
                     </div>
                   </div>
                   <div className="text-right">
-                    <span className="px-2 py-0.5 rounded text-xs font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                      +{c.gapPct.toFixed(2)}%
-                    </span>
+                    <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                      {c.rankingScore !== undefined && c.rankingScore !== null && (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                          Score {c.rankingScore.toFixed(2)}
+                        </span>
+                      )}
+                      <span className="px-2 py-0.5 rounded text-xs font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                        +{c.gapPct.toFixed(2)}%
+                      </span>
+                    </div>
                     <span className="block text-[10px] text-slate-400 font-mono mt-0.5">
                       Open: ₹{c.openPrice.toFixed(2)}
                     </span>
@@ -324,6 +331,7 @@ export default function PreMarketScannerTab() {
                 <th className="py-3 px-3">Gap %</th>
                 <th className="py-3 px-3">Auction Vol</th>
                 <th className="py-3 px-3">Circuit Room</th>
+                <th className="py-3 px-3">Score</th>
                 <th className="py-3 px-3">Status</th>
                 <th className="py-3 px-3">Diagnostic Reason</th>
               </tr>
@@ -347,6 +355,11 @@ export default function PreMarketScannerTab() {
                   <td className="py-2.5 px-3 text-slate-300">{c.preOpenVolume.toLocaleString("en-IN")}</td>
                   <td className="py-2.5 px-3 text-slate-400">
                     {c.circuitHeadroomPct ? `+${c.circuitHeadroomPct.toFixed(1)}%` : "Safe"}
+                  </td>
+                  <td className="py-2.5 px-3">
+                    <span className="font-bold text-amber-300 font-mono bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/20 text-[11px]">
+                      {c.rankingScore !== undefined && c.rankingScore !== null ? c.rankingScore.toFixed(2) : "-"}
+                    </span>
                   </td>
                   <td className="py-2.5 px-3">
                     <span
