@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { OverviewData, ScoredCandidate, EngineActivityEvent } from "@/components/types";
+import { OverviewData, ScoredCandidate, EngineActivityEvent, MarketDepthLevel } from "@/components/types";
 
 export type WebSocketConnectionStatus =
   | "connected"
@@ -19,6 +19,13 @@ export interface TickUpdate {
   high: number;
   low: number;
   time: number;
+  totalBuyQuantity?: number;
+  totalSellQuantity?: number;
+  buyDepthRatio?: number;
+  depth?: {
+    buy: MarketDepthLevel[];
+    sell: MarketDepthLevel[];
+  };
 }
 
 interface UseEngineWebSocketReturn {

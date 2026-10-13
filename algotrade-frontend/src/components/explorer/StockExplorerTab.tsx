@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { StockQuoteData, StockChartPoint, ZerodhaSessionData } from "../types";
 import StockPriceChart from "./StockPriceChart";
+import MarketDepthWidget from "./MarketDepthWidget";
 import ZerodhaAuthCard from "../auth/ZerodhaAuthCard";
 import { SkeletonStockExplorer } from "../common/Skeleton";
 import { TickUpdate } from "@/hooks/useEngineWebSocket";
@@ -197,6 +198,23 @@ export default function StockExplorerTab({
           }
         : undefined;
 
+      const updatedTotalBuy =
+        typeof tick.totalBuyQuantity === "number" && tick.totalBuyQuantity > 0
+          ? tick.totalBuyQuantity
+          : prevQuote.totalBuyQuantity;
+      const updatedTotalSell =
+        typeof tick.totalSellQuantity === "number" && tick.totalSellQuantity > 0
+          ? tick.totalSellQuantity
+          : prevQuote.totalSellQuantity;
+      const updatedBuyRatio =
+        typeof tick.buyDepthRatio === "number"
+          ? tick.buyDepthRatio
+          : prevQuote.buyDepthRatio;
+      const updatedDepth =
+        tick.depth && tick.depth.buy && tick.depth.buy.length > 0
+          ? tick.depth
+          : prevQuote.depth;
+
       return {
         ...prevQuote,
         lastPrice: ltp,
@@ -204,6 +222,10 @@ export default function StockExplorerTab({
         changePct: changePctVal,
         volume: tick.volume || prevQuote.volume,
         ohlc: updatedOhlc,
+        totalBuyQuantity: updatedTotalBuy,
+        totalSellQuantity: updatedTotalSell,
+        buyDepthRatio: updatedBuyRatio,
+        depth: updatedDepth,
       };
     });
 
@@ -436,21 +458,21 @@ export default function StockExplorerTab({
                     setManualEntryAlert(null);
                     setShowManualEntryModal(true);
                   }}
-                  className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-bold text-xs sm:text-sm shadow-lg shadow-emerald-950/60 transition-all flex items-center gap-2 cursor-pointer active:scale-95 border border-emerald-400/40"
+                  className="px-4 py-2.5 rounded-lg bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-bold text-xs sm:text-sm shadow-lg shadow-emerald-950/60 transition-all flex items-center gap-2 cursor-pointer active:scale-95 border border-emerald-400/40"
                 >
-                  <span className="text-base">⚡</span>
-                  <span>Buy &amp; Hand Over to Strategy</span>
+                  {/* <span className="text-base">⚡</span> */}
+                  <span>Buy</span>
                 </button>
 
                 <div className="text-left sm:text-right">
                   <p className="text-xs text-slate-400 uppercase tracking-wider font-mono">Last Traded Price (LTP)</p>
                   <div className="flex items-baseline sm:justify-end gap-2 mt-0.5">
                     <span
-                      className={`text-3xl sm:text-4xl font-mono font-black transition-all duration-300 ${
+                      className={`text-3xl sm:text-3xl font-mono font-black transition-all duration-300 ${
                         flashDirection === "up"
-                          ? "text-emerald-400 scale-105 drop-shadow-[0_0_10px_rgba(52,211,153,0.7)]"
+                          ? "text-emerald-400"
                           : flashDirection === "down"
-                          ? "text-rose-400 scale-105 drop-shadow-[0_0_10px_rgba(244,63,94,0.7)]"
+                          ? "text-rose-400"
                           : "text-white"
                       }`}
                     >
@@ -547,88 +569,7 @@ export default function StockExplorerTab({
           </div>
 
           {/* Level-2 5-Level Market Depth (Bids & Offers) */}
-          {quote.depth && (
-            <div className="bg-slate-900/60 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
-              <div className="p-4 sm:p-5 border-b border-slate-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
-                <div>
-                  <h3 className="text-base font-bold text-white flex items-center gap-2">
-                    📊 Level-2 Real Market Depth (5-Level Bids &amp; Asks)
-                  </h3>
-                  <p className="text-xs text-slate-400">
-                    Live pending limit orders queued directly on the National Stock Exchange book.
-                  </p>
-                </div>
-                {typeof quote.buyDepthRatio === "number" && (
-                  <div className="flex items-center gap-2 text-xs font-mono">
-                    <span className="text-slate-400">Buy Imbalance Ratio:</span>
-                    <span className={`font-bold px-2 py-0.5 rounded ${
-                      quote.buyDepthRatio >= 1.2 ? "bg-emerald-500/20 text-emerald-400" :
-                      quote.buyDepthRatio <= 0.8 ? "bg-rose-500/20 text-rose-400" :
-                      "bg-slate-800 text-slate-300"
-                    }`}>
-                      {quote.buyDepthRatio.toFixed(2)}x
-                    </span>
-                  </div>
-                )}
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-slate-800 font-mono text-xs">
-                {/* Bids Table */}
-                <div className="p-4">
-                  <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-800 text-slate-400 text-[11px] uppercase tracking-wider font-bold">
-                    <span className="text-emerald-400">Bid (Buy) Orders</span>
-                    <span>Quantity</span>
-                    <span className="text-right text-emerald-400">Price</span>
-                  </div>
-                  <div className="space-y-1.5">
-                    {quote.depth.buy?.map((lvl, idx) => (
-                      <div
-                        key={idx}
-                        className="flex items-center justify-between py-1 px-2 rounded hover:bg-emerald-500/5 transition"
-                      >
-                        <span className="text-slate-400 text-[11px]">{lvl.orders}</span>
-                        <span className="text-slate-200">{lvl.quantity.toLocaleString("en-IN")}</span>
-                        <span className="text-emerald-400 font-bold text-right">₹{lvl.price.toFixed(2)}</span>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="pt-3 mt-3 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-400">
-                    <span>Total Buy Quantity:</span>
-                    <strong className="text-emerald-400 font-bold font-mono">
-                      {quote.totalBuyQuantity ? quote.totalBuyQuantity.toLocaleString("en-IN") : "--"}
-                    </strong>
-                  </div>
-                </div>
-
-                {/* Offers Table */}
-                <div className="p-4">
-                  <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-800 text-slate-400 text-[11px] uppercase tracking-wider font-bold">
-                    <span className="text-rose-400">Price</span>
-                    <span>Quantity</span>
-                    <span className="text-right text-rose-400">Offer (Sell) Orders</span>
-                  </div>
-                  <div className="space-y-1.5">
-                    {quote.depth.sell?.map((lvl, idx) => (
-                      <div
-                        key={idx}
-                        className="flex items-center justify-between py-1 px-2 rounded hover:bg-rose-500/5 transition"
-                      >
-                        <span className="text-rose-400 font-bold">₹{lvl.price.toFixed(2)}</span>
-                        <span className="text-slate-200">{lvl.quantity.toLocaleString("en-IN")}</span>
-                        <span className="text-slate-400 text-[11px] text-right">{lvl.orders}</span>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="pt-3 mt-3 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-400">
-                    <span>Total Sell Quantity:</span>
-                    <strong className="text-rose-400 font-bold font-mono">
-                      {quote.totalSellQuantity ? quote.totalSellQuantity.toLocaleString("en-IN") : "--"}
-                    </strong>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
+          {quote.depth && <MarketDepthWidget quote={quote} />}
         </div>
       )}
 

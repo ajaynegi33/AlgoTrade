@@ -97,6 +97,24 @@ public class LiveWebSocketBroadcastService {
      * Broadcasts real-time price tick for a symbol to active clients.
      */
     public void broadcastTick(String symbol, double ltp, long volume, double change, double changePct, double high, double low) {
+        broadcastTick(symbol, ltp, volume, change, changePct, high, low, 0L, 0L, null);
+    }
+
+    /**
+     * Broadcasts real-time price tick along with Level-2 market depth and total order book quantities.
+     */
+    public void broadcastTick(
+        String symbol,
+        double ltp,
+        long volume,
+        double change,
+        double changePct,
+        double high,
+        double low,
+        long totalBuyQuantity,
+        long totalSellQuantity,
+        Map<String, Object> depth
+    ) {
         Map<String, Object> tick = new LinkedHashMap<>();
         tick.put("symbol", symbol);
         tick.put("ltp", ltp);
@@ -105,6 +123,16 @@ public class LiveWebSocketBroadcastService {
         tick.put("changePct", changePct);
         tick.put("high", high);
         tick.put("low", low);
+        tick.put("totalBuyQuantity", totalBuyQuantity);
+        tick.put("totalSellQuantity", totalSellQuantity);
+        if (depth != null && !depth.isEmpty()) {
+            tick.put("depth", depth);
+        }
+        double total = (double) totalBuyQuantity + (double) totalSellQuantity;
+        if (total > 0) {
+            double buyDepthPct = ((double) totalBuyQuantity / total) * 100.0;
+            tick.put("buyDepthRatio", Math.round(buyDepthPct * 10.0) / 10.0);
+        }
         broadcast("TICK_UPDATE", tick);
     }
 }

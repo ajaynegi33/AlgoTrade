@@ -287,6 +287,35 @@ public class KiteMarketDataService {
             double high = tick.getHighPrice();
             double low = tick.getLowPrice();
 
+            // Extract 5-level market depth from Tick
+            Map<String, Object> depthMap = null;
+            if (tick.getMarketDepth() != null && !tick.getMarketDepth().isEmpty()) {
+                var depthObj = tick.getMarketDepth();
+                depthMap = new LinkedHashMap<>();
+                if (depthObj.containsKey("buy") && depthObj.get("buy") != null) {
+                    List<Map<String, Object>> buyList = new ArrayList<>();
+                    for (com.zerodhatech.models.Depth d : depthObj.get("buy")) {
+                        Map<String, Object> item = new LinkedHashMap<>();
+                        item.put("price", d.getPrice());
+                        item.put("quantity", d.getQuantity());
+                        item.put("orders", d.getOrders());
+                        buyList.add(item);
+                    }
+                    depthMap.put("buy", buyList);
+                }
+                if (depthObj.containsKey("sell") && depthObj.get("sell") != null) {
+                    List<Map<String, Object>> sellList = new ArrayList<>();
+                    for (com.zerodhatech.models.Depth d : depthObj.get("sell")) {
+                        Map<String, Object> item = new LinkedHashMap<>();
+                        item.put("price", d.getPrice());
+                        item.put("quantity", d.getQuantity());
+                        item.put("orders", d.getOrders());
+                        sellList.add(item);
+                    }
+                    depthMap.put("sell", sellList);
+                }
+            }
+
             if (ltp > 0) {
                 strategyManager.onTick(symbol, ltp, volume, buyQty, sellQty);
 
@@ -298,7 +327,10 @@ public class KiteMarketDataService {
                         Math.round(change * 100.0) / 100.0,
                         Math.round(changePct * 100.0) / 100.0,
                         high,
-                        low
+                        low,
+                        buyQty,
+                        sellQty,
+                        depthMap
                     );
                 }
             }
