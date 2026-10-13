@@ -441,7 +441,7 @@ export default function StockExplorerTab({
       {quote && (
         <div className="space-y-6">
           {/* Main Price Card */}
-          <div className="bg-gradient-to-br from-slate-900 to-slate-900/90 border border-slate-800 rounded-2xl p-6 sm:p-7 shadow-2xl">
+          <div className="bg-gradient-to-br from-slate-900 to-slate-900/90 border border-slate-800 rounded-2xl p-6 sm:p-7 shadow-2xl relative z-20">
             <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-6 border-b border-slate-800">
               <div>
                 <div className="flex items-center gap-3">
@@ -533,7 +533,11 @@ export default function StockExplorerTab({
           </div>
 
           {/* Level-2 5-Level Market Depth (Bids & Offers) */}
-          {quote.depth && <MarketDepthWidget quote={quote} />}
+          {quote.depth && (
+            <div className="relative z-10">
+              <MarketDepthWidget quote={quote} />
+            </div>
+          )}
         </div>
       )}
 

@@ -8,7 +8,7 @@ interface StockMetricsOverviewProps {
 }
 
 export default function StockMetricsOverview({ quote }: StockMetricsOverviewProps) {
-  // State for hover-activated educational popovers
+  // State for hover-activated educational popovers (distinguished by unique key)
   const [hoveredInfoKey, setHoveredInfoKey] = useState<string | null>(null);
 
   // Extract core numbers with safe zero-fallbacks
@@ -62,12 +62,12 @@ export default function StockMetricsOverview({ quote }: StockMetricsOverviewProp
   const upperBufferPct = upperCircuit > 0 && ltp > 0 ? ((upperCircuit - ltp) / ltp) * 100 : null;
   const lowerBufferPct = lowerCircuit > 0 && ltp > 0 ? ((ltp - lowerCircuit) / ltp) * 100 : null;
 
-  // Educational term guides in crystal-clear simple English
+  // Educational term guides in crystal-clear simple English with 100% unique keys
   const infoGuides: Record<
     string,
     { title: string; desc: string; bulletPoints: { term: string; explanation: string }[] }
   > = {
-    range: {
+    thermometer: {
       title: "Day's Price Range Thermometer",
       desc: "Think of this like a temperature gauge for today's price action.",
       bulletPoints: [
@@ -165,9 +165,31 @@ export default function StockMetricsOverview({ quote }: StockMetricsOverviewProp
         },
       ],
     },
+    volatility: {
+      title: "Day Range & Volatility Guide",
+      desc: "Measures the extreme boundaries and price turbulence of today's session.",
+      bulletPoints: [
+        {
+          term: "Day High & Low",
+          explanation: "The absolute highest and lowest prices matched at the exchange today.",
+        },
+        {
+          term: "Absolute Range (₹)",
+          explanation: "The total rupee distance between high and low. Wider spread means greater trading opportunity.",
+        },
+        {
+          term: "Day Volatility %",
+          explanation: "The range expressed as a percentage of day low. High percentage means active movement.",
+        },
+        {
+          term: "Session Bias",
+          explanation: "Shows if the stock is trending in the upper breakout half, lower breakdown half, or balanced rotation.",
+        },
+      ],
+    },
   };
 
-  // Reusable hover popover button component
+  // Reusable hover popover button component with dynamic z-index management
   const renderInfoButton = (key: string, align: "left" | "right" = "left") => {
     const guide = infoGuides[key];
     if (!guide) return null;
@@ -175,7 +197,7 @@ export default function StockMetricsOverview({ quote }: StockMetricsOverviewProp
 
     return (
       <div
-        className="relative inline-flex items-center"
+        className={`relative inline-flex items-center ${isHovered ? "z-50" : "z-10"}`}
         onMouseEnter={() => setHoveredInfoKey(key)}
         onMouseLeave={() => setHoveredInfoKey(null)}
       >
@@ -189,10 +211,10 @@ export default function StockMetricsOverview({ quote }: StockMetricsOverviewProp
           i
         </button>
 
-        {/* Hover Popover */}
+        {/* Hover Popover with elevated z-50 and border glow */}
         {isHovered && (
           <div
-            className={`absolute top-6 z-50 w-72 sm:w-84 bg-slate-950/95 border border-slate-700 rounded-xl p-3.5 shadow-2xl backdrop-blur-md text-xs text-slate-300 space-y-2.5 animate-fadeIn ${
+            className={`absolute top-4 z-50 w-72 sm:w-100 bg-slate-950/98 border border-slate-700 rounded-xl p-3.5 shadow-2xl backdrop-blur-md text-xs text-slate-300 space-y-2.5 animate-fadeIn ring-1 ring-slate-700/60 ${
               align === "right" ? "right-0" : "left-0"
             }`}
           >
@@ -206,7 +228,7 @@ export default function StockMetricsOverview({ quote }: StockMetricsOverviewProp
 
             <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
               {guide.bulletPoints.map((pt, idx) => (
-                <div key={idx} className="bg-slate-900/80 rounded-lg p-2 border border-slate-800/80">
+                <div key={idx} className="bg-slate-900/90 rounded-lg p-2 border border-slate-800/80">
                   <strong className="text-emerald-400 text-[11px] block">{pt.term}:</strong>
                   <p className="text-[10px] text-slate-300 leading-relaxed mt-0.5">{pt.explanation}</p>
                 </div>
@@ -222,8 +244,13 @@ export default function StockMetricsOverview({ quote }: StockMetricsOverviewProp
     <div className="space-y-4 mt-6">
       {/* ────────────────────────────────────────────────────────────────────── */}
       {/* 1. VISUAL DAY'S PRICE RANGE THERMOMETER                                */}
+      {/* Dynamic z-30 on hover guarantees popover appears ON TOP of grid cards  */}
       {/* ────────────────────────────────────────────────────────────────────── */}
-      <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-xl relative backdrop-blur-sm">
+      <div
+        className={`bg-slate-900/70 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-xl relative backdrop-blur-sm transition-all duration-150 ${
+          hoveredInfoKey === "thermometer" ? "z-30 ring-1 ring-slate-700" : "z-10"
+        }`}
+      >
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
             <span className="text-base">📍</span>
@@ -232,8 +259,8 @@ export default function StockMetricsOverview({ quote }: StockMetricsOverviewProp
               (Intraday Low to High)
             </span>
 
-            {/* Hover-activated Info Popover */}
-            {renderInfoButton("range", "left")}
+            {/* Hover-activated Info Popover with dedicated "thermometer" key */}
+            {renderInfoButton("thermometer", "left")}
           </div>
 
           <div className="text-right font-mono text-xs">
@@ -307,10 +334,19 @@ export default function StockMetricsOverview({ quote }: StockMetricsOverviewProp
 
       {/* ────────────────────────────────────────────────────────────────────── */}
       {/* 2. FOUR CLEAN CATEGORIZED CARDS                                        */}
+      {/* Elevated z-30 when any card is hovered prevents clipping behind siblings*/}
       {/* ────────────────────────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div
+        className={`grid grid-cols-1 md:grid-cols-2 gap-4 relative transition-all duration-150 ${
+          hoveredInfoKey ? "z-30" : "z-10"
+        }`}
+      >
         {/* CARD 1: INTRADAY PRICE & OHL SETUP */}
-        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-lg relative">
+        <div
+          className={`bg-slate-900/60 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-lg relative transition-all duration-150 ${
+            hoveredInfoKey === "price" ? "z-40 ring-1 ring-slate-700" : "z-0"
+          }`}
+        >
           <div className="flex items-center justify-between pb-3 mb-3 border-b border-slate-800">
             <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
               <span>📊</span> Price Action &amp; OHL Setup
@@ -387,7 +423,11 @@ export default function StockMetricsOverview({ quote }: StockMetricsOverviewProp
         </div>
 
         {/* CARD 2: INSTITUTIONAL VOLUME & FLOW */}
-        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-lg relative">
+        <div
+          className={`bg-slate-900/60 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-lg relative transition-all duration-150 ${
+            hoveredInfoKey === "volume" ? "z-40 ring-1 ring-slate-700" : "z-0"
+          }`}
+        >
           <div className="flex items-center justify-between pb-3 mb-3 border-b border-slate-800">
             <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
               <span>⚡</span> Institutional Volume &amp; VWAP
@@ -442,7 +482,11 @@ export default function StockMetricsOverview({ quote }: StockMetricsOverviewProp
         </div>
 
         {/* CARD 3: RISK & NSE CIRCUIT LIMITS */}
-        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-lg relative">
+        <div
+          className={`bg-slate-900/60 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-lg relative transition-all duration-150 ${
+            hoveredInfoKey === "circuit" ? "z-40 ring-1 ring-slate-700" : "z-0"
+          }`}
+        >
           <div className="flex items-center justify-between pb-3 mb-3 border-b border-slate-800">
             <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
               <span>🛡️</span> Risk &amp; NSE Circuit Bands
@@ -485,12 +529,17 @@ export default function StockMetricsOverview({ quote }: StockMetricsOverviewProp
         </div>
 
         {/* CARD 4: RANGE BOUNDS & EXTREMES */}
-        <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-lg relative">
+        <div
+          className={`bg-slate-900/60 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-lg relative transition-all duration-150 ${
+            hoveredInfoKey === "volatility" ? "z-40 ring-1 ring-slate-700" : "z-0"
+          }`}
+        >
           <div className="flex items-center justify-between pb-3 mb-3 border-b border-slate-800">
             <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
               <span>📈</span> Day Range &amp; Volatility
             </h4>
-            {renderInfoButton("range", "right")}
+            {/* Dedicated "volatility" key prevents duplicate popovers */}
+            {renderInfoButton("volatility", "right")}
           </div>
 
           <div className="grid grid-cols-2 gap-3 text-xs font-mono">
