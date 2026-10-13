@@ -12,8 +12,9 @@ import {
   Tooltip,
   ReferenceLine,
   CartesianGrid,
+  Customized,
 } from "recharts";
-import { StockChartPoint, ChartTimeframe, ChartType } from "../types";
+import { StockChartPoint, ChartTimeframe, ChartInterval, ChartType } from "../types";
 import { SkeletonChart } from "../common/Skeleton";
 
 interface StockPriceChartProps {
@@ -28,9 +29,18 @@ interface StockPriceChartProps {
   loading?: boolean;
   selectedTimeframe?: ChartTimeframe;
   onTimeframeChange?: (timeframe: ChartTimeframe) => void;
+  selectedInterval?: ChartInterval;
+  onIntervalChange?: (interval: ChartInterval) => void;
   chartType?: ChartType;
   onChartTypeChange?: (type: ChartType) => void;
 }
+
+const INTRADAY_INTERVALS: { label: string; value: ChartInterval }[] = [
+  { label: "1m", value: "1m" },
+  { label: "3m", value: "3m" },
+  { label: "5m", value: "5m" },
+  { label: "15m", value: "15m" },
+];
 
 const TIMEFRAMES: { label: string; value: ChartTimeframe }[] = [
   { label: "1D", value: "1D" },
@@ -121,10 +131,11 @@ interface CandlestickBarProps {
   maxPrice: number;
   showVolume?: boolean;
   maxVolume?: number;
+  isLive?: boolean;
 }
 
 function CandlestickBar(props: CandlestickBarProps) {
-  const { x, width, payload, minPrice, maxPrice, showVolume, maxVolume } = props;
+  const { x, width, payload, minPrice, maxPrice, showVolume, maxVolume, isLive } = props;
   if (!payload || typeof x !== "number" || typeof width !== "number") {
     return null;
   }
@@ -151,6 +162,7 @@ function CandlestickBar(props: CandlestickBarProps) {
 
   const isBullish = close >= open;
   const color = isBullish ? "#10b981" : "#f43f5e";
+  const glowFilter = isLive ? (isBullish ? "url(#liveGlowBullish)" : "url(#liveGlowBearish)") : undefined;
 
   const yHigh = getY(high);
   const yLow = getY(low);
@@ -198,8 +210,9 @@ function CandlestickBar(props: CandlestickBarProps) {
         x2={centerX}
         y2={yLow}
         stroke={color}
-        strokeWidth={1.5}
+        strokeWidth={isLive ? 2 : 1.5}
         strokeLinecap="round"
+        filter={glowFilter}
       />
       {/* Open-Close Real Body (100% aligned on centerX) */}
       <rect
@@ -211,7 +224,18 @@ function CandlestickBar(props: CandlestickBarProps) {
         stroke={color}
         strokeWidth={1}
         rx={1}
+        filter={glowFilter}
       />
+      {/* Real-time Breathing Beacon Pulse on Forming Candle tip */}
+      {isLive && (
+        <g className="pointer-events-none">
+          <circle cx={centerX} cy={yClose} r={3} fill={color} />
+          <circle cx={centerX} cy={yClose} r={6} fill="none" stroke={color} strokeWidth={1.5} opacity={0.75}>
+            <animate attributeName="r" values="3;10;3" dur="2s" repeatCount="indefinite" />
+            <animate attributeName="opacity" values="0.85;0.05;0.85" dur="2s" repeatCount="indefinite" />
+          </circle>
+        </g>
+      )}
     </g>
   );
 }
@@ -327,13 +351,22 @@ export default function StockPriceChart({
   loading = false,
   selectedTimeframe = "1D",
   onTimeframeChange,
+  selectedInterval = "5m",
+  onIntervalChange,
   chartType = "area",
   onChartTypeChange,
 }: StockPriceChartProps) {
-  // Overlay Toggles (VWAP, Volume, Levels)
+  // Overlay Toggles (VWAP, Volume, Levels, Crosshair)
   const [showVwap, setShowVwap] = useState(true);
   const [showVolume, setShowVolume] = useState(true);
   const [showLevels, setShowLevels] = useState(true);
+  const [showCrosshair, setShowCrosshair] = useState(true);
+  const [crosshairPos, setCrosshairPos] = useState<{
+    x: number;
+    y: number;
+    price: number;
+    time: string;
+  } | null>(null);
   const [hoveredInfoKey, setHoveredInfoKey] = useState<string | null>(null);
 
   // 1. Calculate Cumulative VWAP across intraday session (only for 1D)
@@ -454,6 +487,38 @@ export default function StockPriceChart({
 
   // Latest calculated VWAP value
   const latestVwap = enrichedData.length > 0 ? enrichedData[enrichedData.length - 1].vwap : undefined;
+
+  const handleMouseMove = (state: {
+    isTooltipActive?: boolean;
+    activeCoordinate?: { x: number; y: number };
+    chartY?: number;
+    activePayload?: Array<{ payload: StockChartPoint }>;
+  } | null) => {
+    if (
+      !showCrosshair ||
+      !state ||
+      !state.isTooltipActive ||
+      !state.activeCoordinate ||
+      typeof state.chartY !== "number"
+    ) {
+      if (crosshairPos) setCrosshairPos(null);
+      return;
+    }
+    const x = state.activeCoordinate.x;
+    const y = state.chartY;
+    const pt = state.activePayload?.[0]?.payload;
+    const time = pt?.time ?? "";
+
+    const range = yDomain[1] - yDomain[0];
+    const estPrice = range > 0 ? yDomain[1] - ((y - 10) / 350) * range : currentPrice;
+
+    setCrosshairPos({
+      x,
+      y,
+      price: Math.max(yDomain[0], Math.min(yDomain[1], estPrice)),
+      time,
+    });
+  };
 
   return (
     <div className="w-full bg-slate-950/60 rounded-xl border border-slate-800/80 p-5 shadow-inner">
@@ -618,20 +683,50 @@ export default function StockPriceChart({
                   badgeColor="text-amber-400"
                 />
               </div>
+
+              {/* 2-Axis Reticle Crosshair Toggle */}
+              <button
+                type="button"
+                onClick={() => setShowCrosshair(!showCrosshair)}
+                title="Toggle 2-Axis Reticle Crosshair (Price & Time Badges)"
+                className={`px-2 py-0.5 text-[11px] font-mono rounded flex items-center gap-1 transition cursor-pointer border ${
+                  showCrosshair
+                    ? "bg-sky-500/15 text-sky-300 border-sky-500/40 font-semibold"
+                    : "bg-slate-900/60 text-slate-500 border-slate-800 hover:text-slate-300"
+                }`}
+              >
+                <span>✛</span>
+                <span>Crosshair</span>
+                <span className="text-[10px] opacity-75">{showCrosshair ? "✓" : ""}</span>
+              </button>
             </div>
           )}
         </div>
       </div>
 
       {/* Dual-Axis Chart Canvas: Price Axis + Volume Axis */}
-      <div className="w-full h-[330px] sm:h-[390px]">
+      <div className="w-full h-[330px] sm:h-[390px] select-none outline-none focus:outline-none focus:ring-0 [&_*]:outline-none [&_*]:focus:outline-none">
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={enrichedData} margin={{ top: 10, right: 10, left: -15, bottom: 0 }}>
+          <ComposedChart
+            data={enrichedData}
+            margin={{ top: 10, right: 10, left: -15, bottom: 0 }}
+            style={{ outline: "none", userSelect: "none" }}
+            onMouseMove={handleMouseMove}
+            onMouseLeave={() => setCrosshairPos(null)}
+          >
             <defs>
               <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor={strokeColor} stopOpacity={0.35} />
                 <stop offset="95%" stopColor={strokeColor} stopOpacity={0.0} />
               </linearGradient>
+
+              {/* Real-time Neon Glow Filters for Bullish and Bearish Forming Candles */}
+              <filter id="liveGlowBullish" x="-40%" y="-40%" width="180%" height="180%">
+                <feDropShadow dx="0" dy="0" stdDeviation="3.5" floodColor="#10b981" floodOpacity="0.85" />
+              </filter>
+              <filter id="liveGlowBearish" x="-40%" y="-40%" width="180%" height="180%">
+                <feDropShadow dx="0" dy="0" stdDeviation="3.5" floodColor="#f43f5e" floodOpacity="0.85" />
+              </filter>
             </defs>
 
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity={0.6} vertical={false} />
@@ -834,6 +929,7 @@ export default function StockPriceChart({
                     maxPrice={yDomain[1]}
                     showVolume={showVolume}
                     maxVolume={maxVolume}
+                    isLive={selectedTimeframe === "1D" && (barProps as { index?: number }).index === enrichedData.length - 1}
                   />
                 )}
                 isAnimationActive={false}
@@ -866,30 +962,158 @@ export default function StockPriceChart({
                 isAnimationActive={false}
               />
             )}
+
+            {/* Live Current Price Reference Line (Forming Market Level) */}
+            {currentPrice > 0 && selectedTimeframe === "1D" && (
+              <ReferenceLine
+                yAxisId="priceAxis"
+                y={currentPrice}
+                stroke={currentPrice >= baselinePrice ? "#10b981" : "#f43f5e"}
+                strokeDasharray="2 3"
+                strokeWidth={1.2}
+                label={{
+                  value: `₹${currentPrice.toFixed(2)} ● LIVE`,
+                  fill: currentPrice >= baselinePrice ? "#10b981" : "#f43f5e",
+                  fontSize: 10,
+                  fontWeight: "bold",
+                  position: "insideBottomRight",
+                }}
+              />
+            )}
+
+            {/* 2-Axis Reticle Crosshair with Floating Y-Price & X-Time Badges */}
+            {showCrosshair && crosshairPos && (
+              <Customized
+                component={(chartProps: { offset?: { top: number; left: number; width: number; height: number }; width?: number }) => {
+                  const offset = chartProps.offset || { top: 10, left: 0, width: chartProps.width || 800, height: 350 };
+                  const range = yDomain[1] - yDomain[0];
+                  const exactPrice = range > 0
+                    ? yDomain[1] - ((crosshairPos.y - offset.top) / offset.height) * range
+                    : crosshairPos.price;
+                  const clampedPrice = Math.max(yDomain[0], Math.min(yDomain[1], exactPrice));
+                  const plotLeft = offset.left;
+                  const plotRight = offset.left + offset.width;
+                  const plotBottom = offset.top + offset.height;
+
+                  return (
+                    <g className="pointer-events-none">
+                      {/* Horizontal Reticle Dashed Line */}
+                      <line
+                        x1={plotLeft}
+                        y1={crosshairPos.y}
+                        x2={plotRight}
+                        y2={crosshairPos.y}
+                        stroke="#64748b"
+                        strokeWidth={1}
+                        strokeDasharray="3 3"
+                        opacity={0.8}
+                      />
+                      {/* Floating Y-Axis Price Badge Pill */}
+                      <g transform={`translate(${plotRight - 4}, ${crosshairPos.y})`}>
+                        <rect
+                          x={-60}
+                          y={-10}
+                          width={60}
+                          height={20}
+                          rx={4}
+                          fill="#090d16"
+                          stroke="#06b6d4"
+                          strokeWidth={1}
+                          opacity={0.95}
+                        />
+                        <text
+                          x={-30}
+                          y={4}
+                          textAnchor="middle"
+                          fill="#38bdf8"
+                          fontSize={10}
+                          fontFamily="monospace"
+                          fontWeight="bold"
+                        >
+                          ₹{clampedPrice.toFixed(2)}
+                        </text>
+                      </g>
+                      {/* Floating X-Axis Time Badge Pill */}
+                      {crosshairPos.time && (
+                        <g transform={`translate(${crosshairPos.x}, ${plotBottom})`}>
+                          <rect
+                            x={-28}
+                            y={2}
+                            width={56}
+                            height={18}
+                            rx={4}
+                            fill="#090d16"
+                            stroke="#64748b"
+                            strokeWidth={1}
+                            opacity={0.95}
+                          />
+                          <text
+                            x={0}
+                            y={14}
+                            textAnchor="middle"
+                            fill="#e2e8f0"
+                            fontSize={10}
+                            fontFamily="monospace"
+                            fontWeight="bold"
+                          >
+                            {crosshairPos.time}
+                          </text>
+                        </g>
+                      )}
+                    </g>
+                  );
+                }}
+              />
+            )}
           </ComposedChart>
         </ResponsiveContainer>
       </div>
 
-      {/* Groww-style Timeframe Selector Bar & Candlestick Toggle */}
+      {/* Groww-style Timeframe Selector Bar, Intraday Interval Pills & Candlestick Toggle */}
       <div className="flex flex-wrap items-center justify-between gap-3 pt-3 mt-2 border-t border-slate-800/80">
-        {/* Timeframe Pills */}
-        <div className="flex items-center gap-1 sm:gap-1.5 overflow-x-auto py-1 scrollbar-none">
-          {TIMEFRAMES.map((tf) => {
-            const isSelected = selectedTimeframe === tf.value;
-            return (
-              <button
-                key={tf.value}
-                onClick={() => onTimeframeChange?.(tf.value)}
-                className={`px-3 py-1 text-xs font-mono font-medium rounded-lg transition-all duration-150 cursor-pointer ${
-                  isSelected
-                    ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/50 shadow-sm shadow-emerald-950 font-bold"
-                    : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 border border-transparent"
-                }`}
-              >
-                {tf.label}
-              </button>
-            );
-          })}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Timeframe Pills */}
+          <div className="flex items-center gap-1 sm:gap-1.5 overflow-x-auto py-1 scrollbar-none">
+            {TIMEFRAMES.map((tf) => {
+              const isSelected = selectedTimeframe === tf.value;
+              return (
+                <button
+                  key={tf.value}
+                  onClick={() => onTimeframeChange?.(tf.value)}
+                  className={`px-3 py-1 text-xs font-mono font-medium rounded-lg transition-all duration-150 cursor-pointer ${
+                    isSelected
+                      ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/50 shadow-sm shadow-emerald-950 font-bold"
+                      : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 border border-transparent"
+                  }`}
+                >
+                  {tf.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Intraday Resolution Pills (1m / 3m / 5m / 15m) when in 1D view */}
+          {selectedTimeframe === "1D" && (
+            <div className="flex items-center gap-1 bg-slate-900/90 p-0.5 rounded-lg border border-slate-800">
+              <span className="text-[10px] font-mono text-slate-500 px-1.5 hidden sm:inline">Interval:</span>
+              {INTRADAY_INTERVALS.map((intvl) => {
+                const isSelected = (selectedInterval || "5m") === intvl.value;
+                return (
+                  <button
+                    key={intvl.value}
+                    onClick={() => onIntervalChange?.(intvl.value)}
+                    className={`px-2 py-0.5 text-xs font-mono rounded transition-all cursor-pointer ${
+                      isSelected
+                        ? "bg-emerald-500/25 text-emerald-300 font-bold border border-emerald-500/40 shadow-xs"
+                        : "text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    {intvl.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Chart Style Toggle (Area vs Candlestick) */}

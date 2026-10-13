@@ -413,9 +413,10 @@ public class TradingDashboardController {
     @GetMapping("/stock-chart")
     public ResponseEntity<List<Map<String, Object>>> getStockChart(
         @RequestParam(defaultValue = "RELIANCE") String symbol,
-        @RequestParam(defaultValue = "1D") String timeframe
+        @RequestParam(defaultValue = "1D") String timeframe,
+        @RequestParam(defaultValue = "5m") String interval
     ) {
-        return ResponseEntity.ok(brokerGatewayManager.getZerodhaLiveGateway().getStockChart(symbol, timeframe));
+        return ResponseEntity.ok(brokerGatewayManager.getZerodhaLiveGateway().getStockChart(symbol, timeframe, interval));
     }
 
     /**

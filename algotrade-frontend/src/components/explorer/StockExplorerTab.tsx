@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
-import { StockQuoteData, StockChartPoint, ZerodhaSessionData, ChartTimeframe, ChartType } from "../types";
+import { StockQuoteData, StockChartPoint, ZerodhaSessionData, ChartTimeframe, ChartInterval, ChartType } from "../types";
 import StockPriceChart from "./StockPriceChart";
 import MarketDepthWidget from "./MarketDepthWidget";
 import StockMetricsOverview from "./StockMetricsOverview";
@@ -41,6 +41,7 @@ export default function StockExplorerTab({
   const [quote, setQuote] = useState<StockQuoteData | null>(null);
   const [chartData, setChartData] = useState<StockChartPoint[]>([]);
   const [selectedTimeframe, setSelectedTimeframe] = useState<ChartTimeframe>("1D");
+  const [selectedInterval, setSelectedInterval] = useState<ChartInterval>("5m");
   const [chartType, setChartType] = useState<ChartType>("area");
   const [loading, setLoading] = useState(false);
   const [chartLoading, setChartLoading] = useState(false);
@@ -66,17 +67,24 @@ export default function StockExplorerTab({
   const activeSymbolRef = useRef(activeSymbol);
   activeSymbolRef.current = activeSymbol;
 
-  // Tracks the last symbol and timeframe for which chart was loaded to avoid re-fetching on every poll
+  // Tracks the last symbol, timeframe, and interval for which chart was loaded to avoid re-fetching on every poll
   const lastChartKeyRef = useRef<string>("");
 
-  // Fetch chart data smoothly with selected timeframe
-  const fetchChartData = async (clean: string, tf: ChartTimeframe = selectedTimeframe, silent = false) => {
-    const chartKey = `${clean}_${tf}`;
+  // Fetch chart data smoothly with selected timeframe and interval
+  const fetchChartData = async (
+    clean: string,
+    tf: ChartTimeframe = selectedTimeframe,
+    intvl: ChartInterval = selectedInterval,
+    silent = false
+  ) => {
+    const chartKey = `${clean}_${tf}_${intvl}`;
     if (!silent && (chartData.length === 0 || lastChartKeyRef.current !== chartKey)) {
       setChartLoading(true);
     }
     try {
-      const res = await fetch(`${backendUrl}/api/dashboard/stock-chart?symbol=${encodeURIComponent(clean)}&timeframe=${encodeURIComponent(tf)}`);
+      const res = await fetch(
+        `${backendUrl}/api/dashboard/stock-chart?symbol=${encodeURIComponent(clean)}&timeframe=${encodeURIComponent(tf)}&interval=${encodeURIComponent(intvl)}`
+      );
       if (res.ok) {
         const points: StockChartPoint[] = await res.json();
         if (Array.isArray(points)) {
@@ -91,13 +99,13 @@ export default function StockExplorerTab({
     }
   };
 
-  // Re-fetch chart data whenever the user toggles timeframe (1D, 1W, 1M, etc.)
+  // Re-fetch chart data whenever the user toggles timeframe (1D, 1W, 1M, etc.) or interval (1m, 3m, 5m, 15m)
   useEffect(() => {
     if (activeSymbol) {
       const clean = activeSymbol.trim().toUpperCase().replace("NSE:", "");
-      fetchChartData(clean, selectedTimeframe, false);
+      fetchChartData(clean, selectedTimeframe, selectedInterval, false);
     }
-  }, [selectedTimeframe]);
+  }, [selectedTimeframe, selectedInterval]);
 
   // Fetch quote & chart data with seamless in-place validation (no loader flashes)
   const fetchSymbolData = async (symbolToFetch: string, isSilent = false) => {
@@ -136,10 +144,10 @@ export default function StockExplorerTab({
           setError(null);
           setLastRefreshed(new Date());
 
-          // 2. Fetch chart data if symbol/timeframe changed or not yet loaded
-          const chartKey = `${clean}_${selectedTimeframe}`;
+          // 2. Fetch chart data if symbol/timeframe/interval changed or not yet loaded
+          const chartKey = `${clean}_${selectedTimeframe}_${selectedInterval}`;
           if (lastChartKeyRef.current !== chartKey || chartData.length === 0) {
-            fetchChartData(clean, selectedTimeframe, isSilent);
+            fetchChartData(clean, selectedTimeframe, selectedInterval, isSilent);
           }
         }
       } else {
@@ -557,6 +565,8 @@ export default function StockExplorerTab({
                 loading={chartLoading}
                 selectedTimeframe={selectedTimeframe}
                 onTimeframeChange={setSelectedTimeframe}
+                selectedInterval={selectedInterval}
+                onIntervalChange={setSelectedInterval}
                 chartType={chartType}
                 onChartTypeChange={setChartType}
               />

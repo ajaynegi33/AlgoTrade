@@ -718,13 +718,19 @@ public class ZerodhaLiveGateway implements BrokerGateway {
         return getStockChart(symbol, "1D");
     }
 
+    public List<Map<String, Object>> getStockChart(String symbol, String timeframe) {
+        return getStockChart(symbol, timeframe, "5m");
+    }
+
     /**
      * Generates or fetches multi-timeframe price trajectory: 1D, 1W, 1M, 3M, 6M, 1Y, 3Y, 5Y, ALL.
+     * Supports intraday candle intervals: 1m, 3m, 5m, 15m.
      * Queries Zerodha Kite Historical Data API with resilient multi-timeframe fallback.
      */
-    public List<Map<String, Object>> getStockChart(String symbol, String timeframe) {
+    public List<Map<String, Object>> getStockChart(String symbol, String timeframe, String interval) {
         String cleanSymbol = (symbol != null && !symbol.isBlank()) ? symbol.trim().toUpperCase().replace("NSE:", "") : "RELIANCE";
         String tf = (timeframe != null && !timeframe.isBlank()) ? timeframe.trim().toUpperCase() : "1D";
+        String intvl = (interval != null && !interval.isBlank()) ? interval.trim().toLowerCase() : "5m";
 
         Map<String, Object> quote = getStockQuote(cleanSymbol);
         double ltp = quote.get("lastPrice") instanceof Number ? ((Number) quote.get("lastPrice")).doubleValue() : 0.0;
@@ -773,21 +779,21 @@ public class ZerodhaLiveGateway implements BrokerGateway {
                 }
 
                 if (token != null && token > 0) {
-                    List<Map<String, Object>> kitePoints = fetchKiteHistoricalData(token, tf);
+                    List<Map<String, Object>> kitePoints = fetchKiteHistoricalData(token, tf, intvl);
                     if (kitePoints != null && !kitePoints.isEmpty()) {
                         return kitePoints;
                     }
                 }
             } catch (Throwable t) {
-                log.warn("Kite Historical API query for {} [{}]: {}. Using resilient multi-timeframe trajectory.", cleanSymbol, tf, t.getMessage());
+                log.warn("Kite Historical API query for {} [{}/{}]: {}. Using resilient multi-timeframe trajectory.", cleanSymbol, tf, intvl, t.getMessage());
             }
         }
 
         // 2. Resilient multi-timeframe candle fallback
-        return generateMultiTimeframeChart(cleanSymbol, tf, ltp, open, high, low, prevClose, totalVolume);
+        return generateMultiTimeframeChart(cleanSymbol, tf, intvl, ltp, open, high, low, prevClose, totalVolume);
     }
 
-    private List<Map<String, Object>> fetchKiteHistoricalData(Long token, String tf) {
+    private List<Map<String, Object>> fetchKiteHistoricalData(Long token, String tf, String intvl) {
         try {
             Calendar cal = Calendar.getInstance(TimeZone.getTimeZone("Asia/Kolkata"));
             Date toDate = cal.getTime();
@@ -840,14 +846,24 @@ public class ZerodhaLiveGateway implements BrokerGateway {
                     cal.set(Calendar.MINUTE, 15);
                     cal.set(Calendar.SECOND, 0);
                     fromDate = cal.getTime();
-                    interval = "5minute";
+                    interval = switch (intvl) {
+                        case "1m" -> "minute";
+                        case "3m" -> "3minute";
+                        case "15m" -> "15minute";
+                        default -> "5minute";
+                    };
                 }
                 default -> {
                     cal.set(Calendar.HOUR_OF_DAY, 9);
                     cal.set(Calendar.MINUTE, 15);
                     cal.set(Calendar.SECOND, 0);
                     fromDate = cal.getTime();
-                    interval = "5minute";
+                    interval = switch (intvl) {
+                        case "1m" -> "minute";
+                        case "3m" -> "3minute";
+                        case "15m" -> "15minute";
+                        default -> "5minute";
+                    };
                 }
             }
 
@@ -890,6 +906,7 @@ public class ZerodhaLiveGateway implements BrokerGateway {
     private List<Map<String, Object>> generateMultiTimeframeChart(
             String symbol,
             String tf,
+            String intvl,
             double ltp,
             double open,
             double high,
@@ -1032,13 +1049,23 @@ public class ZerodhaLiveGateway implements BrokerGateway {
                 }
             }
             default -> { // "1D"
-                String[] timeMarkers = {
-                    "09:15", "09:30", "09:45", "10:00", "10:30", "11:00", "11:30",
-                    "12:00", "12:30", "13:00", "13:30", "14:00", "14:30", "15:00", "15:30"
+                int stepMinutes = switch (intvl) {
+                    case "1m" -> 1;
+                    case "3m" -> 3;
+                    case "15m" -> 15;
+                    default -> 5;
                 };
+                List<String> markers = new ArrayList<>();
+                int curTotalMin = 9 * 60 + 15;
+                int endTotalMin = 15 * 60 + 30;
+                while (curTotalMin <= endTotalMin) {
+                    markers.add(String.format("%02d:%02d", curTotalMin / 60, curTotalMin % 60));
+                    curTotalMin += stepMinutes;
+                }
+                String[] timeMarkers = markers.toArray(new String[0]);
                 double range = Math.max(0.1, high - low);
                 for (int i = 0; i < timeMarkers.length; i++) {
-                    double fraction = (double) i / (timeMarkers.length - 1);
+                    double fraction = (double) i / Math.max(1, timeMarkers.length - 1);
                     double basePrice;
                     if (i == 0) {
                         basePrice = open;
