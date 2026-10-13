@@ -133,7 +133,7 @@ export default function PreMarketScannerTab() {
               </span>
             </div>
             <p className="text-xs sm:text-sm text-slate-400 mt-1">
-              Dynamically searches all active F&amp;O stock underlyings ({universeInfo?.totalFnoSymbols || 210} stocks across {universeInfo?.totalEquities || 2979} NSE equities) directly from Kite master stream.
+              Scans only the <strong className="text-white font-semibold">{universeInfo?.totalFnoSymbols || 210} high-liquidity F&amp;O stocks</strong> (filtered dynamically from all {universeInfo?.totalEquities || 2979} listed NSE equities) directly via Kite master stream.
             </p>
           </div>
 
@@ -185,7 +185,7 @@ export default function PreMarketScannerTab() {
           <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-3.5">
             <span className="text-[11px] text-slate-400 uppercase tracking-wider block">Universe Screened</span>
             <span className="text-xl font-black font-mono text-white mt-0.5 block">{candidates.length || universeInfo?.totalFnoSymbols || 210} Stocks</span>
-            <span className="text-[10px] text-emerald-400">Dynamic Exchange Underlyings</span>
+            <span className="text-[10px] text-emerald-400">Active F&amp;O Equities Only</span>
           </div>
 
           <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-3.5">
