@@ -73,4 +73,25 @@ public interface BrokerGateway {
      * Retrieves comprehensive stock quote and market depth data.
      */
     java.util.Map<String, Object> getStockQuote(String symbol);
+
+    /**
+     * Total account capital / equity in INR including settled realized profits and losses.
+     */
+    default double getTotalCapital() {
+        return getAvailableCash();
+    }
+
+    /**
+     * Baseline configured seed capital in INR (e.g. ₹10,000.00).
+     */
+    default double getBaseCapital() {
+        return 10000.00;
+    }
+
+    /**
+     * Cumulative realized net profit/loss in INR after all statutory charges and brokerages.
+     */
+    default double getCumulativeNetPnL() {
+        return Math.round((getTotalCapital() - getBaseCapital()) * 100.0) / 100.0;
+    }
 }

@@ -16,6 +16,8 @@ export interface OverviewData {
   strategyId: string;
   strategyName: string;
   capital: number;
+  baseCapital?: number;
+  cumulativeNetPnL?: number;
   riskBudget: number;
   canTradeToday: boolean;
   isMarketOpen?: boolean;

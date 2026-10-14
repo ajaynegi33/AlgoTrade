@@ -36,17 +36,36 @@ public class PaperTradingGateway implements BrokerGateway {
     private final AtomicReference<Position> openPosition = new AtomicReference<>(null);
     private final ConcurrentHashMap<String, TradeOrder> orders = new ConcurrentHashMap<>();
     private final AtomicReference<Double> virtualCash;
+    private final double baseCapital;
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private org.springframework.beans.factory.ObjectProvider<com.algotrade.algotradebackend.broker.zerodha.ZerodhaLiveGateway> zerodhaLiveGatewayProvider;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private org.springframework.beans.factory.ObjectProvider<com.algotrade.algotradebackend.websocket.LiveWebSocketBroadcastService> broadcastServiceProvider;
 
     public PaperTradingGateway(
         PaperTradeRepository paperTradeRepository,
         @Value("${algotrade.risk.capital:10000.00}") double initialCapital
     ) {
         this.paperTradeRepository = paperTradeRepository;
-        this.virtualCash = new AtomicReference<>(initialCapital);
-        log.info("Initialized PaperTradingGateway with virtual capital: ₹{}", initialCapital);
+        this.baseCapital = initialCapital;
+        double persistedNetPnL = 0.0;
+        try {
+            var trades = paperTradeRepository.findAll();
+            if (trades != null && !trades.isEmpty()) {
+                persistedNetPnL = trades.stream()
+                    .filter(t -> t.getNetPnL() != null)
+                    .mapToDouble(PaperTradeEntity::getNetPnL)
+                    .sum();
+            }
+        } catch (Throwable t) {
+            log.warn("Could not load persisted paper trades for balance reconstruction: {}", t.getMessage());
+        }
+        double startingCash = Math.round((initialCapital + persistedNetPnL) * 100.0) / 100.0;
+        this.virtualCash = new AtomicReference<>(startingCash);
+        log.info("Initialized PaperTradingGateway: Base Capital=₹{}, Cumulative Settled PnL=₹{}, Current Net Equity=₹{}",
+            initialCapital, Math.round(persistedNetPnL * 100.0) / 100.0, startingCash);
     }
 
     @Override
@@ -202,6 +221,17 @@ public class PaperTradingGateway implements BrokerGateway {
 
         log.info("PAPER TRADE CLOSED: Gross PnL: ₹{}, Taxes: ₹{}, Net PnL: ₹{}, New Balance: ₹{}",
             charges.grossPnL(), charges.totalCharges(), charges.netPnL(), virtualCash.get());
+
+        if (broadcastServiceProvider != null) {
+            var broadcaster = broadcastServiceProvider.getIfAvailable();
+            if (broadcaster != null) {
+                try {
+                    broadcaster.broadcastOverview();
+                } catch (Throwable t) {
+                    log.warn("Failed to broadcast overview update after paper trade close: {}", t.getMessage());
+                }
+            }
+        }
     }
 
     @Override
@@ -214,6 +244,21 @@ public class PaperTradingGateway implements BrokerGateway {
         Position current = openPosition.get();
         double lockedMargin = (current != null) ? calculateOrderMargin(current.symbol(), current.quantity(), current.entryPrice()) : 0.0;
         return Math.max(0.0, virtualCash.get() - lockedMargin);
+    }
+
+    @Override
+    public double getTotalCapital() {
+        return Math.round(virtualCash.get() * 100.0) / 100.0;
+    }
+
+    @Override
+    public double getBaseCapital() {
+        return baseCapital;
+    }
+
+    @Override
+    public double getCumulativeNetPnL() {
+        return Math.round((virtualCash.get() - baseCapital) * 100.0) / 100.0;
     }
 
     @Override

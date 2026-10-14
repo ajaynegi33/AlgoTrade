@@ -49,6 +49,10 @@ public class PositionSizingEngine {
     private int maxDailyLosses;
 
     private final PaperTradeRepository paperTradeRepository;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private org.springframework.beans.factory.ObjectProvider<com.algotrade.algotradebackend.broker.BrokerGatewayManager> brokerGatewayManagerProvider;
+
     private final java.util.concurrent.atomic.AtomicInteger liveTradesToday = new java.util.concurrent.atomic.AtomicInteger(0);
     private final java.util.concurrent.atomic.AtomicInteger liveLossesToday = new java.util.concurrent.atomic.AtomicInteger(0);
     private volatile java.time.LocalDate lastTradeDate;
@@ -161,7 +165,8 @@ public class PositionSizingEngine {
             return 0;
         }
 
-        int baseQty = calculateSizingQuantity(capital, entryPrice, stopPrice, riskBudgetPct, maxExposureMultiplier, minStopDistancePct, maxStopDistancePct);
+        double activeCapital = (gateway != null) ? gateway.getTotalCapital() : getCapital();
+        int baseQty = calculateSizingQuantity(activeCapital, entryPrice, stopPrice, riskBudgetPct, maxExposureMultiplier, minStopDistancePct, maxStopDistancePct);
         if (baseQty <= 0) {
             double stopDistance = entryPrice - stopPrice;
             if (stopDistance <= 0) {
@@ -186,19 +191,50 @@ public class PositionSizingEngine {
 
         int qMargin = marginPerShare > 0 ? (int) Math.floor(availableCash / marginPerShare) : 0;
 
-        // Constraint 3: Target Exposure Ceiling (Q_exposure = capital * maxExposureMultiplier / entryPrice)
-        double maxExposure = capital * maxExposureMultiplier;
+        // Constraint 3: Target Exposure Ceiling (Q_exposure = activeCapital * maxExposureMultiplier / entryPrice)
+        double maxExposure = activeCapital * maxExposureMultiplier;
         int qExposure = (int) Math.floor(maxExposure / entryPrice);
 
         // Final Sizing Resolution: Smallest of base risk quantity, available margin, and exposure ceiling
         int finalQuantity = Math.min(baseQty, Math.min(qMargin, qExposure));
 
-        log.info("SIZING RESOLUTION for {}: BaseQty={}, Q_margin={}, Q_exposure={} -> FINAL QUANTITY = {} shares (Total Value: ₹{})",
-            symbol, baseQty, qMargin, qExposure, finalQuantity, Math.round(finalQuantity * entryPrice));
+        log.info("SIZING RESOLUTION for {}: ActiveCapital=₹{}, BaseQty={}, Q_margin={}, Q_exposure={} -> FINAL QUANTITY = {} shares (Total Value: ₹{})",
+            symbol, activeCapital, baseQty, qMargin, qExposure, finalQuantity, Math.round(finalQuantity * entryPrice));
 
         return finalQuantity;
     }
 
-    public double getCapital() { return capital; }
-    public double getRiskBudget() { return capital * (riskBudgetPct / 100.0); }
+    public double getCapital() {
+        if (brokerGatewayManagerProvider != null) {
+            var manager = brokerGatewayManagerProvider.getIfAvailable();
+            if (manager != null && manager.getActiveGateway() != null) {
+                return manager.getActiveGateway().getTotalCapital();
+            }
+        }
+        return capital;
+    }
+
+    public double getBaseCapital() {
+        if (brokerGatewayManagerProvider != null) {
+            var manager = brokerGatewayManagerProvider.getIfAvailable();
+            if (manager != null && manager.getActiveGateway() != null) {
+                return manager.getActiveGateway().getBaseCapital();
+            }
+        }
+        return capital;
+    }
+
+    public double getCumulativeNetPnL() {
+        if (brokerGatewayManagerProvider != null) {
+            var manager = brokerGatewayManagerProvider.getIfAvailable();
+            if (manager != null && manager.getActiveGateway() != null) {
+                return manager.getActiveGateway().getCumulativeNetPnL();
+            }
+        }
+        return 0.0;
+    }
+
+    public double getRiskBudget() {
+        return Math.round(getCapital() * (riskBudgetPct / 100.0) * 100.0) / 100.0;
+    }
 }

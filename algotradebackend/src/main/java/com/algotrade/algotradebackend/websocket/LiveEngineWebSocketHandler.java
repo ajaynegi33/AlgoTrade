@@ -224,6 +224,8 @@ public class LiveEngineWebSocketHandler extends TextWebSocketHandler {
         response.put("strategyId", strategyManager.getActiveStrategy() != null ? strategyManager.getActiveStrategy().getStrategyId() : "NONE");
         response.put("strategyName", strategyManager.getActiveStrategy() != null ? strategyManager.getActiveStrategy().getStrategyName() : "None");
         response.put("capital", positionSizingEngine.getCapital());
+        response.put("baseCapital", positionSizingEngine.getBaseCapital());
+        response.put("cumulativeNetPnL", positionSizingEngine.getCumulativeNetPnL());
         response.put("riskBudget", positionSizingEngine.getRiskBudget());
         response.put("canTradeToday", positionSizingEngine.canTradeToday());
         response.put("isMarketOpen", marketCalendarService.isMarketOpen());

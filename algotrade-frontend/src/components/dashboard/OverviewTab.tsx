@@ -32,18 +32,35 @@ export default function OverviewTab({ overview, backendUrl = "http://localhost:8
       {/* Quick Metrics Grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
-          <p className="text-xs text-slate-400">Capital Base</p>
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-slate-400">Current Capital</p>
+            {overview && overview.cumulativeNetPnL !== undefined && overview.cumulativeNetPnL !== 0 && (
+              <span
+                className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
+                  overview.cumulativeNetPnL > 0
+                    ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                    : "bg-rose-500/20 text-rose-400 border border-rose-500/30"
+                }`}
+              >
+                {overview.cumulativeNetPnL > 0 ? "+" : ""}₹{overview.cumulativeNetPnL.toFixed(2)}
+              </span>
+            )}
+          </div>
           <p className="text-lg sm:text-2xl font-bold font-mono text-white mt-1">
-            {overview ? `₹${overview.capital.toLocaleString("en-IN")}` : "--"}
+            {overview ? `₹${overview.capital.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "--"}
           </p>
-          <p className="text-[10px] text-slate-500 mt-1">Dedicated portfolio (5x MIS Leverage)</p>
+          <p className="text-[10px] text-slate-500 mt-1">
+            Base: ₹{(overview?.baseCapital ?? 10000).toLocaleString("en-IN")} • 5x MIS Leverage
+          </p>
         </div>
         <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
           <p className="text-xs text-slate-400">Risk Budget (2.0%)</p>
           <p className="text-lg sm:text-2xl font-bold font-mono text-amber-400 mt-1">
             {overview ? `₹${overview.riskBudget.toFixed(2)}` : "--"}
           </p>
-          <p className="text-[10px] text-slate-500 mt-1">Max loss allowed per trade</p>
+          <p className="text-[10px] text-slate-500 mt-1">
+            {overview ? `2% of dynamic capital (₹${overview.capital.toFixed(2)})` : "Max loss allowed per trade"}
+          </p>
         </div>
         <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
           <p className="text-xs text-slate-400">Daily Trade Limit</p>

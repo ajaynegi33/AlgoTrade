@@ -78,9 +78,15 @@ public class ZerodhaLiveGateway implements BrokerGateway {
     @Value("${algotrade.zerodha.totp-secret:}")
     private String totpSecret;
 
+    @Value("${algotrade.risk.capital:10000.00}")
+    private double baseCapital;
+
     private KiteConnect kiteConnect;
     private volatile boolean sessionActive = false;
     private volatile String accessToken;
+    private final java.util.concurrent.atomic.AtomicReference<com.zerodhatech.models.Margin> cachedMargin = new java.util.concurrent.atomic.AtomicReference<>(null);
+    private final java.util.concurrent.atomic.AtomicLong lastMarginFetchTimeMs = new java.util.concurrent.atomic.AtomicLong(0);
+    private final java.util.concurrent.atomic.AtomicReference<Double> cumulativeLivePnL = new java.util.concurrent.atomic.AtomicReference<>(0.0);
 
     @PostConstruct
     public void init() {
@@ -424,21 +430,68 @@ public class ZerodhaLiveGateway implements BrokerGateway {
         return Optional.empty();
     }
 
+    private Margin getCachedMargin() {
+        if (!sessionActive || kiteConnect == null) {
+            return null;
+        }
+        long now = System.currentTimeMillis();
+        Margin current = cachedMargin.get();
+        if (current != null && (now - lastMarginFetchTimeMs.get()) < 3000) {
+            return current;
+        }
+        try {
+            Margin fresh = kiteConnect.getMargins("equity");
+            if (fresh != null) {
+                cachedMargin.set(fresh);
+                lastMarginFetchTimeMs.set(now);
+                return fresh;
+            }
+        } catch (Throwable t) {
+            log.warn("Failed to fetch fresh Kite margins: {}", t.getMessage());
+        }
+        return cachedMargin.get();
+    }
+
     @Override
     public double getAvailableCash() {
         if (!sessionActive) {
             return 0.0;
         }
 
-        try {
-            Margin margin = kiteConnect.getMargins("equity");
-            if (margin != null && margin.net != null) {
+        Margin margin = getCachedMargin();
+        if (margin != null && margin.net != null) {
+            try {
                 return Double.parseDouble(margin.net);
-            }
-        } catch (Throwable e) {
-            log.error("Failed to query Zerodha cash margin: {}", e.getMessage());
+            } catch (Exception ignored) {}
         }
         return 0.0;
+    }
+
+    @Override
+    public double getTotalCapital() {
+        if (!sessionActive) {
+            return baseCapital;
+        }
+        double liveAvailable = getAvailableCash();
+        double theoreticalDedicated = baseCapital + cumulativeLivePnL.get();
+        if (liveAvailable <= 0) {
+            return theoreticalDedicated;
+        }
+        return Math.round(Math.min(theoreticalDedicated, liveAvailable) * 100.0) / 100.0;
+    }
+
+    @Override
+    public double getBaseCapital() {
+        return baseCapital;
+    }
+
+    @Override
+    public double getCumulativeNetPnL() {
+        return Math.round((getTotalCapital() - baseCapital) * 100.0) / 100.0;
+    }
+
+    public void recordLiveTradePnL(double netPnL) {
+        cumulativeLivePnL.updateAndGet(pnl -> pnl + netPnL);
     }
 
     @Override
