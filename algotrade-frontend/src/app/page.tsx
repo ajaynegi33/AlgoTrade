@@ -363,10 +363,6 @@ export default function Dashboard() {
             }`}
           >
             🏆 Top 10 Performers
-            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-mono flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-              REAL-TIME 0ms
-            </span>
           </button>
           <button
             onClick={() => setActiveTab("scanner")}
@@ -376,10 +372,7 @@ export default function Dashboard() {
                 : "text-slate-400 hover:text-white hover:bg-slate-900"
             }`}
           >
-            🌅 09:12 Pre-Market
-            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800 text-amber-300 border border-amber-500/30 font-mono">
-              AUCTION
-            </span>
+            🌅 Pre-Market
           </button>
           <button
             onClick={() => setActiveTab("analytics")}
@@ -410,7 +403,6 @@ export default function Dashboard() {
             }`}
           >
             ⚡ Live Engine Decisions
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
           </button>
           <button
             onClick={() => setActiveTab("backtest")}
@@ -421,9 +413,7 @@ export default function Dashboard() {
             }`}
           >
             🧪 Strategy Backtest
-            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800 text-emerald-400 border border-emerald-500/30 font-mono">
-              NEW
-            </span>
+          
           </button>
         </div>
 

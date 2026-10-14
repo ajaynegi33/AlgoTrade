@@ -61,6 +61,8 @@ public class ContinuousIntradayEngineTest {
 
     @Test
     void testMarketPhaseDetermination() {
+        assertEquals("PRE_MARKET", ContinuousIntradayScannerService.determineMarketPhase(LocalTime.of(8, 30)));
+        assertEquals("PRE_OPEN", ContinuousIntradayScannerService.determineMarketPhase(LocalTime.of(9, 10)));
         assertEquals("OPENING_DISCOVERY", ContinuousIntradayScannerService.determineMarketPhase(LocalTime.of(9, 18)));
         assertEquals("WAVE_1_MORNING_MOMENTUM", ContinuousIntradayScannerService.determineMarketPhase(LocalTime.of(9, 45)));
         assertEquals("MIDDAY_CONSOLIDATION", ContinuousIntradayScannerService.determineMarketPhase(LocalTime.of(11, 30)));
@@ -68,6 +70,7 @@ public class ContinuousIntradayEngineTest {
         assertEquals("WAVE_3_AFTERNOON_RALLY", ContinuousIntradayScannerService.determineMarketPhase(LocalTime.of(14, 15)));
         assertEquals("SESSION_SHUTDOWN", ContinuousIntradayScannerService.determineMarketPhase(LocalTime.of(14, 50)));
         assertEquals("SQUARE_OFF", ContinuousIntradayScannerService.determineMarketPhase(LocalTime.of(15, 10)));
+        assertEquals("MARKET_CLOSED", ContinuousIntradayScannerService.determineMarketPhase(LocalTime.of(15, 45)));
     }
 
     @Test

@@ -20,6 +20,7 @@ export interface OverviewData {
   canTradeToday: boolean;
   isMarketOpen?: boolean;
   nextMarketOpen?: string;
+  marketPhase?: string;
   status: "IDLE" | "OBSERVING" | "IN_TRADE" | "DAY_COMPLETED" | "MARKET_CLOSED";
   activePosition: ActivePosition | null;
 }

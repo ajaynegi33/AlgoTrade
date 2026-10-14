@@ -72,6 +72,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
     private volatile double currentArmedStopPrice = 0.0;
     private volatile int plannedQuantity = 0;
     private volatile LocalDate lastSessionDate = null;
+    private volatile LocalTime lastTickTime = null;
 
     public void setTrailingParameters(double breakevenTriggerPct, double breakevenCostBufferPct, double trailingBufferPct) {
         this.breakevenTriggerPct = breakevenTriggerPct;
@@ -154,6 +155,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         latestTopCandidates.clear();
         tradedSymbolsToday.clear();
         lastRadarEvaluationTimeMs.clear();
+        lastTickTime = null;
 
         // Safety check: Do not blindly wipe active state if an unsettled position is still open at the broker
         BrokerGateway gateway = brokerGatewayManager.getActiveGateway();
@@ -291,6 +293,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             return;
         }
 
+        this.lastTickTime = currentTime;
         CandidateMetrics metrics = metricsMap.computeIfAbsent(symbol, CandidateMetrics::new);
         metrics.updateTick(ltp, volume, totalBuyQty, totalSellQty, exchangeVwap, inObservationWindow);
 
@@ -523,7 +526,8 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
 
     @Override
     public synchronized void evaluateContinuousCycle() {
-        evaluateCycle(LocalTime.now(ZoneId.of("Asia/Kolkata")));
+        LocalTime evalTime = lastTickTime != null ? lastTickTime : LocalTime.now(ZoneId.of("Asia/Kolkata"));
+        evaluateCycle(evalTime);
     }
 
     public synchronized void evaluateCycle(LocalTime evaluationTime) {

@@ -17,7 +17,7 @@ interface LeaderboardTabProps {
 export default function LeaderboardTab({
   leaderboard,
   lastUpdated,
-  marketPhase = "WAVE_1_MORNING_MOMENTUM",
+  marketPhase,
   backendUrl,
   latestTicks,
   onSelectSymbol,
@@ -32,6 +32,10 @@ export default function LeaderboardTab({
 
   const formatPhase = (phase: string) => {
     switch (phase) {
+      case "PRE_MARKET":
+        return { label: "Pre-Market Preparation (Before 09:00)", color: "text-slate-400 bg-slate-500/10 border-slate-500/30", icon: "☕" };
+      case "PRE_OPEN":
+        return { label: "Pre-Open Auction (09:00 - 09:15)", color: "text-amber-400 bg-amber-500/10 border-amber-500/30", icon: "🌅" };
       case "OPENING_DISCOVERY":
         return { label: "Opening Discovery (09:15 - 09:20)", color: "text-amber-400 bg-amber-500/10 border-amber-500/30", icon: "🌅" };
       case "WAVE_1_MORNING_MOMENTUM":
@@ -46,12 +50,14 @@ export default function LeaderboardTab({
         return { label: "Session Cooldown (14:45 - 15:05)", color: "text-orange-400 bg-orange-500/10 border-orange-500/30", icon: "🔒" };
       case "SQUARE_OFF":
         return { label: "Mandatory Square-Off (15:05 - 15:30)", color: "text-rose-400 bg-rose-500/10 border-rose-500/30", icon: "⏹️" };
+      case "MARKET_CLOSED":
+        return { label: "Market Closed (Session Ended 15:30)", color: "text-slate-400 bg-slate-800/80 border-slate-700", icon: "🌙" };
       default:
-        return { label: phase.replace(/_/g, " "), color: "text-slate-400 bg-slate-800 border-slate-700", icon: "⚡" };
+        return { label: phase ? phase.replace(/_/g, " ") : "Live Session", color: "text-slate-400 bg-slate-800 border-slate-700", icon: "⚡" };
     }
   };
 
-  const currentPhaseInfo = formatPhase(marketPhase);
+  const currentPhaseInfo = formatPhase(marketPhase || "OPENING_DISCOVERY");
 
   const handleManualScan = async () => {
     const url = backendUrl || process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8080";
@@ -94,17 +100,14 @@ export default function LeaderboardTab({
           </div>
 
           <div className="flex items-center gap-3 flex-wrap">
-            <div className="flex items-center gap-2 text-xs font-mono text-slate-400 bg-slate-950/70 px-3 py-1.5 rounded-xl border border-slate-800">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-              <span className="font-bold text-emerald-400">⚡ 0ms Live Radar Stream</span>
-              <span className="text-slate-600">|</span>
+            <div className="flex items-center gap-2 text-xs font-mono text-slate-400 bg-slate-950/70 px-3 py-1.5 rounded-lg border border-slate-800">
               <span>{lastUpdated ? lastUpdated.toLocaleTimeString() : "--:--:--"}</span>
             </div>
 
             <button
               onClick={handleManualScan}
               disabled={triggeringScan}
-              className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              className="px-3.5 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
               title="Trigger an immediate scan cycle across all 210 F&O stocks"
             >
               {triggeringScan ? (

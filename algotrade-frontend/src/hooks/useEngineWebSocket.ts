@@ -58,6 +58,28 @@ interface UseEngineWebSocketReturn {
  * - Exponential backoff auto-reconnect (1s to 10s)
  * - Explicit, clean socket closure on unmount (code 1000)
  */
+// Calculate current market phase dynamically based on official NSE IST trading hours
+export function getCurrentMarketPhase(): string {
+  const now = new Date();
+  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+  const ist = new Date(utc + 3600000 * 5.5);
+  const day = ist.getDay();
+  // Saturday (6) or Sunday (0)
+  if (day === 0 || day === 6) return "MARKET_CLOSED";
+
+  const totalMinutes = ist.getHours() * 60 + ist.getMinutes();
+  if (totalMinutes < 9 * 60) return "PRE_MARKET";
+  if (totalMinutes < 9 * 60 + 15) return "PRE_OPEN";
+  if (totalMinutes < 9 * 60 + 20) return "OPENING_DISCOVERY";
+  if (totalMinutes < 10 * 60 + 30) return "WAVE_1_MORNING_MOMENTUM";
+  if (totalMinutes < 12 * 60 + 30) return "MIDDAY_CONSOLIDATION";
+  if (totalMinutes < 13 * 60 + 45) return "WAVE_2_EUROPEAN_INFLUX";
+  if (totalMinutes < 14 * 60 + 45) return "WAVE_3_AFTERNOON_RALLY";
+  if (totalMinutes < 15 * 60 + 5) return "SESSION_SHUTDOWN";
+  if (totalMinutes < 15 * 60 + 30) return "SQUARE_OFF";
+  return "MARKET_CLOSED";
+}
+
 export function useEngineWebSocket(): UseEngineWebSocketReturn {
   const [overview, setOverview] = useState<OverviewData | null>(null);
   const [leaderboard, setLeaderboard] = useState<ScoredCandidate[]>([]);
@@ -65,7 +87,16 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
   const [connectionStatus, setConnectionStatus] = useState<WebSocketConnectionStatus>("connecting");
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [latestTicks, setLatestTicks] = useState<Record<string, TickUpdate>>({});
-  const [marketPhase, setMarketPhase] = useState<string>("WAVE_1_MORNING_MOMENTUM");
+  const [marketPhase, setMarketPhase] = useState<string>("");
+
+  // Client-side only: compute and periodically refresh marketPhase to naturally advance with the clock
+  useEffect(() => {
+    setMarketPhase(getCurrentMarketPhase());
+    const timer = setInterval(() => {
+      setMarketPhase(getCurrentMarketPhase());
+    }, 30000);
+    return () => clearInterval(timer);
+  }, []);
 
   const socketRef = useRef<WebSocket | null>(null);
   const pingIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -141,12 +172,20 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
           if (type === "INITIAL_SNAPSHOT" && data) {
             if (data.overview) {
               setOverview(data.overview);
+              if (data.overview.marketPhase) {
+                setMarketPhase(data.overview.marketPhase);
+              }
               if (data.overview.activePosition?.symbol && ws.readyState === WebSocket.OPEN) {
                 try {
                   ws.send(JSON.stringify({ action: "SUBSCRIBE_SYMBOL", symbol: data.overview.activePosition.symbol }));
                   subscribedSymbolsRef.current.add(data.overview.activePosition.symbol);
                 } catch {}
               }
+            }
+            if (typeof data.marketPhase === "string") {
+              setMarketPhase(data.marketPhase);
+            } else if (typeof data.phase === "string") {
+              setMarketPhase(data.phase);
             }
             if (Array.isArray(data.leaderboard)) {
               setLeaderboard(data.leaderboard);
@@ -167,6 +206,9 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
             setLastUpdated(new Date());
           } else if (type === "OVERVIEW_UPDATE" && data) {
             setOverview(data);
+            if (data.marketPhase) {
+              setMarketPhase(data.marketPhase);
+            }
             if (data.activePosition?.symbol && ws.readyState === WebSocket.OPEN) {
               try {
                 ws.send(JSON.stringify({ action: "SUBSCRIBE_SYMBOL", symbol: data.activePosition.symbol }));

@@ -179,13 +179,16 @@ public class ContinuousIntradayScannerService {
     }
 
     public static String determineMarketPhase(LocalTime time) {
+        if (time.isBefore(LocalTime.of(9, 0))) return "PRE_MARKET";
+        if (time.isBefore(LocalTime.of(9, 15))) return "PRE_OPEN";
         if (time.isBefore(LocalTime.of(9, 20))) return "OPENING_DISCOVERY";
         if (time.isBefore(LocalTime.of(10, 30))) return "WAVE_1_MORNING_MOMENTUM";
         if (time.isBefore(LocalTime.of(12, 30))) return "MIDDAY_CONSOLIDATION";
         if (time.isBefore(LocalTime.of(13, 45))) return "WAVE_2_EUROPEAN_INFLUX";
         if (time.isBefore(LocalTime.of(14, 45))) return "WAVE_3_AFTERNOON_RALLY";
         if (time.isBefore(LocalTime.of(15, 5))) return "SESSION_SHUTDOWN";
-        return "SQUARE_OFF";
+        if (time.isBefore(LocalTime.of(15, 30))) return "SQUARE_OFF";
+        return "MARKET_CLOSED";
     }
 
     public boolean isEnabled() { return enabled; }

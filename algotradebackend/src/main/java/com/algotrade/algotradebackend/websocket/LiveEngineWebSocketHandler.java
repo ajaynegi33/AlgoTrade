@@ -26,6 +26,7 @@ import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import java.io.IOException;
 import java.time.Instant;
+import java.time.LocalTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -179,6 +180,12 @@ public class LiveEngineWebSocketHandler extends TextWebSocketHandler {
                     log.warn("Failed to trigger initial baseline scan on WS connect: {}", t.getMessage());
                 }
             }
+            LocalTime now = LocalTime.now(MarketCalendarService.IST_ZONE);
+            String currentPhase = marketCalendarService.isMarketOpen()
+                ? ContinuousIntradayScannerService.determineMarketPhase(now)
+                : "MARKET_CLOSED";
+            snapshotData.put("marketPhase", currentPhase);
+            snapshotData.put("phase", currentPhase);
             snapshotData.put("leaderboard", initialCandidates);
             snapshotData.put("recentDecisions", activityFeedService.getRecentEvents(50));
             if (scannerProvider != null && scannerProvider.getIfAvailable() != null) {
@@ -205,6 +212,13 @@ public class LiveEngineWebSocketHandler extends TextWebSocketHandler {
 
         ExecutionMode mode = brokerGatewayManager.getActiveMode();
         Optional<Position> optPos = brokerGatewayManager.getActiveGateway().getOpenPosition();
+
+        LocalTime now = LocalTime.now(MarketCalendarService.IST_ZONE);
+        String currentPhase = marketCalendarService.isMarketOpen()
+            ? ContinuousIntradayScannerService.determineMarketPhase(now)
+            : "MARKET_CLOSED";
+        response.put("marketPhase", currentPhase);
+        response.put("phase", currentPhase);
 
         response.put("mode", mode.name());
         response.put("strategyId", strategyManager.getActiveStrategy() != null ? strategyManager.getActiveStrategy().getStrategyId() : "NONE");

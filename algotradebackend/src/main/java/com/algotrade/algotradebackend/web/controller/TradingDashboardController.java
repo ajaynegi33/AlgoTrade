@@ -11,11 +11,13 @@ import com.algotrade.algotradebackend.persistence.entity.PaperTradeEntity;
 import com.algotrade.algotradebackend.persistence.repository.PaperTradeRepository;
 import com.algotrade.algotradebackend.risk.PositionSizingEngine;
 import com.algotrade.algotradebackend.strategy.StrategyManager;
+import com.algotrade.algotradebackend.scanner.ContinuousIntradayScannerService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.*;
 
@@ -75,6 +77,13 @@ public class TradingDashboardController {
 
         ExecutionMode mode = brokerGatewayManager.getActiveMode();
         Optional<Position> optPos = brokerGatewayManager.getActiveGateway().getOpenPosition();
+
+        LocalTime now = LocalTime.now(MarketCalendarService.IST_ZONE);
+        String currentPhase = marketCalendarService.isMarketOpen()
+            ? ContinuousIntradayScannerService.determineMarketPhase(now)
+            : "MARKET_CLOSED";
+        response.put("marketPhase", currentPhase);
+        response.put("phase", currentPhase);
 
         response.put("mode", mode.name());
         response.put("strategyId", strategyManager.getActiveStrategy() != null ? strategyManager.getActiveStrategy().getStrategyId() : "NONE");
