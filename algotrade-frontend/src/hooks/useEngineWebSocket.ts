@@ -43,6 +43,7 @@ interface UseEngineWebSocketReturn {
   reconnect: () => void;
   latestTicks: Record<string, TickUpdate>;
   subscribeSymbol: (symbol: string) => void;
+  marketPhase: string;
 }
 
 /**
@@ -63,6 +64,7 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
   const [connectionStatus, setConnectionStatus] = useState<WebSocketConnectionStatus>("connecting");
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [latestTicks, setLatestTicks] = useState<Record<string, TickUpdate>>({});
+  const [marketPhase, setMarketPhase] = useState<string>("WAVE_1_MORNING_MOMENTUM");
 
   const socketRef = useRef<WebSocket | null>(null);
   const pingIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -136,7 +138,15 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
           const data = message.data;
 
           if (type === "INITIAL_SNAPSHOT" && data) {
-            if (data.overview) setOverview(data.overview);
+            if (data.overview) {
+              setOverview(data.overview);
+              if (data.overview.activePosition?.symbol && ws.readyState === WebSocket.OPEN) {
+                try {
+                  ws.send(JSON.stringify({ action: "SUBSCRIBE_SYMBOL", symbol: data.overview.activePosition.symbol }));
+                  subscribedSymbolsRef.current.add(data.overview.activePosition.symbol);
+                } catch {}
+              }
+            }
             if (Array.isArray(data.leaderboard)) setLeaderboard(data.leaderboard);
             if (Array.isArray(data.recentDecisions)) {
               setRecentDecisions(data.recentDecisions.slice(0, 150));
@@ -144,12 +154,52 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
             setLastUpdated(new Date());
           } else if (type === "OVERVIEW_UPDATE" && data) {
             setOverview(data);
+            if (data.activePosition?.symbol && ws.readyState === WebSocket.OPEN) {
+              try {
+                ws.send(JSON.stringify({ action: "SUBSCRIBE_SYMBOL", symbol: data.activePosition.symbol }));
+                subscribedSymbolsRef.current.add(data.activePosition.symbol);
+              } catch {}
+            }
+            setLastUpdated(new Date());
+          } else if (type === "POSITION_UPDATE") {
+            setOverview((prev) => {
+              if (!prev) return prev;
+              return {
+                ...prev,
+                status: data ? "IN_TRADE" : "OBSERVING",
+                activePosition: data || null,
+              };
+            });
             setLastUpdated(new Date());
           } else if (type === "TICK_UPDATE" && data && data.symbol) {
             setLatestTicks((prev) => ({
               ...prev,
               [data.symbol]: data as TickUpdate,
             }));
+            // Instantly update active position in overview state with zero lag
+            setOverview((prev) => {
+              if (!prev || !prev.activePosition || prev.activePosition.symbol !== data.symbol) {
+                return prev;
+              }
+              const pos = prev.activePosition;
+              const newLtp = data.ltp;
+              const entry = pos.entryPrice;
+              const qty = pos.quantity;
+              const unPnl = (newLtp - entry) * qty;
+              const unPnlPct = entry > 0 ? ((newLtp - entry) / entry) * 100.0 : 0;
+              const newHwm = Math.max(pos.highWaterMark, newLtp);
+
+              return {
+                ...prev,
+                activePosition: {
+                  ...pos,
+                  currentPrice: newLtp,
+                  unrealizedPnL: Math.round(unPnl * 100) / 100,
+                  unrealizedPnLPct: Math.round(unPnlPct * 100) / 100,
+                  highWaterMark: Math.round(newHwm * 100) / 100,
+                },
+              };
+            });
             setLastUpdated(new Date());
           } else if (type === "DECISION_EVENT" && data) {
             setRecentDecisions((prev) => {
@@ -162,6 +212,14 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
             setLastUpdated(new Date());
           } else if (type === "LEADERBOARD_UPDATE" && Array.isArray(data)) {
             setLeaderboard(data);
+            setLastUpdated(new Date());
+          } else if (type === "ALL_DAY_SCAN_UPDATE" && data) {
+            if (Array.isArray(data.topCandidates)) {
+              setLeaderboard(data.topCandidates);
+            }
+            if (typeof data.phase === "string") {
+              setMarketPhase(data.phase);
+            }
             setLastUpdated(new Date());
           } else if (type === "PONG") {
             // Heartbeat acknowledged
@@ -259,5 +317,6 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
     reconnect,
     latestTicks,
     subscribeSymbol,
+    marketPhase,
   };
 }

@@ -57,7 +57,7 @@ public class LiveEngineWebSocketHandler extends TextWebSocketHandler {
     @Autowired
     public LiveEngineWebSocketHandler(
         BrokerGatewayManager brokerGatewayManager,
-        StrategyManager strategyManager,
+        @org.springframework.context.annotation.Lazy StrategyManager strategyManager,
         PositionSizingEngine positionSizingEngine,
         MarketCalendarService marketCalendarService,
         EngineActivityFeedService activityFeedService,
@@ -154,7 +154,14 @@ public class LiveEngineWebSocketHandler extends TextWebSocketHandler {
     public void sendInitialSnapshot(WebSocketSession session) {
         try {
             Map<String, Object> snapshotData = new LinkedHashMap<>();
-            snapshotData.put("overview", buildOverviewData());
+            Map<String, Object> overviewData = buildOverviewData();
+            snapshotData.put("overview", overviewData);
+            if (overviewData.get("activePosition") instanceof Map<?, ?> posMap) {
+                Object symObj = posMap.get("symbol");
+                if (symObj instanceof String sym && kiteMarketDataProvider != null && kiteMarketDataProvider.getIfAvailable() != null) {
+                    kiteMarketDataProvider.getIfAvailable().subscribeSymbol(sym);
+                }
+            }
             snapshotData.put("leaderboard", strategyManager.getLatestTopCandidates());
             snapshotData.put("recentDecisions", activityFeedService.getRecentEvents(50));
             if (scannerProvider != null && scannerProvider.getIfAvailable() != null) {

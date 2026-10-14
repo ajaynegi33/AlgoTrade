@@ -47,6 +47,9 @@ public class TradingDashboardController {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private org.springframework.beans.factory.ObjectProvider<com.algotrade.algotradebackend.broker.zerodha.KiteMarketDataService> kiteMarketDataProvider;
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private org.springframework.beans.factory.ObjectProvider<com.algotrade.algotradebackend.scanner.ContinuousIntradayScannerService> continuousScannerProvider;
+
     public TradingDashboardController(
         BrokerGatewayManager brokerGatewayManager,
         StrategyManager strategyManager,
@@ -115,6 +118,24 @@ public class TradingDashboardController {
     @GetMapping("/leaderboard")
     public ResponseEntity<List<ScoredCandidate>> getLeaderboard() {
         return ResponseEntity.ok(strategyManager.getLatestTopCandidates());
+    }
+
+    /**
+     * Manually triggers an immediate continuous intraday scan cycle across all 210 F&O universe stocks.
+     */
+    @PostMapping("/scan/trigger")
+    public ResponseEntity<Map<String, Object>> triggerContinuousScan() {
+        if (continuousScannerProvider != null && continuousScannerProvider.getIfAvailable() != null) {
+            boolean triggered = continuousScannerProvider.getIfAvailable().triggerManualScan();
+            return ResponseEntity.ok(Map.of(
+                "success", triggered,
+                "message", "Continuous intraday scan cycle executed across F&O universe."
+            ));
+        }
+        return ResponseEntity.ok(Map.of(
+            "success", false,
+            "message", "Continuous scanner service is not available."
+        ));
     }
 
     /**

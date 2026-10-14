@@ -235,7 +235,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
 
     @Override
     public String getStrategyName() {
-        return "15-Min Opening Momentum Breakout";
+        return "All-Day Continuous Breakout Engine";
     }
 
     @Override
@@ -418,16 +418,6 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
     @Override
     public synchronized void evaluateContinuousCycle() {
         ensureSessionCurrent();
-        BrokerGateway gateway = brokerGatewayManager.getActiveGateway();
-
-        // Safety Gate: Ensure no position is already open and daily limit is not reached
-        if (gateway.getOpenPosition().isPresent() || lifecycleState != TradeLifecycleState.FLAT) {
-            return;
-        }
-
-        if (!positionSizingEngine.canTradeToday()) {
-            return;
-        }
 
         // Step 1: Score all candidates (atomically captures snapshot per candidate) excluding symbols already traded today
         LocalTime now = LocalTime.now(ZoneId.of("Asia/Kolkata"));
@@ -436,10 +426,20 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             .map(m -> scoringEngine.evaluate(m, now))
             .toList();
 
-        // Step 2: Rank candidates with tie-breaker
+        // Step 2: Rank candidates with tie-breaker and update telemetry leaderboard
         List<ScoredCandidate> ranked = scoringEngine.rankCandidates(scoredList);
         latestTopCandidates.clear();
         latestTopCandidates.addAll(ranked);
+
+        // Safety Gate: Ensure no position is already open and daily limit is not reached
+        BrokerGateway gateway = brokerGatewayManager.getActiveGateway();
+        if (gateway.getOpenPosition().isPresent() || lifecycleState != TradeLifecycleState.FLAT) {
+            return;
+        }
+
+        if (!positionSizingEngine.canTradeToday()) {
+            return;
+        }
 
         // Step 3: Check qualification threshold (Score >= 75 and passes hard gates)
         if (ranked.isEmpty() || !ranked.get(0).isQualified()) {

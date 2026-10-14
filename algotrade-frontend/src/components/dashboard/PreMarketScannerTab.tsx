@@ -202,8 +202,8 @@ export default function PreMarketScannerTab() {
 
           <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-3.5">
             <span className="text-[11px] text-slate-400 uppercase tracking-wider block">Next Pipeline Step</span>
-            <span className="text-xl font-black font-mono text-sky-400 mt-0.5 block">09:15 - 09:30</span>
-            <span className="text-[10px] text-slate-500">Continuous 15-Min ORB Validation</span>
+            <span className="text-xl font-black font-mono text-sky-400 mt-0.5 block">09:20 - 14:45 IST</span>
+            <span className="text-[10px] text-emerald-400">Continuous All-Day Wave Engine</span>
           </div>
         </div>
       </div>

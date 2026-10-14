@@ -30,6 +30,7 @@ export default function Dashboard() {
     lastUpdated,
     latestTicks,
     subscribeSymbol,
+    marketPhase,
   } = useEngineWebSocket();
 
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
@@ -215,6 +216,31 @@ export default function Dashboard() {
     }
   }, [activeTab]);
 
+  // Automatically subscribe to active position symbol over WebSocket as soon as a trade is entered
+  useEffect(() => {
+    if (overview?.activePosition?.symbol) {
+      subscribeSymbol(overview.activePosition.symbol);
+    }
+  }, [overview?.activePosition?.symbol, subscribeSymbol]);
+
+  // Dynamic fallback polling exclusively while an active position is open (every 3 seconds)
+  useEffect(() => {
+    if (!overview?.activePosition) return;
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/dashboard/overview`);
+        if (res.ok) {
+          const fresh = await res.json();
+          setOverview((prev) => {
+            if (JSON.stringify(prev) === JSON.stringify(fresh)) return prev;
+            return fresh;
+          });
+        }
+      } catch {}
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [overview?.activePosition?.symbol, BACKEND_URL, setOverview]);
+
   const handleToggleMode = async () => {
     if (!overview) return;
     const nextMode = overview.mode === "PAPER" ? "LIVE" : "PAPER";
@@ -319,8 +345,8 @@ export default function Dashboard() {
             }`}
           >
             🏆 Top 10 Performers
-            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">
-              09:30
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-mono">
+              ALL-DAY 60s
             </span>
           </button>
           <button
@@ -383,13 +409,21 @@ export default function Dashboard() {
         </div>
 
         {/* Tab 1: Overview */}
-        {activeTab === "overview" && <OverviewTab overview={overview} backendUrl={BACKEND_URL} />}
+        {activeTab === "overview" && (
+          <OverviewTab
+            overview={overview}
+            backendUrl={BACKEND_URL}
+            latestTick={overview?.activePosition ? latestTicks[overview.activePosition.symbol] : undefined}
+          />
+        )}
 
         {/* Tab 2: Leaderboard */}
         {activeTab === "leaderboard" && (
           <LeaderboardTab
             leaderboard={leaderboard}
             lastUpdated={lastUpdated}
+            marketPhase={marketPhase}
+            backendUrl={BACKEND_URL}
             onSelectSymbol={() => {
               setActiveTab("explorer");
             }}
@@ -460,7 +494,7 @@ export default function Dashboard() {
             </p>
             {overview?.mode === "PAPER" && (
               <p className="text-xs text-rose-300/90 bg-rose-500/10 border border-rose-500/30 rounded-lg p-2.5 mt-3">
-                Caution: Switching to LIVE connects to Zerodha Kite Connect. Real capital will be committed on the next 09:30 AM execution!
+                Caution: Switching to LIVE connects to Zerodha Kite Connect. Real capital will be committed on the next qualifying continuous wave breakout signal (09:20 – 14:45 IST)!
               </p>
             )}
             <div className="flex items-center justify-end gap-3 mt-6">

@@ -25,7 +25,7 @@ public class MomentumScoringEngine {
      * Evaluates a single candidate from CandidateMetrics by extracting an atomic snapshot.
      */
     public ScoredCandidate evaluate(CandidateMetrics m) {
-        return evaluate(m.getSnapshot(), java.time.LocalTime.now(java.time.ZoneId.of("Asia/Kolkata")));
+        return evaluate(m.getSnapshot(), java.time.LocalTime.of(9, 30));
     }
 
     public ScoredCandidate evaluate(CandidateMetrics m, java.time.LocalTime currentTime) {
@@ -38,7 +38,7 @@ public class MomentumScoringEngine {
      * independently of points awarded.
      */
     public ScoredCandidate evaluate(CandidateSnapshot s) {
-        return evaluate(s, java.time.LocalTime.now(java.time.ZoneId.of("Asia/Kolkata")));
+        return evaluate(s, java.time.LocalTime.of(9, 30));
     }
 
     public ScoredCandidate evaluate(CandidateSnapshot s, java.time.LocalTime currentTime) {

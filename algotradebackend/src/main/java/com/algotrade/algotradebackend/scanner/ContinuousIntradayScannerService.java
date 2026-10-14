@@ -75,17 +75,23 @@ public class ContinuousIntradayScannerService {
         if (!marketCalendarService.isMarketOpen()) return;
         if (now.isBefore(LocalTime.of(9, 20)) || now.isAfter(LocalTime.of(14, 45))) return;
 
-        // Risk Circuit Gate
-        if (!positionSizingEngine.canTradeToday()) {
-            return;
-        }
+        executeScan(now);
+    }
 
-        // Concurrency Gate: Engine strictly trades when FLAT
-        BrokerGateway gateway = brokerGatewayManager.getActiveGateway();
-        if (gateway.getOpenPosition().isPresent()) {
-            return;
-        }
+    /**
+     * On-demand scan execution trigger.
+     */
+    public synchronized boolean triggerManualScan() {
+        LocalTime now = LocalTime.now(IST_ZONE);
+        executeScan(now);
+        return true;
+    }
 
+    /**
+     * Core execution: updates real-time quotes, candidate metrics, runs scoring cycle,
+     * and broadcasts both LEADERBOARD_UPDATE and ALL_DAY_SCAN_UPDATE to active UI streams.
+     */
+    public synchronized void executeScan(LocalTime now) {
         TradingStrategy activeStrategy = strategyManager.getActiveStrategy();
         if (!(activeStrategy instanceof MomentumBreakoutStrategy mbStrategy)) {
             return;
@@ -123,8 +129,9 @@ public class ContinuousIntradayScannerService {
         // Trigger quantitative evaluation cycle
         mbStrategy.evaluateContinuousCycle();
 
-        // Broadcast real-time scan update telemetry to UI
+        // Broadcast real-time scan update telemetry to UI (both standard leaderboard and wave telemetry)
         List<ScoredCandidate> topCandidates = mbStrategy.getLatestTopCandidates();
+        broadcastService.broadcastLeaderboardUpdate(topCandidates);
         broadcastService.broadcast("ALL_DAY_SCAN_UPDATE", Map.of(
             "phase", determineMarketPhase(now),
             "timestamp", now.toString(),
@@ -132,6 +139,7 @@ public class ContinuousIntradayScannerService {
             "topCandidates", topCandidates,
             "tradedSymbolsToday", mbStrategy.getTradedSymbolsToday()
         ));
+        broadcastService.broadcastOverview();
     }
 
     public static String determineMarketPhase(LocalTime time) {

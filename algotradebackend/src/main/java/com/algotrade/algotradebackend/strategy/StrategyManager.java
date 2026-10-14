@@ -25,6 +25,18 @@ public class StrategyManager {
     private final BrokerGatewayManager brokerGatewayManager;
     private volatile String activeStrategyId;
 
+    private final java.util.concurrent.atomic.AtomicLong lastOverviewBroadcastMs = new java.util.concurrent.atomic.AtomicLong(0);
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private org.springframework.beans.factory.ObjectProvider<com.algotrade.algotradebackend.websocket.LiveWebSocketBroadcastService> broadcastServiceProvider;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private org.springframework.beans.factory.ObjectProvider<com.algotrade.algotradebackend.broker.zerodha.KiteMarketDataService> kiteMarketDataProvider;
+
+    private com.algotrade.algotradebackend.websocket.LiveWebSocketBroadcastService getBroadcastService() {
+        return broadcastServiceProvider != null ? broadcastServiceProvider.getIfAvailable() : null;
+    }
+
     public StrategyManager(List<TradingStrategy> strategyList, BrokerGatewayManager brokerGatewayManager) {
         this.brokerGatewayManager = brokerGatewayManager;
         for (TradingStrategy strategy : strategyList) {
@@ -61,6 +73,20 @@ public class StrategyManager {
         if (brokerGatewayManager != null && brokerGatewayManager.getPaperTradingGateway() != null) {
             brokerGatewayManager.getPaperTradingGateway().onTick(symbol, ltp);
         }
+
+        // Real-Time Active Position Streaming:
+        // When incoming tick matches active open position, broadcast refreshed overview to UI (throttled to 500ms)
+        var broadcast = getBroadcastService();
+        if (brokerGatewayManager != null && broadcast != null) {
+            var optPos = brokerGatewayManager.getActiveGateway().getOpenPosition();
+            if (optPos.isPresent() && symbol.equalsIgnoreCase(optPos.get().symbol())) {
+                long now = System.currentTimeMillis();
+                if (now - lastOverviewBroadcastMs.get() >= 500) {
+                    lastOverviewBroadcastMs.set(now);
+                    broadcast.broadcastOverview();
+                }
+            }
+        }
     }
 
     public void evaluate0930() {
@@ -95,6 +121,14 @@ public class StrategyManager {
         if (strategy == null) {
             throw new IllegalStateException("No active trading strategy is currently configured.");
         }
-        return strategy.executeManualEntry(symbol, quantity, customStopPrice, entryPrice);
+        if (kiteMarketDataProvider != null && kiteMarketDataProvider.getIfAvailable() != null) {
+            kiteMarketDataProvider.getIfAvailable().subscribeSymbol(symbol);
+        }
+        var result = strategy.executeManualEntry(symbol, quantity, customStopPrice, entryPrice);
+        var broadcast = getBroadcastService();
+        if (broadcast != null) {
+            broadcast.broadcastOverview();
+        }
+        return result;
     }
 }
