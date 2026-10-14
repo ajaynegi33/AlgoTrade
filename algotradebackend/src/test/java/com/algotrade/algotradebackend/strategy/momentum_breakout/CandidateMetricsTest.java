@@ -94,4 +94,28 @@ public class CandidateMetricsTest {
         assertEquals(806.45, m.getVwap(), 0.001, "Official exchange ATP must take precedence over tick approximation");
         assertEquals(806.45, m.getSnapshot().vwap(), 0.001);
     }
+
+    @Test
+    void testConsecutiveBreakoutTicksTrackAndReset() {
+        CandidateMetrics m = new CandidateMetrics("RELIANCE", 1000.0, 1010.0, 5_000_000, 2.0);
+        assertEquals(0, m.getConsecutiveBreakoutTicks());
+
+        // First tick above PDH
+        assertEquals(1, m.incrementBreakoutTicks());
+        assertEquals(1, m.getConsecutiveBreakoutTicks());
+
+        // Second tick confirms breakout
+        assertEquals(2, m.incrementBreakoutTicks());
+        assertEquals(2, m.getConsecutiveBreakoutTicks());
+
+        // Price pulls back below PDH
+        m.resetBreakoutTicks();
+        assertEquals(0, m.getConsecutiveBreakoutTicks());
+
+        // Session reset also clears breakout ticks
+        m.incrementBreakoutTicks();
+        assertEquals(1, m.getConsecutiveBreakoutTicks());
+        m.resetSession();
+        assertEquals(0, m.getConsecutiveBreakoutTicks());
+    }
 }

@@ -37,6 +37,7 @@ interface UseEngineWebSocketReturn {
   overview: OverviewData | null;
   setOverview: React.Dispatch<React.SetStateAction<OverviewData | null>>;
   leaderboard: ScoredCandidate[];
+  setLeaderboard: React.Dispatch<React.SetStateAction<ScoredCandidate[]>>;
   recentDecisions: EngineActivityEvent[];
   connectionStatus: WebSocketConnectionStatus;
   lastUpdated: Date | null;
@@ -147,7 +148,19 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
                 } catch {}
               }
             }
-            if (Array.isArray(data.leaderboard)) setLeaderboard(data.leaderboard);
+            if (Array.isArray(data.leaderboard)) {
+              setLeaderboard(data.leaderboard);
+              if (ws.readyState === WebSocket.OPEN) {
+                data.leaderboard.slice(0, 10).forEach((c: ScoredCandidate) => {
+                  if (c && c.symbol) {
+                    try {
+                      ws.send(JSON.stringify({ action: "SUBSCRIBE_SYMBOL", symbol: c.symbol }));
+                      subscribedSymbolsRef.current.add(c.symbol);
+                    } catch {}
+                  }
+                });
+              }
+            }
             if (Array.isArray(data.recentDecisions)) {
               setRecentDecisions(data.recentDecisions.slice(0, 150));
             }
@@ -200,6 +213,19 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
                 },
               };
             });
+            // Instantly update candidate LTP in leaderboard if this symbol is present
+            setLeaderboard((prev) => {
+              if (!prev || prev.length === 0) return prev;
+              let changed = false;
+              const next = prev.map((item) => {
+                if (item.symbol === data.symbol && item.ltp !== data.ltp) {
+                  changed = true;
+                  return { ...item, ltp: data.ltp };
+                }
+                return item;
+              });
+              return changed ? next : prev;
+            });
             setLastUpdated(new Date());
           } else if (type === "DECISION_EVENT" && data) {
             setRecentDecisions((prev) => {
@@ -212,10 +238,30 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
             setLastUpdated(new Date());
           } else if (type === "LEADERBOARD_UPDATE" && Array.isArray(data)) {
             setLeaderboard(data);
+            if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+              data.slice(0, 10).forEach((c: ScoredCandidate) => {
+                if (c && c.symbol) {
+                  try {
+                    socketRef.current?.send(JSON.stringify({ action: "SUBSCRIBE_SYMBOL", symbol: c.symbol }));
+                    subscribedSymbolsRef.current.add(c.symbol);
+                  } catch {}
+                }
+              });
+            }
             setLastUpdated(new Date());
           } else if (type === "ALL_DAY_SCAN_UPDATE" && data) {
             if (Array.isArray(data.topCandidates)) {
               setLeaderboard(data.topCandidates);
+              if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+                data.topCandidates.slice(0, 10).forEach((c: ScoredCandidate) => {
+                  if (c && c.symbol) {
+                    try {
+                      socketRef.current?.send(JSON.stringify({ action: "SUBSCRIBE_SYMBOL", symbol: c.symbol }));
+                      subscribedSymbolsRef.current.add(c.symbol);
+                    } catch {}
+                  }
+                });
+              }
             }
             if (typeof data.phase === "string") {
               setMarketPhase(data.phase);
@@ -311,6 +357,7 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
     overview,
     setOverview,
     leaderboard,
+    setLeaderboard,
     recentDecisions,
     connectionStatus,
     lastUpdated,

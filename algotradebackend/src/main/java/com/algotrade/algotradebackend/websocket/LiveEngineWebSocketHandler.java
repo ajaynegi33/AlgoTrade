@@ -6,7 +6,9 @@ import com.algotrade.algotradebackend.core.model.Position;
 import com.algotrade.algotradebackend.core.service.EngineActivityFeedService;
 import com.algotrade.algotradebackend.core.service.MarketCalendarService;
 import com.algotrade.algotradebackend.risk.PositionSizingEngine;
+import com.algotrade.algotradebackend.scanner.ContinuousIntradayScannerService;
 import com.algotrade.algotradebackend.scanner.PreMarketScannerService;
+import com.algotrade.algotradebackend.core.model.ScoredCandidate;
 import com.algotrade.algotradebackend.strategy.StrategyManager;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -89,6 +91,9 @@ public class LiveEngineWebSocketHandler extends TextWebSocketHandler {
     @Autowired(required = false)
     private ObjectProvider<com.algotrade.algotradebackend.broker.zerodha.KiteMarketDataService> kiteMarketDataProvider;
 
+    @Autowired(required = false)
+    private ObjectProvider<ContinuousIntradayScannerService> continuousScannerProvider;
+
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) {
         String payload = message.getPayload().trim();
@@ -136,13 +141,16 @@ public class LiveEngineWebSocketHandler extends TextWebSocketHandler {
 
         TextMessage textMessage = new TextMessage(jsonMessage);
         for (WebSocketSession session : activeSessions.values()) {
-            if (session.isOpen()) {
-                synchronized (session) {
-                    try {
+            synchronized (session) {
+                try {
+                    if (session.isOpen()) {
                         session.sendMessage(textMessage);
-                    } catch (IOException e) {
-                        log.warn("Failed to send WebSocket frame to {}: {}", session.getId(), e.getMessage());
+                    } else {
+                        activeSessions.remove(session.getId());
                     }
+                } catch (IOException e) {
+                    activeSessions.remove(session.getId());
+                    log.debug("Client {} disconnected during broadcast: {}", session.getId(), e.getMessage());
                 }
             }
         }
@@ -162,7 +170,16 @@ public class LiveEngineWebSocketHandler extends TextWebSocketHandler {
                     kiteMarketDataProvider.getIfAvailable().subscribeSymbol(sym);
                 }
             }
-            snapshotData.put("leaderboard", strategyManager.getLatestTopCandidates());
+            List<ScoredCandidate> initialCandidates = strategyManager.getLatestTopCandidates();
+            if (initialCandidates.isEmpty() && continuousScannerProvider != null && continuousScannerProvider.getIfAvailable() != null) {
+                try {
+                    continuousScannerProvider.getIfAvailable().triggerManualScan();
+                    initialCandidates = strategyManager.getLatestTopCandidates();
+                } catch (Throwable t) {
+                    log.warn("Failed to trigger initial baseline scan on WS connect: {}", t.getMessage());
+                }
+            }
+            snapshotData.put("leaderboard", initialCandidates);
             snapshotData.put("recentDecisions", activityFeedService.getRecentEvents(50));
             if (scannerProvider != null && scannerProvider.getIfAvailable() != null) {
                 snapshotData.put("shortlistedCandidates", scannerProvider.getIfAvailable().getShortlistedCandidates());

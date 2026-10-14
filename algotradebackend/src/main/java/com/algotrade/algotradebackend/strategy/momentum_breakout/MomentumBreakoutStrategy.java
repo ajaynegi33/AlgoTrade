@@ -94,6 +94,33 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         initializeDefaultWatchlist();
     }
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.algotrade.algotradebackend.persistence.repository.MarketUniverseRepository universeRepository;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private org.springframework.beans.factory.ObjectProvider<com.algotrade.algotradebackend.websocket.LiveWebSocketBroadcastService> broadcastServiceProvider;
+
+    private final java.util.concurrent.atomic.AtomicBoolean evaluatingTrigger = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final ConcurrentHashMap<String, Long> lastRadarEvaluationTimeMs = new ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicLong lastGlobalRadarCycleMs = new java.util.concurrent.atomic.AtomicLong(0);
+
+    @jakarta.annotation.PostConstruct
+    public void populateFullUniverseWatchlist() {
+        if (universeRepository != null) {
+            try {
+                var list = universeRepository.findByIsFnoTrueOrderBySymbolAsc();
+                if (list != null && !list.isEmpty()) {
+                    for (var e : list) {
+                        metricsMap.computeIfAbsent(e.getSymbol(), CandidateMetrics::new);
+                    }
+                    log.info("Initialized MomentumBreakoutStrategy metricsMap with {} F&O constituents from database.", list.size());
+                }
+            } catch (Throwable t) {
+                log.warn("Could not pre-populate full universe into metricsMap: {}", t.getMessage());
+            }
+        }
+    }
+
     private void initializeDefaultWatchlist() {
         // High-liquidity Nifty 100 constituents. Reference data (prevClose, PDH, volume) populated dynamically.
         List<String> defaultSymbols = List.of(
@@ -126,6 +153,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         }
         latestTopCandidates.clear();
         tradedSymbolsToday.clear();
+        lastRadarEvaluationTimeMs.clear();
 
         // Safety check: Do not blindly wipe active state if an unsettled position is still open at the broker
         BrokerGateway gateway = brokerGatewayManager.getActiveGateway();
@@ -263,14 +291,92 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             return;
         }
 
-        CandidateMetrics metrics = metricsMap.get(symbol);
-        if (metrics != null) {
-            metrics.updateTick(ltp, volume, totalBuyQty, totalSellQty, exchangeVwap, inObservationWindow);
-        }
+        CandidateMetrics metrics = metricsMap.computeIfAbsent(symbol, CandidateMetrics::new);
+        metrics.updateTick(ltp, volume, totalBuyQty, totalSellQty, exchangeVwap, inObservationWindow);
+
+        // Real-Time Breakout Radar:
+        // Evaluates breakout signal immediately when price breaks above PDH
+        checkRealtimeBreakoutTrigger(symbol, metrics, ltp, currentTime);
 
         // Active Trade Trailing & Lifecycle Management
         if (symbol.equals(activeSymbol)) {
             manageActiveTradeLifecycle(symbol, ltp, currentTime);
+        }
+    }
+
+    private void checkRealtimeBreakoutTrigger(String symbol, CandidateMetrics metrics, double ltp, LocalTime currentTime) {
+        // Session Window Gate: 09:20 AM to 02:45 PM IST on active market trading days
+        if (currentTime.isBefore(LocalTime.of(9, 20)) || currentTime.isAfter(LocalTime.of(14, 45))) {
+            return;
+        }
+
+        // Only evaluate when engine is FLAT (no open position and not pending entry)
+        if (lifecycleState != TradeLifecycleState.FLAT) {
+            return;
+        }
+        BrokerGateway gateway = brokerGatewayManager.getActiveGateway();
+        if (gateway.getOpenPosition().isPresent()) {
+            return;
+        }
+
+        // Risk check: Can trade today and symbol has not already been traded
+        if (!positionSizingEngine.canTradeToday() || tradedSymbolsToday.contains(symbol)) {
+            return;
+        }
+
+        // Breakout Gate: LTP >= PDH (Previous Day High)
+        double pdh = metrics.getPreviousDayHigh();
+        if (pdh <= 0 || ltp < pdh) {
+            metrics.resetBreakoutTicks();
+            lastRadarEvaluationTimeMs.remove(symbol);
+            return;
+        }
+
+        // 2-Tick Confirmation Rule (prevents 1-tick stop-run fakeouts)
+        int consecutiveTicks = metrics.incrementBreakoutTicks();
+        if (consecutiveTicks < 2) {
+            return;
+        }
+
+        // Cooldown & Noise Suppression:
+        // - Tick 2 is the initial breakout event: triggers evaluation cycle immediately and logs at INFO once.
+        // - Subsequent ticks while continuing to trade above PDH are throttled:
+        //   evaluated at most once every 30 seconds per symbol (and logged at DEBUG) to prevent CPU thrashing & log dumps.
+        long nowMs = System.currentTimeMillis();
+        Long lastSymbolEval = lastRadarEvaluationTimeMs.get(symbol);
+        boolean isInitialBreakout = (consecutiveTicks == 2 || lastSymbolEval == null);
+
+        if (!isInitialBreakout) {
+            if ((nowMs - lastSymbolEval) < 30_000) {
+                return;
+            }
+        }
+
+        // Global debounce: Prevent launching multiple 210-stock scoring cycles within 1000ms
+        long lastGlobal = lastGlobalRadarCycleMs.get();
+        if ((nowMs - lastGlobal) < 1000) {
+            return;
+        }
+
+        // Prevent concurrent overlapping evaluations while a cycle is executing
+        if (evaluatingTrigger.compareAndSet(false, true)) {
+            lastRadarEvaluationTimeMs.put(symbol, nowMs);
+            lastGlobalRadarCycleMs.set(nowMs);
+            Thread.ofVirtual().name("breakout-radar-" + symbol).start(() -> {
+                try {
+                    if (isInitialBreakout) {
+                        log.info("⚡ BREAKOUT CONFIRMED for {}: LTP=₹{} >= PDH=₹{} (2-tick gate passed). Running evaluation cycle...",
+                            symbol, ltp, pdh);
+                    } else {
+                        log.debug("Breakout re-evaluation for {} after cooldown: LTP=₹{} >= PDH=₹{}", symbol, ltp, pdh);
+                    }
+                    evaluateContinuousCycle();
+                } catch (Throwable t) {
+                    log.error("Real-time breakout evaluation failed for {}: {}", symbol, t.getMessage(), t);
+                } finally {
+                    evaluatingTrigger.set(false);
+                }
+            });
         }
     }
 
@@ -412,24 +518,32 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
 
     @Override
     public synchronized void evaluate0930() {
-        evaluateContinuousCycle();
+        evaluateCycle(LocalTime.of(9, 30));
     }
 
     @Override
     public synchronized void evaluateContinuousCycle() {
+        evaluateCycle(LocalTime.now(ZoneId.of("Asia/Kolkata")));
+    }
+
+    public synchronized void evaluateCycle(LocalTime evaluationTime) {
         ensureSessionCurrent();
 
         // Step 1: Score all candidates (atomically captures snapshot per candidate) excluding symbols already traded today
-        LocalTime now = LocalTime.now(ZoneId.of("Asia/Kolkata"));
         List<ScoredCandidate> scoredList = metricsMap.values().stream()
             .filter(m -> !tradedSymbolsToday.contains(m.getSymbol()))
-            .map(m -> scoringEngine.evaluate(m, now))
+            .map(m -> scoringEngine.evaluate(m, evaluationTime))
             .toList();
 
         // Step 2: Rank candidates with tie-breaker and update telemetry leaderboard
         List<ScoredCandidate> ranked = scoringEngine.rankCandidates(scoredList);
         latestTopCandidates.clear();
         latestTopCandidates.addAll(ranked);
+
+        // Broadcast real-time leaderboard update to active UI clients
+        if (broadcastServiceProvider != null && broadcastServiceProvider.getIfAvailable() != null) {
+            broadcastServiceProvider.getIfAvailable().broadcastLeaderboardUpdate(ranked);
+        }
 
         // Safety Gate: Ensure no position is already open and daily limit is not reached
         BrokerGateway gateway = brokerGatewayManager.getActiveGateway();

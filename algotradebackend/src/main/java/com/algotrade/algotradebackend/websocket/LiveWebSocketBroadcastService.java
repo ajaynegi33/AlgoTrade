@@ -54,7 +54,7 @@ public class LiveWebSocketBroadcastService {
             String json = gson.toJson(frame);
             handler.broadcast(json);
         } catch (Throwable t) {
-            log.warn("Failed to broadcast WebSocket frame of type {}: {}", type, t.getMessage());
+            log.debug("Failed to broadcast WebSocket frame of type {}: {}", type, t.getMessage());
         }
     }
 

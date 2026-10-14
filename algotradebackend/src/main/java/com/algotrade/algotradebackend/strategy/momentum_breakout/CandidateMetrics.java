@@ -31,6 +31,9 @@ public class CandidateMetrics {
     private long totalBuyQty = 0;
     private long totalSellQty = 0;
 
+    // Real-Time Breakout Confirmation (filters 1-tick fakeouts)
+    private final java.util.concurrent.atomic.AtomicInteger consecutiveBreakoutTicks = new java.util.concurrent.atomic.AtomicInteger(0);
+
     public CandidateMetrics(String symbol) {
         this.symbol = symbol;
     }
@@ -115,6 +118,7 @@ public class CandidateMetrics {
         this.exchangeVwap = 0.0;
         this.totalBuyQty = 0;
         this.totalSellQty = 0;
+        this.consecutiveBreakoutTicks.set(0);
     }
 
     /**
@@ -234,5 +238,17 @@ public class CandidateMetrics {
         long total = totalBuyQty + totalSellQty;
         if (total <= 0) return 0.0;
         return (double) (totalBuyQty - totalSellQty) / total;
+    }
+
+    public int incrementBreakoutTicks() {
+        return consecutiveBreakoutTicks.incrementAndGet();
+    }
+
+    public void resetBreakoutTicks() {
+        consecutiveBreakoutTicks.set(0);
+    }
+
+    public int getConsecutiveBreakoutTicks() {
+        return consecutiveBreakoutTicks.get();
     }
 }

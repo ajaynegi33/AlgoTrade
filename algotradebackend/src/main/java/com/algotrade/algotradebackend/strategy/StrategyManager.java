@@ -66,8 +66,14 @@ public class StrategyManager {
     }
 
     public void onTick(String symbol, double ltp, long volume, long totalBuyQty, long totalSellQty) {
+        onTick(symbol, ltp, volume, totalBuyQty, totalSellQty, 0.0);
+    }
+
+    public void onTick(String symbol, double ltp, long volume, long totalBuyQty, long totalSellQty, double exchangeVwap) {
         TradingStrategy strategy = getActiveStrategy();
-        if (strategy != null) {
+        if (strategy instanceof com.algotrade.algotradebackend.strategy.momentum_breakout.MomentumBreakoutStrategy mbStrategy) {
+            mbStrategy.onTick(symbol, ltp, volume, totalBuyQty, totalSellQty, exchangeVwap, false, java.time.LocalTime.now(java.time.ZoneId.of("Asia/Kolkata")));
+        } else if (strategy != null) {
             strategy.onTick(symbol, ltp, volume, totalBuyQty, totalSellQty);
         }
         if (brokerGatewayManager != null && brokerGatewayManager.getPaperTradingGateway() != null) {

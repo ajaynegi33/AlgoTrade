@@ -157,7 +157,7 @@ export default function OverviewTab({ overview, backendUrl = "http://localhost:8
           </div>
           <h3 className="text-lg font-semibold text-white">No Open Position Currently</h3>
           <p className="text-sm text-slate-400 max-w-md mt-1">
-            The engine continuously scans the 210 F&amp;O universe every 60 seconds across market waves (09:20 – 14:45 IST). When a candidate scores ≥ 75 points and breaks out above PDH, an automated trade is executed.
+            The engine monitors the 210 F&amp;O universe via real-time WebSocket tick stream with 0ms Breakout Radar across market waves (09:20 – 14:45 IST). When a candidate scores ≥ 75 points and breaks out above PDH, an automated trade is executed.
           </p>
         </div>
       )}

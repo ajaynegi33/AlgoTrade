@@ -25,6 +25,7 @@ export default function Dashboard() {
     overview,
     setOverview,
     leaderboard,
+    setLeaderboard,
     recentDecisions,
     connectionStatus,
     lastUpdated,
@@ -216,6 +217,23 @@ export default function Dashboard() {
     }
   }, [activeTab]);
 
+  // Fallback fetch if leaderboard is empty when user navigates to the leaderboard tab
+  useEffect(() => {
+    if (activeTab === "leaderboard" && leaderboard.length === 0) {
+      fetch(`${BACKEND_URL}/api/dashboard/leaderboard`)
+        .then((res) => (res.ok ? res.json() : []))
+        .then((data: any) => {
+          if (Array.isArray(data) && data.length > 0) {
+            setLeaderboard(data);
+            data.slice(0, 10).forEach((c: any) => {
+              if (c && c.symbol) subscribeSymbol(c.symbol);
+            });
+          }
+        })
+        .catch(() => {});
+    }
+  }, [activeTab, leaderboard.length, BACKEND_URL, setLeaderboard, subscribeSymbol]);
+
   // Automatically subscribe to active position symbol over WebSocket as soon as a trade is entered
   useEffect(() => {
     if (overview?.activePosition?.symbol) {
@@ -345,8 +363,9 @@ export default function Dashboard() {
             }`}
           >
             🏆 Top 10 Performers
-            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-mono">
-              ALL-DAY 60s
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-mono flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+              REAL-TIME 0ms
             </span>
           </button>
           <button
@@ -424,6 +443,7 @@ export default function Dashboard() {
             lastUpdated={lastUpdated}
             marketPhase={marketPhase}
             backendUrl={BACKEND_URL}
+            latestTicks={latestTicks}
             onSelectSymbol={() => {
               setActiveTab("explorer");
             }}

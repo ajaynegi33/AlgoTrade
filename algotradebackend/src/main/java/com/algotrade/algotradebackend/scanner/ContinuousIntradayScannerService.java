@@ -62,10 +62,46 @@ public class ContinuousIntradayScannerService {
         this.broadcastService = broadcastService;
     }
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private org.springframework.beans.factory.ObjectProvider<com.algotrade.algotradebackend.broker.zerodha.KiteMarketDataService> kiteMarketDataProvider;
+
     /**
-     * Executes every 60 seconds during market hours.
+     * Watchdog Timer (Every 5 seconds):
+     * Detects silent WebSocket disconnections or stalled tick streams during active market hours.
+     * Automatically triggers batched REST quote recovery and socket reconnection.
      */
-    @Scheduled(fixedDelayString = "${algotrade.scanner.all-day.interval-ms:60000}", initialDelay = 15000)
+    @Scheduled(fixedDelay = 5000, initialDelay = 15000)
+    public void watchdogTickCheck() {
+        if (!enabled || !marketCalendarService.isMarketOpen()) return;
+        LocalTime now = LocalTime.now(IST_ZONE);
+        if (now.isBefore(LocalTime.of(9, 15)) || now.isAfter(LocalTime.of(15, 30))) return;
+
+        if (kiteMarketDataProvider != null && kiteMarketDataProvider.getIfAvailable() != null) {
+            var marketDataService = kiteMarketDataProvider.getIfAvailable();
+            long elapsed = System.currentTimeMillis() - marketDataService.getLastTickReceivedMs();
+            if (elapsed > 5000 && marketDataService.isConnected()) {
+                log.warn("WATCHDOG: Zero ticks received for {} ms across 210 F&O universe. Performing REST recovery...", elapsed);
+                executeScan(now);
+                marketDataService.reconnectTicker();
+            }
+        }
+    }
+
+    /**
+     * Pre-market Baseline Calibration at 09:14:00 AM IST.
+     * Pulls full 210 F&O batched quotes before open to establish authoritative PDH and PrevClose baselines.
+     */
+    @Scheduled(cron = "0 14 9 * * MON-FRI", zone = "Asia/Kolkata")
+    public void scheduledPreMarketBaseline() {
+        if (!enabled) return;
+        log.info("=== RUNNING 09:14:00 AM PRE-MARKET UNIVERSE BASELINE SYNC ===");
+        executeScan(LocalTime.of(9, 14));
+    }
+
+    /**
+     * Executes periodic safety reconciliation and leaderboard telemetry update.
+     */
+    @Scheduled(fixedDelayString = "${algotrade.scanner.all-day.interval-ms:60000}", initialDelay = 20000)
     public synchronized void runContinuousScanCycle() {
         if (!enabled) return;
 

@@ -51,6 +51,11 @@ public class KiteMarketDataService {
     private volatile KiteTicker kiteTicker = null;
     private volatile boolean connected = false;
 
+    private final java.util.concurrent.atomic.AtomicLong lastTickReceivedMs = new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis());
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.algotrade.algotradebackend.persistence.repository.MarketUniverseRepository universeRepository;
+
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private com.algotrade.algotradebackend.websocket.LiveWebSocketBroadcastService broadcastService;
 
@@ -130,8 +135,8 @@ public class KiteMarketDataService {
                     ArrayList<Long> tokens = new ArrayList<>(symbolToTokenMap.values());
                     if (!tokens.isEmpty()) {
                         kiteTicker.subscribe(tokens);
-                        kiteTicker.setMode(tokens, KiteTicker.modeFull);
-                        log.info("Subscribed KiteTicker modeFull to tokens: {}", tokens);
+                        log.info("Subscribed KiteTicker modeFull to {} universe instruments.", tokens.size());
+                        log.debug("Subscribed tokens: {}", tokens);
                     }
                     activityFeedService.record(
                         "MARKET_DATA",
@@ -200,34 +205,52 @@ public class KiteMarketDataService {
     }
 
     /**
-     * Resolves instrument tokens dynamically using KiteConnect getQuote API.
+     * Resolves instrument tokens dynamically using SQLite repository and KiteConnect getQuote API.
      */
     public synchronized void resolveWatchlistTokens() {
         if (!liveGateway.isSessionActive()) return;
         try {
-            KiteConnect client = liveGateway.getKiteConnect();
-            Set<String> symbols = getWatchlistSymbols();
-            if (symbols == null || symbols.isEmpty()) return;
-
-            String[] keys = symbols.stream().map(s -> "NSE:" + s).toArray(String[]::new);
-            Map<String, Quote> quotes = client.getQuote(keys);
-
-            for (Map.Entry<String, Quote> entry : quotes.entrySet()) {
-                String cleanSym = entry.getKey().replace("NSE:", "");
-                Quote q = entry.getValue();
-                if (q != null && q.instrumentToken > 0) {
-                    tokenToSymbolMap.put(q.instrumentToken, cleanSym);
-                    symbolToTokenMap.put(cleanSym, q.instrumentToken);
+            // Step 1: Pre-populate from local database cache (all 210 F&O instruments)
+            if (universeRepository != null) {
+                var fnoList = universeRepository.findByIsFnoTrueOrderBySymbolAsc();
+                if (fnoList != null && !fnoList.isEmpty()) {
+                    for (var entity : fnoList) {
+                        if (entity.getInstrumentToken() != null && entity.getInstrumentToken() > 0) {
+                            tokenToSymbolMap.put(entity.getInstrumentToken(), entity.getSymbol());
+                            symbolToTokenMap.put(entity.getSymbol(), entity.getInstrumentToken());
+                        }
+                    }
+                    log.info("Loaded {} F&O instrument tokens from local database into active ticker map.", symbolToTokenMap.size());
                 }
             }
-            log.info("Resolved {} watchlist symbols to Kite instrument tokens: {}", symbolToTokenMap.size(), symbolToTokenMap.keySet());
 
-            // If KiteTicker is active and connected, update subscription to active tokens
+            // Step 2: Fallback to Kite quote API if database is incomplete
+            if (symbolToTokenMap.size() < 20) {
+                KiteConnect client = liveGateway.getKiteConnect();
+                Set<String> symbols = getWatchlistSymbols();
+                if (symbols != null && !symbols.isEmpty()) {
+                    String[] keys = symbols.stream().map(s -> "NSE:" + s).toArray(String[]::new);
+                    Map<String, Quote> quotes = client.getQuote(keys);
+
+                    for (Map.Entry<String, Quote> entry : quotes.entrySet()) {
+                        String cleanSym = entry.getKey().replace("NSE:", "");
+                        Quote q = entry.getValue();
+                        if (q != null && q.instrumentToken > 0) {
+                            tokenToSymbolMap.put(q.instrumentToken, cleanSym);
+                            symbolToTokenMap.put(cleanSym, q.instrumentToken);
+                        }
+                    }
+                }
+            }
+
+            log.info("Resolved {} watchlist symbols to Kite instrument tokens.", symbolToTokenMap.size());
+
+            // Step 3: If KiteTicker is active and connected, subscribe all 210 tokens in modeFull
             if (kiteTicker != null && connected && !symbolToTokenMap.isEmpty()) {
                 ArrayList<Long> tokens = new ArrayList<>(symbolToTokenMap.values());
                 kiteTicker.subscribe(tokens);
                 kiteTicker.setMode(tokens, KiteTicker.modeFull);
-                log.info("Subscribed KiteTicker modeFull to {} dynamic tokens: {}", tokens.size(), tokens);
+                log.info("Subscribed KiteTicker modeFull to {} dynamic universe tokens.", tokens.size());
             }
         } catch (Throwable t) {
             log.warn("Dynamic token resolution encountered error: {}. Using fallback mappings.", t.getMessage());
@@ -272,6 +295,7 @@ public class KiteMarketDataService {
 
     private void handleIncomingTicks(List<Tick> ticks) {
         if (ticks == null || ticks.isEmpty()) return;
+        lastTickReceivedMs.set(System.currentTimeMillis());
 
         for (Tick tick : ticks) {
             String symbol = tokenToSymbolMap.get(tick.getInstrumentToken());
@@ -286,6 +310,7 @@ public class KiteMarketDataService {
             double change = prevClose > 0 ? (ltp - prevClose) : (ltp * (changePct / 100.0));
             double high = tick.getHighPrice();
             double low = tick.getLowPrice();
+            double vwap = tick.getAverageTradePrice();
 
             // Extract 5-level market depth from Tick
             Map<String, Object> depthMap = null;
@@ -317,11 +342,10 @@ public class KiteMarketDataService {
             }
 
             if (ltp > 0) {
-                strategyManager.onTick(symbol, ltp, volume, buyQty, sellQty);
+                strategyManager.onTick(symbol, ltp, volume, buyQty, sellQty, vwap);
 
                 if (broadcastService != null) {
                     double open = tick.getOpenPrice();
-                    double vwap = tick.getAverageTradePrice();
                     int ltq = (int) tick.getLastTradedQuantity();
                     String ltt = tick.getLastTradedTime() != null ? tick.getLastTradedTime().toString() : null;
 
@@ -431,11 +455,34 @@ public class KiteMarketDataService {
     }
 
     private Set<String> getWatchlistSymbols() {
+        if (!symbolToTokenMap.isEmpty()) {
+            return symbolToTokenMap.keySet();
+        }
+        if (universeRepository != null) {
+            try {
+                var list = universeRepository.findByIsFnoTrueOrderBySymbolAsc();
+                if (list != null && !list.isEmpty()) {
+                    Set<String> set = new HashSet<>();
+                    for (var e : list) set.add(e.getSymbol());
+                    return set;
+                }
+            } catch (Throwable ignored) {}
+        }
         TradingStrategy strategy = strategyManager.getActiveStrategy();
         if (strategy instanceof MomentumBreakoutStrategy mbStrategy) {
             return mbStrategy.getMetricsMap().keySet();
         }
         return DEFAULT_NSE_TOKENS.keySet();
+    }
+
+    public synchronized void reconnectTicker() {
+        log.warn("Reconnecting KiteTicker on demand/watchdog trigger...");
+        stopLiveTicker();
+        startLiveTicker();
+    }
+
+    public long getLastTickReceivedMs() {
+        return lastTickReceivedMs.get();
     }
 
     public boolean isConnected() {

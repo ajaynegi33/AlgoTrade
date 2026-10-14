@@ -345,4 +345,30 @@ public class MomentumBreakoutStrategyLifecycleTest {
         assertTrue(strategy.getMetricsMap().containsKey("ASHOKLEY"));
         assertFalse(strategy.getMetricsMap().containsKey("RELIANCE"));
     }
+
+    @Test
+    void testBreakoutRadarThrottlesRepeatedTicks() {
+        when(positionSizingEngine.canTradeToday()).thenReturn(true);
+        strategy.updateReferenceData("TATACONSUM", 970.0, 981.8, 2_000_000, 2.0);
+
+        // Tick 1 above PDH (982.0 >= 981.8) -> 1 tick, gate not passed yet
+        strategy.onTick("TATACONSUM", 982.0, 100_000, 500_000, 200_000, true, java.time.LocalTime.of(10, 0));
+        CandidateMetrics m = strategy.getMetricsMap().get("TATACONSUM");
+        assertNotNull(m);
+        assertEquals(1, m.getConsecutiveBreakoutTicks());
+
+        // Tick 2 above PDH -> 2 ticks, confirms initial breakout
+        strategy.onTick("TATACONSUM", 982.0, 101_000, 500_000, 200_000, true, java.time.LocalTime.of(10, 0));
+        assertEquals(2, m.getConsecutiveBreakoutTicks());
+
+        // Ticks 3, 4, 5 arriving immediately (rapid subsequent ticks)
+        strategy.onTick("TATACONSUM", 982.1, 102_000, 500_000, 200_000, true, java.time.LocalTime.of(10, 0));
+        strategy.onTick("TATACONSUM", 982.1, 103_000, 500_000, 200_000, true, java.time.LocalTime.of(10, 0));
+        strategy.onTick("TATACONSUM", 982.1, 104_000, 500_000, 200_000, true, java.time.LocalTime.of(10, 0));
+        assertEquals(5, m.getConsecutiveBreakoutTicks());
+
+        // Price dips below PDH (980.0 < 981.8) -> reset
+        strategy.onTick("TATACONSUM", 980.0, 105_000, 500_000, 200_000, true, java.time.LocalTime.of(10, 1));
+        assertEquals(0, m.getConsecutiveBreakoutTicks());
+    }
 }

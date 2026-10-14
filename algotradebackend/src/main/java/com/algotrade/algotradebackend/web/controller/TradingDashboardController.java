@@ -117,7 +117,14 @@ public class TradingDashboardController {
      */
     @GetMapping("/leaderboard")
     public ResponseEntity<List<ScoredCandidate>> getLeaderboard() {
-        return ResponseEntity.ok(strategyManager.getLatestTopCandidates());
+        List<ScoredCandidate> candidates = strategyManager.getLatestTopCandidates();
+        if (candidates.isEmpty() && continuousScannerProvider != null && continuousScannerProvider.getIfAvailable() != null) {
+            try {
+                continuousScannerProvider.getIfAvailable().triggerManualScan();
+                candidates = strategyManager.getLatestTopCandidates();
+            } catch (Throwable ignored) {}
+        }
+        return ResponseEntity.ok(candidates);
     }
 
     /**

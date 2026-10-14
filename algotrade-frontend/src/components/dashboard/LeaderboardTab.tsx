@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { ScoredCandidate } from "../types";
+import { TickUpdate } from "@/hooks/useEngineWebSocket";
 import { SkeletonLeaderboard } from "../common/Skeleton";
 
 interface LeaderboardTabProps {
@@ -9,6 +10,7 @@ interface LeaderboardTabProps {
   lastUpdated: Date | null;
   marketPhase?: string;
   backendUrl?: string;
+  latestTicks?: Record<string, TickUpdate>;
   onSelectSymbol?: (symbol: string) => void;
 }
 
@@ -17,6 +19,7 @@ export default function LeaderboardTab({
   lastUpdated,
   marketPhase = "WAVE_1_MORNING_MOMENTUM",
   backendUrl,
+  latestTicks,
   onSelectSymbol,
 }: LeaderboardTabProps) {
   const [triggeringScan, setTriggeringScan] = useState(false);
@@ -86,14 +89,14 @@ export default function LeaderboardTab({
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-1">
-              ⚡ Evaluated every 60 seconds across all 210 F&amp;O stocks. Threshold: ≥ 75 / 100 points + Mandatory PDH Breakout Gate.
+              ⚡ Real-time WebSocket tick stream across all 210 F&amp;O stocks with 0ms Breakout Radar. Threshold: ≥ 75 / 100 points + Mandatory PDH Breakout Gate.
             </p>
           </div>
 
           <div className="flex items-center gap-3 flex-wrap">
             <div className="flex items-center gap-2 text-xs font-mono text-slate-400 bg-slate-950/70 px-3 py-1.5 rounded-xl border border-slate-800">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-              <span>60s Live Pulse</span>
+              <span className="font-bold text-emerald-400">⚡ 0ms Live Radar Stream</span>
               <span className="text-slate-600">|</span>
               <span>{lastUpdated ? lastUpdated.toLocaleTimeString() : "--:--:--"}</span>
             </div>
@@ -186,7 +189,7 @@ export default function LeaderboardTab({
                   <td colSpan={10} className="py-10 text-center text-slate-500 font-sans">
                     <div className="flex flex-col items-center justify-center gap-2">
                       <span className="text-xl">📡</span>
-                      <span>Continuous engine is scanning the 210 F&amp;O universe...</span>
+                      <span>Real-time WebSocket engine is streaming the 210 F&amp;O universe...</span>
                       <span className="text-xs text-slate-600">Click &quot;Scan Now&quot; above to run an instant quantitative scan.</span>
                     </div>
                   </td>
@@ -196,6 +199,8 @@ export default function LeaderboardTab({
                   const isTopPick = item.rank === 1 && item.status === "SELECTED FOR TRADE";
                   const isQualified = item.status === "SELECTED FOR TRADE" || item.status === "RUNNER UP";
                   const failedPdhGate = item.totalScore >= 75 && item.pdhScore === 0;
+                  const liveTick = latestTicks?.[item.symbol];
+                  const currentLtp = liveTick?.ltp || item.ltp;
 
                   return (
                     <tr
@@ -215,9 +220,25 @@ export default function LeaderboardTab({
                           </span>
                         )}
                       </td>
-                      <td className="py-3.5 px-4 text-slate-200">₹{item.ltp.toFixed(2)}</td>
+                      <td className="py-3.5 px-4 font-mono font-semibold text-white">
+                        <div className="flex items-center gap-1.5">
+                          <span>₹{currentLtp.toFixed(2)}</span>
+                          {liveTick && (
+                            <span className={`text-[10px] font-bold ${liveTick.change >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                              {liveTick.change >= 0 ? "▲" : "▼"}
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td className={`py-3.5 px-4 ${item.gapPct >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                        {item.gapPct >= 0 ? `+${item.gapPct.toFixed(2)}%` : `${item.gapPct.toFixed(2)}%`}
+                        <div className="flex items-center gap-1">
+                          <span>{item.gapPct >= 0 ? `+${item.gapPct.toFixed(2)}%` : `${item.gapPct.toFixed(2)}%`}</span>
+                          {liveTick && liveTick.changePct !== undefined && (
+                            <span className="text-[10px] text-slate-500 font-sans" title="Live Day Change %">
+                              ({liveTick.changePct >= 0 ? `+${liveTick.changePct.toFixed(2)}%` : `${liveTick.changePct.toFixed(2)}%`})
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="py-3.5 px-4 text-slate-300">{item.rvolScore}</td>
                       <td className="py-3.5 px-4 text-slate-300">{item.vwapScore}</td>

@@ -358,7 +358,11 @@ public class PreMarketScannerService {
             Future<Map<String, Quote>> future = executor.submit(task);
             Map<String, Quote> result = future.get(batchTimeoutMs, TimeUnit.MILLISECONDS);
             long latencyMs = System.currentTimeMillis() - startTime;
-            log.info("Batch Kite getQuote() succeeded for {} instruments in {} ms.", instruments.length, latencyMs);
+            if (latencyMs > 2000) {
+                log.warn("Kite batch getQuote() high latency: {} ms for {} instruments.", latencyMs, instruments.length);
+            } else {
+                log.debug("Batch Kite getQuote() succeeded for {} instruments in {} ms.", instruments.length, latencyMs);
+            }
             return result != null ? result : Collections.emptyMap();
         } catch (TimeoutException te) {
             log.warn("Batch Kite getQuote() timed out after {} ms.", batchTimeoutMs);
