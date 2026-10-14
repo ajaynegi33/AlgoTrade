@@ -35,4 +35,35 @@ public class ChargesBreakdownTest {
         // Net PnL must be strictly less than Gross PnL due to deductions
         assertTrue(charges.netPnL() < charges.grossPnL());
     }
+
+    @Test
+    void testExactBreakevenForThreePricingTiers() {
+        // Tier 1: ₹100 stock, 500 shares, ₹0.01 tick
+        var be100 = ChargesBreakdown.calculateExactBreakevenPrice(500, 100.0, 0.01);
+        assertTrue(be100.isPresent());
+        assertEquals(100.13, be100.get(), 0.001);
+        ChargesBreakdown ch100 = ChargesBreakdown.calculate(500, 100.0, be100.get());
+        assertTrue(ch100.netPnL() >= 10.00, "Net PnL must be >= ₹10.00, got: " + ch100.netPnL());
+
+        // Tier 2: ₹500 stock, 100 shares, ₹0.05 tick
+        var be500 = ChargesBreakdown.calculateExactBreakevenPrice(100, 500.0, 0.05);
+        assertTrue(be500.isPresent());
+        assertEquals(500.65, be500.get(), 0.001);
+        ChargesBreakdown ch500 = ChargesBreakdown.calculate(100, 500.0, be500.get());
+        assertTrue(ch500.netPnL() >= 10.00, "Net PnL must be >= ₹10.00, got: " + ch500.netPnL());
+
+        // Tier 3: ₹1,500 stock, 33 shares, ₹0.10 tick
+        var be1500 = ChargesBreakdown.calculateExactBreakevenPrice(33, 1500.0, 0.10);
+        assertTrue(be1500.isPresent());
+        assertEquals(1501.90, be1500.get(), 0.001);
+        ChargesBreakdown ch1500 = ChargesBreakdown.calculate(33, 1500.0, be1500.get());
+        assertTrue(ch1500.netPnL() >= 10.00, "Net PnL must be >= ₹10.00, got: " + ch1500.netPnL());
+    }
+
+    @Test
+    void testExactBreakevenInvalidInputs() {
+        assertTrue(ChargesBreakdown.calculateExactBreakevenPrice(0, 100.0, 0.01).isEmpty());
+        assertTrue(ChargesBreakdown.calculateExactBreakevenPrice(10, 0.0, 0.01).isEmpty());
+        assertTrue(ChargesBreakdown.calculateExactBreakevenPrice(10, 100.0, -0.05).isEmpty());
+    }
 }

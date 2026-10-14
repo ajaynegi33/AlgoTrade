@@ -173,16 +173,28 @@ public class PositionSizingEngine {
             return 0;
         }
 
-        // Constraint 2: Available Margin Quantity (Q_margin)
+        // Constraint 2: Available Margin Quantity (Q_margin) & Institutional 5x Leverage Gate
         double availableCash = gateway.getAvailableCash();
         double marginPerShare = gateway.calculateOrderMargin(symbol, 1, entryPrice);
+
+        // Reject candidate if broker does not permit full 5x MIS leverage (margin > entryPrice / 4.0)
+        if (marginPerShare > (entryPrice / 4.0)) {
+            log.warn("REJECTED {}: Broker requires higher margin (₹{}/share on entry ₹{}). Full 5x leverage not supported.",
+                symbol, marginPerShare, entryPrice);
+            return 0;
+        }
+
         int qMargin = marginPerShare > 0 ? (int) Math.floor(availableCash / marginPerShare) : 0;
 
-        // Final Sizing Resolution: Smallest of base risk/exposure and available margin
-        int finalQuantity = Math.min(baseQty, qMargin);
+        // Constraint 3: Target Exposure Ceiling (Q_exposure = capital * maxExposureMultiplier / entryPrice)
+        double maxExposure = capital * maxExposureMultiplier;
+        int qExposure = (int) Math.floor(maxExposure / entryPrice);
 
-        log.info("SIZING RESOLUTION for {}: BaseQty={}, Q_margin={} -> FINAL QUANTITY = {} shares (Total Value: ₹{})",
-            symbol, baseQty, qMargin, finalQuantity, Math.round(finalQuantity * entryPrice));
+        // Final Sizing Resolution: Smallest of base risk quantity, available margin, and exposure ceiling
+        int finalQuantity = Math.min(baseQty, Math.min(qMargin, qExposure));
+
+        log.info("SIZING RESOLUTION for {}: BaseQty={}, Q_margin={}, Q_exposure={} -> FINAL QUANTITY = {} shares (Total Value: ₹{})",
+            symbol, baseQty, qMargin, qExposure, finalQuantity, Math.round(finalQuantity * entryPrice));
 
         return finalQuantity;
     }

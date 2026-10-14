@@ -34,6 +34,9 @@ public class CandidateMetrics {
     // Real-Time Breakout Confirmation (filters 1-tick fakeouts)
     private final java.util.concurrent.atomic.AtomicInteger consecutiveBreakoutTicks = new java.util.concurrent.atomic.AtomicInteger(0);
 
+    // Instrument Tick Size (from Kite Instrument Master / MarketUniverseEntity)
+    private volatile double tickSize = 0.05;
+
     public CandidateMetrics(String symbol) {
         this.symbol = symbol;
     }
@@ -250,5 +253,15 @@ public class CandidateMetrics {
 
     public int getConsecutiveBreakoutTicks() {
         return consecutiveBreakoutTicks.get();
+    }
+
+    public double getTickSize() {
+        return tickSize > 0.0 ? tickSize : 0.05;
+    }
+
+    public void setTickSize(double tickSize) {
+        if (tickSize > 0.0) {
+            this.tickSize = tickSize;
+        }
     }
 }

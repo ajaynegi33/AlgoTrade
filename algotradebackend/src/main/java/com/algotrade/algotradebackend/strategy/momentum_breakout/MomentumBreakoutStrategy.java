@@ -2,9 +2,11 @@ package com.algotrade.algotradebackend.strategy.momentum_breakout;
 
 import com.algotrade.algotradebackend.broker.BrokerGateway;
 import com.algotrade.algotradebackend.broker.BrokerGatewayManager;
+import com.algotrade.algotradebackend.core.model.ChargesBreakdown;
 import com.algotrade.algotradebackend.core.model.Position;
 import com.algotrade.algotradebackend.core.model.ScoredCandidate;
 import com.algotrade.algotradebackend.core.model.TradeOrder;
+import com.algotrade.algotradebackend.core.util.TickMath;
 import com.algotrade.algotradebackend.risk.PositionSizingEngine;
 import com.algotrade.algotradebackend.strategy.TradingStrategy;
 import com.algotrade.algotradebackend.core.service.MarketCalendarService;
@@ -56,6 +58,9 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
 
     @Value("${algotrade.strategy.trailing-buffer-pct:0.8}")
     private double trailingBufferPct = 0.8;
+
+    @Value("${algotrade.strategy.max-support-distance-pct:1.5}")
+    private double maxSupportDistancePct = 1.5;
 
     private final ConcurrentHashMap<String, CandidateMetrics> metricsMap = new ConcurrentHashMap<>();
     private final CopyOnWriteArrayList<ScoredCandidate> latestTopCandidates = new CopyOnWriteArrayList<>();
@@ -112,7 +117,10 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                 var list = universeRepository.findByIsFnoTrueOrderBySymbolAsc();
                 if (list != null && !list.isEmpty()) {
                     for (var e : list) {
-                        metricsMap.computeIfAbsent(e.getSymbol(), CandidateMetrics::new);
+                        CandidateMetrics m = metricsMap.computeIfAbsent(e.getSymbol(), CandidateMetrics::new);
+                        if (e.getTickSize() != null && e.getTickSize() > 0.0) {
+                            m.setTickSize(e.getTickSize());
+                        }
                     }
                     log.info("Initialized MomentumBreakoutStrategy metricsMap with {} F&O constituents from database.", list.size());
                 }
@@ -133,13 +141,22 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         }
     }
 
-    // Directional tick-size rounding helpers (5 paise / 0.05 increments)
-    private static double ceilToTick(double price) {
-        return Math.ceil(price * 20.0) / 20.0;
+    public double getSymbolTickSize(String symbol) {
+        if (symbol != null) {
+            CandidateMetrics m = metricsMap.get(symbol);
+            if (m != null) {
+                return m.getTickSize();
+            }
+        }
+        return 0.05;
     }
 
-    private static double floorToTick(double price) {
-        return Math.floor(price * 20.0) / 20.0;
+    private double ceilToTick(double price) {
+        return TickMath.ceilToTick(price, activeSymbol != null ? getSymbolTickSize(activeSymbol) : 0.05);
+    }
+
+    private double floorToTick(double price) {
+        return TickMath.floorToTick(price, activeSymbol != null ? getSymbolTickSize(activeSymbol) : 0.05);
     }
 
     /**
@@ -393,8 +410,9 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                 Position pos = optPos.get();
                 if (pos.symbol().equals(symbol) && pos.quantity() > 0) {
                     // Place protective stop-loss for the confirmed filled quantity
-                    double slLimitPrice = floorToTick(plannedStopPrice * 0.998);
-                    double triggerPrice = floorToTick(plannedStopPrice);
+                    double tickSize = getSymbolTickSize(symbol);
+                    double triggerPrice = TickMath.floorToTick(plannedStopPrice, tickSize);
+                    double slLimitPrice = TickMath.floorToTick(triggerPrice * 0.9985, tickSize);
                     try {
                         TradeOrder slOrder = gateway.placeOrder(symbol, "SELL", pos.quantity(), slLimitPrice, triggerPrice, "SL");
                         activeSlOrderId = slOrder.orderId();
@@ -440,24 +458,31 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
 
                 // Dynamic 2-Stage Breakeven & Progressive Trailing
                 if (activeSlOrderId != null) {
+                    double tickSize = getSymbolTickSize(symbol);
                     double entryPrice = pos.entryPrice();
                     double candidateStop = currentArmedStopPrice;
                     String ratchetReason = null;
 
-                    // Stage 1: Breakeven Lock (+1.0% gain milestone)
-                    // Ratchet stop to entry + cost buffer (+0.15% covers all statutory taxes & Zerodha brokerage)
+                    // Stage 1: Exact Solvency Breakeven Lock (+1.0% gain milestone)
+                    // Solves for exact net P&L >= +₹10.00 after all statutory taxes, fees, and Zerodha brokerage
                     if (strategyHighWaterMark >= entryPrice * (1.0 + breakevenTriggerPct / 100.0)) {
-                        double breakevenTarget = floorToTick(entryPrice * (1.0 + breakevenCostBufferPct / 100.0));
-                        if (breakevenTarget > candidateStop) {
-                            candidateStop = breakevenTarget;
-                            ratchetReason = "Breakeven Lock (+0.15% Regulatory Costs Covered)";
+                        Optional<Double> beOpt = ChargesBreakdown.calculateExactBreakevenPrice(pos.quantity(), entryPrice, tickSize);
+                        if (beOpt.isPresent()) {
+                            double breakevenTarget = beOpt.get();
+                            if (breakevenTarget > candidateStop) {
+                                candidateStop = breakevenTarget;
+                                ratchetReason = "Breakeven Lock (+₹10 Net Profit Secured)";
+                            }
+                        } else {
+                            log.warn("Fail-closed: Breakeven calculation did not converge for {} x {} @ entry ₹{}. Retaining existing stop.",
+                                pos.quantity(), symbol, entryPrice);
                         }
                     }
 
                     // Stage 2: Progressive Trailing Buffer (Active after 11:00 AM IST or if gain >= 1.5%)
                     if (now.isAfter(LocalTime.of(11, 0)) || strategyHighWaterMark >= entryPrice * 1.015) {
-                        double trailTarget = floorToTick(strategyHighWaterMark * (1.0 - trailingBufferPct / 100.0));
-                        if (trailTarget > candidateStop) {
+                        double trailTarget = TickMath.floorToTick(strategyHighWaterMark * (1.0 - trailingBufferPct / 100.0), tickSize);
+                        if (trailTarget >= candidateStop + (3 * tickSize)) {
                             candidateStop = trailTarget;
                             ratchetReason = "Trailing Stop Ratcheted (" + trailingBufferPct + "% Buffer)";
                         }
@@ -465,21 +490,27 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
 
                     // Ratchet stop strictly upward if higher than current armed stop and above initial stop
                     if (candidateStop > currentArmedStopPrice && candidateStop > plannedStopPrice) {
-                        double limitPrice = floorToTick(candidateStop * 0.998);
-                        log.info("RATCHETING STOP for {}: Persistent HWM=₹{}, New Trigger=₹{}, Limit=₹{}, Reason={}",
-                            symbol, strategyHighWaterMark, candidateStop, limitPrice, ratchetReason);
-                        gateway.modifyOrder(activeSlOrderId, limitPrice, candidateStop);
-                        currentArmedStopPrice = candidateStop; // Maintain local confirmed trigger to prevent repetitive modifications
-                        activityFeedService.record(
-                            "ORDERS",
-                            "SUCCESS",
-                            gateway.getExecutionMode().name(),
-                            activeTradeId,
-                            ratchetReason != null ? ratchetReason : "Trailing Stop Ratcheted",
-                            "Persistent HWM updated to ₹" + strategyHighWaterMark + ". Stop raised to ₹" + candidateStop + " (Limit: ₹" + limitPrice + ")",
-                            symbol,
-                            Map.of("highWaterMark", strategyHighWaterMark, "triggerPrice", candidateStop, "limitPrice", limitPrice)
-                        );
+                        // Price Inversion Guard: Candidate stop trigger must strictly be below current LTP
+                        if (candidateStop >= ltp) {
+                            log.warn("PRICE INVERSION GUARD: Candidate stop ₹{} >= current LTP ₹{}. Holding stop modification for {}.",
+                                candidateStop, ltp, symbol);
+                        } else {
+                            double limitPrice = TickMath.floorToTick(candidateStop * 0.9985, tickSize);
+                            log.info("RATCHETING STOP for {}: Persistent HWM=₹{}, New Trigger=₹{}, Limit=₹{}, Reason={}",
+                                symbol, strategyHighWaterMark, candidateStop, limitPrice, ratchetReason);
+                            gateway.modifyOrder(activeSlOrderId, limitPrice, candidateStop);
+                            currentArmedStopPrice = candidateStop; // Maintain local confirmed trigger to prevent repetitive modifications
+                            activityFeedService.record(
+                                "ORDERS",
+                                "SUCCESS",
+                                gateway.getExecutionMode().name(),
+                                activeTradeId,
+                                ratchetReason != null ? ratchetReason : "Trailing Stop Ratcheted",
+                                "Persistent HWM updated to ₹" + strategyHighWaterMark + ". Stop raised to ₹" + candidateStop + " (Limit: ₹" + limitPrice + ")",
+                                symbol,
+                                Map.of("highWaterMark", strategyHighWaterMark, "triggerPrice", candidateStop, "limitPrice", limitPrice)
+                            );
+                        }
                     }
                 }
             } else {
@@ -586,12 +617,37 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         // Step 4: Calculate Structural Stop and Position Size
         double entryPrice = winner.ltp();
         double effLow15 = winnerMetrics.getLow15();
-        // Dynamic stop: Structural support floored at max 0.8% distance below entry
-        double maxAllowedStop = floorToTick(entryPrice * 0.992);
-        double initialStop = (effLow15 > 0 && effLow15 < entryPrice)
-            ? Math.max(effLow15 - 0.05, maxAllowedStop)
-            : maxAllowedStop;
-        initialStop = floorToTick(initialStop);
+        double tickSize = winnerMetrics.getTickSize();
+
+        // Structural Support Filter: Check that Day's Session Low is valid and within allowable distance
+        if (effLow15 <= 0 || effLow15 >= entryPrice) {
+            log.warn("Trade aborted for {}: Invalid structural support baseline (Low=₹{}, Entry=₹{})",
+                winner.symbol(), effLow15, entryPrice);
+            return;
+        }
+
+        double supportDistPct = ((entryPrice - effLow15) / entryPrice) * 100.0;
+        if (supportDistPct > maxSupportDistancePct) {
+            log.info("Trade rejected for {}: Support distance {:.2f}% > {:.2f}% cap. Breakout overextended.",
+                winner.symbol(), supportDistPct, maxSupportDistancePct);
+            activityFeedService.record(
+                "RISK",
+                "INFO",
+                "Breakout Overextended",
+                "Rejected " + winner.symbol() + ": Structural support is " + String.format("%.2f", supportDistPct) + "% away (> " + maxSupportDistancePct + "% limit).",
+                winner.symbol()
+            );
+            return;
+        }
+
+        // Dynamic stop: Structural support 1 tick below session low, clamped to max allowed stop (0.8% distance) and noise floor
+        double maxAllowedStop = TickMath.floorToTick(entryPrice * 0.992, tickSize); // 0.8% planned stop boundary
+        double calculatedStop = (supportDistPct < 0.25)
+            ? TickMath.floorToTick(entryPrice * 0.9965, tickSize) // Noise floor clamp (0.35%)
+            : TickMath.floorToTick(effLow15 - tickSize, tickSize); // 1 tick below support
+
+        double initialStop = Math.max(calculatedStop, maxAllowedStop);
+        initialStop = TickMath.floorToTick(initialStop, tickSize);
 
         if (initialStop <= 0 || initialStop >= entryPrice) {
             log.warn("Trade aborted for {}: Invalid stop price ₹{} (Entry ~₹{})", winner.symbol(), initialStop, entryPrice);
@@ -638,7 +694,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         plannedQuantity = quantity;
         lifecycleState = TradeLifecycleState.PENDING_ENTRY;
 
-        double marketableBuyLimit = ceilToTick(entryPrice * 1.0005); // LTP + 0.05% ceil to valid tick
+        double marketableBuyLimit = TickMath.ceilToTick(entryPrice * 1.0005, tickSize); // LTP + 0.05% ceil to valid tick
         log.info("DISPATCHING ENTRY ORDER: BUY {} x {} @ Marketable Limit ₹{}", quantity, winner.symbol(), marketableBuyLimit);
 
         TradeOrder buyOrder = gateway.placeOrder(winner.symbol(), "BUY", quantity, marketableBuyLimit, 0.0, "LIMIT");
@@ -660,7 +716,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         if (immediatePos.isPresent() && immediatePos.get().symbol().equals(winner.symbol())) {
             Position pos = immediatePos.get();
             strategyHighWaterMark = Math.max(entryPrice, pos.currentPrice());
-            double slLimitPrice = floorToTick(initialStop * 0.998);
+            double slLimitPrice = TickMath.floorToTick(initialStop * 0.9985, tickSize);
             try {
                 TradeOrder slOrder = gateway.placeOrder(winner.symbol(), "SELL", pos.quantity(), slLimitPrice, initialStop, "SL");
                 activeSlOrderId = slOrder.orderId();
@@ -741,7 +797,8 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             lifecycleState = TradeLifecycleState.PENDING_EXIT;
 
             // Aggressive limit sell: LTP - 0.10% (directionally floored)
-            double aggressiveSellPrice = floorToTick(pos.currentPrice() * 0.9990);
+            double tickSize = getSymbolTickSize(pos.symbol());
+            double aggressiveSellPrice = TickMath.floorToTick(pos.currentPrice() * 0.9990, tickSize);
             gateway.placeOrder(pos.symbol(), "SELL", pos.quantity(), aggressiveSellPrice, 0.0, "LIMIT");
 
             // Check if immediately flat (e.g. Paper Trading)
@@ -843,13 +900,15 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             throw new IllegalArgumentException("Unable to fetch live execution price for symbol: " + symbol);
         }
 
+        double tickSize = getSymbolTickSize(symbol);
+
         // Determine Stop Loss
         double initialStop;
         if (customStopPrice != null && customStopPrice > 0 && customStopPrice < entryPrice) {
-            initialStop = floorToTick(customStopPrice);
+            initialStop = TickMath.floorToTick(customStopPrice, tickSize);
         } else {
-            // Default 1.0% structural stop below entry
-            initialStop = floorToTick(entryPrice * 0.990);
+            // Default 0.65% structural stop below entry
+            initialStop = TickMath.floorToTick(entryPrice * 0.9935, tickSize);
         }
 
         // Determine Quantity
@@ -870,7 +929,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         plannedQuantity = quantity;
         lifecycleState = TradeLifecycleState.PENDING_ENTRY;
 
-        double marketableBuyLimit = ceilToTick(entryPrice * 1.0005);
+        double marketableBuyLimit = TickMath.ceilToTick(entryPrice * 1.0005, tickSize);
         log.info("DISPATCHING MANUAL ENTRY ORDER: BUY {} x {} @ Marketable Limit ₹{}", quantity, symbol, marketableBuyLimit);
 
         TradeOrder buyOrder = gateway.placeOrder(symbol, "BUY", quantity, marketableBuyLimit, 0.0, "LIMIT");
@@ -894,7 +953,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         if (immediatePos.isPresent() && immediatePos.get().symbol().equals(symbol)) {
             Position pos = immediatePos.get();
             strategyHighWaterMark = Math.max(entryPrice, pos.currentPrice());
-            double slLimitPrice = floorToTick(initialStop * 0.998);
+            double slLimitPrice = TickMath.floorToTick(initialStop * 0.9985, tickSize);
             try {
                 TradeOrder slOrder = gateway.placeOrder(symbol, "SELL", pos.quantity(), slLimitPrice, initialStop, "SL");
                 activeSlOrderId = slOrder.orderId();

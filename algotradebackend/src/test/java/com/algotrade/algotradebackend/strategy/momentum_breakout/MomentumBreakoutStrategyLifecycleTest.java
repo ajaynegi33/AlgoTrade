@@ -169,8 +169,8 @@ public class MomentumBreakoutStrategyLifecycleTest {
         java.time.LocalTime time1015 = java.time.LocalTime.of(10, 15);
         strategy.onTick("RELIANCE", 1031.0, 3_500_000, 2_000_000, 500_000, false, time1015);
 
-        // Breakeven target = floorToTick(1020.0 * 1.0015) = 1021.50
-        verify(mockGateway, times(1)).modifyOrder(eq("ORD-SL-1"), anyDouble(), eq(1021.50));
+        // Exact Solvency Breakeven target guarantees Net PnL >= +₹10.00 after all charges (1022.10)
+        verify(mockGateway, times(1)).modifyOrder(eq("ORD-SL-1"), anyDouble(), eq(1022.10));
     }
 
     @Test

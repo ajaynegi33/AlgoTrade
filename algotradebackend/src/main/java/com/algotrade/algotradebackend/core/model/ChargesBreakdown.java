@@ -2,6 +2,8 @@ package com.algotrade.algotradebackend.core.model;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.util.Optional;
+import com.algotrade.algotradebackend.core.util.TickMath;
 
 /**
  * Calculates and encapsulates the exact statutory taxes, regulatory fees, and brokerage
@@ -89,6 +91,47 @@ public record ChargesBreakdown(
             grossPnL,
             netPnL
         );
+    }
+
+    /**
+     * Computes the exact minimum exit price aligned to the instrument's tick size
+     * that secures at least ₹10.00 Net Take-Home P&L after all statutory taxes,
+     * exchange fees, SEBI charges, stamp duty, GST, and brokerages.
+     * 
+     * <p>Algorithm is fail-closed: it analytically estimates the required gross profit,
+     * rounds up to the valid exchange tick size, and verifies the candidate against
+     * the actual {@link #calculate(int, double, double)} formula. If not achieved within
+     * 10 tick steps or if candidate exceeds +1.5% from entry, returns {@link Optional#empty()}.</p>
+     * 
+     * @param quantity Number of shares filled
+     * @param filledBuyPrice Confirmed executed buy price
+     * @param tickSize Exchange instrument tick size (e.g. 0.01, 0.05, 0.10)
+     * @return Valid tick-aligned exit price guaranteeing netPnL >= 10.00, or empty if impossible
+     */
+    public static Optional<Double> calculateExactBreakevenPrice(int quantity, double filledBuyPrice, double tickSize) {
+        if (quantity <= 0 || filledBuyPrice <= 0.0 || tickSize <= 0.0) {
+            return Optional.empty();
+        }
+
+        // 1. Analytical baseline estimation:
+        // Evaluate an initial candidate around +0.20% to get an authoritative charge estimate.
+        ChargesBreakdown estBreakdown = calculate(quantity, filledBuyPrice, filledBuyPrice * 1.0020);
+        double targetGrossProfit = estBreakdown.totalCharges() + 10.00;
+        double priceDeltaPerShare = targetGrossProfit / quantity;
+        double candidate = TickMath.ceilToTick(filledBuyPrice + priceDeltaPerShare, tickSize);
+
+        // 2. Exact verification loop:
+        // Check if candidate yields netPnL >= 10.00. Step up by tick if needed (up to 10 ticks max).
+        double maxAllowedCandidate = filledBuyPrice * 1.015; // Safeguard: never exceed +1.5% for breakeven
+        for (int step = 0; step < 10 && candidate <= maxAllowedCandidate; step++) {
+            ChargesBreakdown verified = calculate(quantity, filledBuyPrice, candidate);
+            if (verified.netPnL() >= 10.00) {
+                return Optional.of(candidate);
+            }
+            candidate = TickMath.ceilToTick(candidate + tickSize, tickSize);
+        }
+
+        return Optional.empty();
     }
 
     /**
