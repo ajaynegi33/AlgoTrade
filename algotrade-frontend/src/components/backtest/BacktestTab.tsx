@@ -26,11 +26,11 @@ export default function BacktestTab({ backendUrl }: BacktestTabProps) {
   const [startDate, setStartDate] = useState<string>("");
   const [endDate, setEndDate] = useState<string>("");
   const [initialCapital, setInitialCapital] = useState<number>(10000);
-  const [riskPerTradePct, setRiskPerTradePct] = useState<number>(1.0);
+  const [riskPerTradePct, setRiskPerTradePct] = useState<number>(2.0);
   const [minScoreThreshold, setMinScoreThreshold] = useState<number>(75);
-  const [trailingSlPct, setTrailingSlPct] = useState<number>(2.0);
+  const [trailingSlPct, setTrailingSlPct] = useState<number>(0.8);
   const [slippagePct, setSlippagePct] = useState<number>(0.05);
-  const [leverageMultiplier, setLeverageMultiplier] = useState<number>(1.0);
+  const [leverageMultiplier, setLeverageMultiplier] = useState<number>(5.0);
 
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<BacktestResult | null>(null);

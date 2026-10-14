@@ -62,7 +62,10 @@ public class BacktestEngineService {
             end = tmp;
         }
 
-        // Pre-warm data cache for all NIFTY universe stocks across the requested date range
+        // Retrieve dynamic active F&O constituent watchlist
+        List<String> watchlist = dataService.getWatchlistSymbols();
+
+        // Pre-warm data cache for all universe stocks across the requested date range
         dataService.preloadUniverse(start, end);
 
         double initialCapital = req.initialCapital();
@@ -79,6 +82,7 @@ public class BacktestEngineService {
         List<Double> dailyReturns = new ArrayList<>();
 
         int tradeCounter = 1;
+        List<String> timeSlots = generate5mTimeSlots();
 
         for (LocalDate date = start; !date.isAfter(end); date = date.plusDays(1)) {
             // Skip non-trading sessions (weekends and official NSE holidays)
@@ -86,187 +90,246 @@ public class BacktestEngineService {
                 continue;
             }
 
-            List<CandidateMetrics> metricsList = dataService.getOpeningCandidateMetrics(date);
-            if (metricsList.isEmpty()) {
+            int dailyTrades = 0;
+            int dailyLosses = 0;
+            double dayStartCapital = currentCapital;
+
+            // Initialize CandidateMetrics & preload 5m bars for all constituents on this date
+            Map<String, CandidateMetrics> metricsMap = new HashMap<>();
+            Map<String, List<HistoricalMarketDataService.IntradayBar>> barsMap = new HashMap<>();
+
+            for (String sym : watchlist) {
+                HistoricalMarketDataService.BaselineReference ref = dataService.getBaselineReference(sym, date);
+                if (ref.prevClose() <= 0) continue;
+                CandidateMetrics m = new CandidateMetrics(sym, ref.prevClose(), ref.pdh(), ref.avgDailyVol(), ref.atrPct());
+                metricsMap.put(sym, m);
+                barsMap.put(sym, dataService.getIntradayBars(sym, date));
+            }
+
+            if (metricsMap.isEmpty()) {
                 continue;
             }
 
-            List<ScoredCandidate> scoredList = metricsList.stream()
-                .map(scoringEngine::evaluate)
-                .toList();
+            // Intraday Session State
+            boolean inTrade = false;
+            String activeSym = null;
+            int activeQty = 0;
+            double entryPrice = 0.0;
+            double initialSl = 0.0;
+            double activeSl = 0.0;
+            double highWaterMark = 0.0;
+            String entryTime = null;
+            int activeScore = 0;
+            Set<String> tradedSymbolsToday = new HashSet<>();
 
-            List<ScoredCandidate> ranked = scoringEngine.rankCandidates(scoredList);
+            // Replay continuous 5-minute bars throughout the trading day (09:15 to 15:30)
+            for (String timeStr : timeSlots) {
+                java.time.LocalTime barTime = java.time.LocalTime.parse(timeStr);
 
-            // Filter qualified candidates meeting hard gates and minimum score threshold
-            Optional<ScoredCandidate> topPick = ranked.stream()
-                .filter(c -> c.isQualified() && c.totalScore() >= req.minScoreThreshold())
-                .findFirst();
+                // 1. Accumulate price, volume, and order-book depth for all candidate stocks
+                for (Map.Entry<String, List<HistoricalMarketDataService.IntradayBar>> entry : barsMap.entrySet()) {
+                    String sym = entry.getKey();
+                    CandidateMetrics m = metricsMap.get(sym);
+                    if (m == null) continue;
 
-            if (topPick.isEmpty()) {
-                // No candidate qualified today
-                double ddPct = peakCapital > 0 ? ((peakCapital - currentCapital) / peakCapital) * 100.0 : 0.0;
-                equityCurve.add(new BacktestEquityPoint(
-                    date.toString(),
-                    round2(currentCapital),
-                    0.0,
-                    0.0,
-                    round2(ddPct)
-                ));
-                dailyReturns.add(0.0);
-                continue;
-            }
+                    HistoricalMarketDataService.IntradayBar bar = findBarAtTime(entry.getValue(), timeStr);
+                    if (bar == null) continue;
 
-            ScoredCandidate winner = topPick.get();
-            CandidateMetrics winnerMetrics = metricsList.stream()
-                .filter(m -> m.getSymbol().equals(winner.symbol()))
-                .findFirst()
-                .orElse(metricsList.get(0));
+                    m.aggregateCandle(bar.open(), bar.high(), bar.low(), bar.close(), bar.volume());
+                    double bodyImbalance = (bar.high() - bar.low() > 0)
+                        ? ((bar.close() - bar.low()) - (bar.high() - bar.close())) / (bar.high() - bar.low())
+                        : 0.0;
+                    long buyVol = (long) (bar.volume() * (0.50 + bodyImbalance * 0.35));
+                    long sellVol = Math.max(0, bar.volume() - buyVol);
+                    m.updateTick(bar.close(), m.getWindowVolume() + bar.volume(), buyVol, sellVol, bodyImbalance, true);
+                }
 
-            // Position Sizing with exact Live Strategy Parity
-            double rawEntryPrice = winner.ltp();
-            double entryPrice = round2(rawEntryPrice * (1.0 + req.slippagePct() / 100.0));
+                // 2. Active Trade Management (Stop-loss, Breakeven Lock, Trailing Stop, 15:05 Exit)
+                if (inTrade) {
+                    HistoricalMarketDataService.IntradayBar bar = findBarAtTime(barsMap.get(activeSym), timeStr);
+                    if (bar != null) {
+                        double tickSize = 0.05;
+                        boolean isBullish = bar.close() >= bar.open();
+                        boolean stoppedOut = false;
+                        double exitPrice = 0.0;
+                        String exitReason = null;
 
-            // Structural stop anchored strictly to Low15 minus 5 paise tick buffer, floored
-            double effLow15 = winnerMetrics.getLow15();
-            double initialSl = floorToTick(effLow15 - 0.05);
+                        if (isBullish) {
+                            // Bullish candle (O -> L -> H -> C): Low occurs before High
+                            if (bar.low() <= activeSl) {
+                                stoppedOut = true;
+                                exitPrice = round2(activeSl * (1.0 - req.slippagePct() / 100.0));
+                                exitReason = activeSl > initialSl ? "TRAILING_SL" : "INITIAL_SL";
+                            } else {
+                                highWaterMark = Math.max(highWaterMark, bar.high());
+                                // Stage 1: Breakeven lock (+1.0% gain)
+                                if (highWaterMark >= entryPrice * 1.010) {
+                                    var beOpt = ChargesBreakdown.calculateExactBreakevenPrice(activeQty, entryPrice, tickSize);
+                                    if (beOpt.isPresent() && beOpt.get() > activeSl) {
+                                        activeSl = beOpt.get();
+                                    }
+                                }
+                                // Stage 2: Progressive Trailing (>11:00 AM or +1.5% gain)
+                                if (barTime.compareTo(java.time.LocalTime.of(11, 0)) >= 0 || highWaterMark >= entryPrice * 1.015) {
+                                    double trailTarget = com.algotrade.algotradebackend.core.util.TickMath.floorToTick(
+                                        highWaterMark * (1.0 - req.trailingSlPct() / 100.0), tickSize
+                                    );
+                                    if (trailTarget >= activeSl + (3 * tickSize)) {
+                                        activeSl = trailTarget;
+                                    }
+                                }
+                            }
+                        } else {
+                            // Bearish candle (O -> H -> L -> C): High occurs before Low
+                            highWaterMark = Math.max(highWaterMark, bar.high());
+                            if (highWaterMark >= entryPrice * 1.010) {
+                                var beOpt = ChargesBreakdown.calculateExactBreakevenPrice(activeQty, entryPrice, tickSize);
+                                if (beOpt.isPresent() && beOpt.get() > activeSl) {
+                                    activeSl = beOpt.get();
+                                }
+                            }
+                            if (barTime.compareTo(java.time.LocalTime.of(11, 0)) >= 0 || highWaterMark >= entryPrice * 1.015) {
+                                double trailTarget = com.algotrade.algotradebackend.core.util.TickMath.floorToTick(
+                                    highWaterMark * (1.0 - req.trailingSlPct() / 100.0), tickSize
+                                );
+                                if (trailTarget >= activeSl + (3 * tickSize)) {
+                                    activeSl = trailTarget;
+                                }
+                            }
+                            if (bar.low() <= activeSl) {
+                                stoppedOut = true;
+                                exitPrice = round2(activeSl * (1.0 - req.slippagePct() / 100.0));
+                                exitReason = activeSl > initialSl ? "TRAILING_SL" : "INITIAL_SL";
+                            }
+                        }
 
-            // Calculate quantity using the shared quantitative formula from PositionSizingEngine
-            // Enforces: 0.4% min stop distance, 2.0% max stop distance, and user-configured leverage cap (1.0x to 5.0x)
-            int quantity = PositionSizingEngine.calculateSizingQuantity(
-                currentCapital,
-                entryPrice,
-                initialSl,
-                req.riskPerTradePct(),
-                req.leverageMultiplier(), // Configurable intraday MIS leverage (1.0x to 5.0x)
-                0.4, // 0.4% minimum stop distance gate
-                2.0  // 2.0% maximum stop distance gate
-            );
+                        // Mandatory 15:05 Exit
+                        if (!stoppedOut && barTime.compareTo(java.time.LocalTime.of(15, 5)) >= 0) {
+                            stoppedOut = true;
+                            exitPrice = round2(bar.close());
+                            exitReason = "MARKET_CLOSE_1505";
+                        }
 
-            if (quantity < 1) {
-                // Sizing engine rejected trade (e.g. stop too narrow <0.4%, too wide >2.0%, or insufficient capital)
-                double ddPct = peakCapital > 0 ? ((peakCapital - currentCapital) / peakCapital) * 100.0 : 0.0;
-                equityCurve.add(new BacktestEquityPoint(
-                    date.toString(),
-                    round2(currentCapital),
-                    0.0,
-                    0.0,
-                    round2(ddPct)
-                ));
-                dailyReturns.add(0.0);
-                continue;
-            }
+                        if (stoppedOut) {
+                            double grossPnL = round2((exitPrice - entryPrice) * activeQty);
+                            var charges = ChargesBreakdown.calculate(activeQty, entryPrice, exitPrice);
+                            double totalCharges = round2(charges.totalCharges());
+                            double netPnL = round2(grossPnL - totalCharges);
 
-            // Intraday trajectory replay (09:30 to 15:05)
-            List<HistoricalMarketDataService.IntradayBar> bars = dataService.getIntradayTrajectory(
-                date, winner.symbol(), entryPrice, initialSl
-            );
+                            currentCapital = round2(currentCapital + netPnL);
+                            double returnPct = round2((netPnL / (entryPrice * activeQty)) * 100.0);
 
-            double activeSl = initialSl;
-            double highWaterMark = entryPrice;
-            double exitPrice = entryPrice;
-            String exitTime = "15:05";
-            String exitReason = "MARKET_CLOSE_1505";
+                            trades.add(new BacktestTrade(
+                                tradeCounter++,
+                                date.toString(),
+                                activeSym,
+                                activeScore,
+                                entryPrice,
+                                exitPrice,
+                                activeQty,
+                                entryTime,
+                                timeStr,
+                                exitReason,
+                                grossPnL,
+                                totalCharges,
+                                netPnL,
+                                returnPct
+                            ));
 
-            for (HistoricalMarketDataService.IntradayBar bar : bars) {
-                boolean isBullish = bar.close() >= bar.open();
+                            if (netPnL < 0) {
+                                dailyLosses++;
+                                currentConsecutiveLosses++;
+                                maxConsecutiveLosses = Math.max(maxConsecutiveLosses, currentConsecutiveLosses);
+                            } else {
+                                currentConsecutiveLosses = 0;
+                            }
 
-                if (isBullish) {
-                    // Bullish bar (O -> L -> H -> C): Low occurs BEFORE High
-                    // 1. Check existing stop loss trigger first
-                    if (bar.low() <= activeSl) {
-                        exitPrice = round2(activeSl * (1.0 - req.slippagePct() / 100.0));
-                        exitTime = bar.time();
-                        exitReason = activeSl > initialSl ? "TRAILING_SL" : "INITIAL_SL";
-                        break;
+                            dailyTrades++;
+                            inTrade = false;
+                            activeSym = null;
+                        }
                     }
+                }
 
-                    // 2. Only if not stopped out, ratchet High-Water Mark and Trailing SL
-                    highWaterMark = Math.max(highWaterMark, bar.high());
-                    if (highWaterMark >= entryPrice * 1.010) {
-                        double beSl = floorToTick(entryPrice * 1.0015);
-                        activeSl = Math.max(activeSl, beSl);
-                    }
-                    if (bar.time().compareTo("11:00") >= 0 || highWaterMark >= entryPrice * 1.015) {
-                        double trailedSl = floorToTick(highWaterMark * (1.0 - req.trailingSlPct() / 100.0));
-                        activeSl = Math.max(activeSl, trailedSl);
-                    }
-                } else {
-                    // Bearish bar (O -> H -> L -> C): High occurs BEFORE Low
-                    // 1. Ratchet High-Water Mark and Trailing SL
-                    highWaterMark = Math.max(highWaterMark, bar.high());
-                    if (highWaterMark >= entryPrice * 1.010) {
-                        double beSl = floorToTick(entryPrice * 1.0015);
-                        activeSl = Math.max(activeSl, beSl);
-                    }
-                    if (bar.time().compareTo("11:00") >= 0 || highWaterMark >= entryPrice * 1.015) {
-                        double trailedSl = floorToTick(highWaterMark * (1.0 - req.trailingSlPct() / 100.0));
-                        activeSl = Math.max(activeSl, trailedSl);
-                    }
+                // 3. Continuous Wave Scanning (09:20 AM to 14:45 PM IST)
+                if (!inTrade && dailyTrades < 3 && dailyLosses < 2
+                    && barTime.compareTo(java.time.LocalTime.of(9, 20)) >= 0
+                    && barTime.compareTo(java.time.LocalTime.of(14, 45)) <= 0) {
 
-                    // 2. Check stop loss trigger against the newly ratcheted stop
-                    if (bar.low() <= activeSl) {
-                        exitPrice = round2(activeSl * (1.0 - req.slippagePct() / 100.0));
-                        exitTime = bar.time();
-                        exitReason = activeSl > initialSl ? "TRAILING_SL" : "INITIAL_SL";
-                        break;
+                    List<ScoredCandidate> scoredList = metricsMap.values().stream()
+                        .filter(m -> !tradedSymbolsToday.contains(m.getSymbol()))
+                        .map(m -> scoringEngine.evaluate(m, barTime))
+                        .toList();
+
+                    List<ScoredCandidate> ranked = scoringEngine.rankCandidates(scoredList);
+                    Optional<ScoredCandidate> winnerOpt = ranked.stream()
+                        .filter(c -> c.isQualified() && c.totalScore() >= req.minScoreThreshold())
+                        .findFirst();
+
+                    if (winnerOpt.isPresent()) {
+                        ScoredCandidate winner = winnerOpt.get();
+                        CandidateMetrics winnerMetrics = metricsMap.get(winner.symbol());
+                        double rawEntry = winner.ltp();
+                        double effLow = winnerMetrics.getLow15();
+                        double tickSize = 0.05;
+
+                        // Structural Support Filter: check support distance <= 1.5%
+                        if (effLow > 0 && effLow < rawEntry) {
+                            double supportDistPct = ((rawEntry - effLow) / rawEntry) * 100.0;
+                            if (supportDistPct <= 1.5) {
+                                double maxAllowedStop = com.algotrade.algotradebackend.core.util.TickMath.floorToTick(rawEntry * 0.992, tickSize);
+                                double calculatedStop = (supportDistPct < 0.25)
+                                    ? com.algotrade.algotradebackend.core.util.TickMath.floorToTick(rawEntry * 0.9965, tickSize)
+                                    : com.algotrade.algotradebackend.core.util.TickMath.floorToTick(effLow - tickSize, tickSize);
+                                double computedInitialSl = com.algotrade.algotradebackend.core.util.TickMath.floorToTick(Math.max(calculatedStop, maxAllowedStop), tickSize);
+
+                                double slipEntry = round2(rawEntry * (1.0 + req.slippagePct() / 100.0));
+                                double stopDistance = slipEntry - computedInitialSl;
+
+                                if (stopDistance > 0) {
+                                    double stopDistancePct = (stopDistance / slipEntry) * 100.0;
+                                    if (stopDistancePct >= 0.4 && stopDistancePct <= 2.0) {
+                                        // 3-Constraint Sizing (Strict Leverage Ceiling Cap)
+                                        int qRisk = (int) Math.floor((currentCapital * req.leverageMultiplier() * (req.riskPerTradePct() / 100.0)) / stopDistance);
+                                        int qExposure = (int) Math.floor((currentCapital * req.leverageMultiplier()) / slipEntry);
+                                        int finalQty = Math.min(qRisk, qExposure);
+
+                                        if (finalQty >= 1) {
+                                            inTrade = true;
+                                            activeSym = winner.symbol();
+                                            activeQty = finalQty;
+                                            entryPrice = slipEntry;
+                                            initialSl = computedInitialSl;
+                                            activeSl = computedInitialSl;
+                                            highWaterMark = slipEntry;
+                                            entryTime = timeStr;
+                                            activeScore = winner.totalScore();
+                                            tradedSymbolsToday.add(winner.symbol());
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
 
-            // Mandatory 15:05 PM exit if SL not triggered
-            if (exitReason.startsWith("MARKET_CLOSE") && !bars.isEmpty()) {
-                exitPrice = round2(bars.get(bars.size() - 1).close());
-            }
-
-            // Financial Calculations & Statutory Taxes
-            double grossPnL = round2((exitPrice - entryPrice) * quantity);
-            var charges = ChargesBreakdown.calculate(quantity, entryPrice, exitPrice);
-            double totalCharges = round2(charges.totalCharges());
-            double netPnL = round2(grossPnL - totalCharges);
-
-            double preTradeCapital = currentCapital;
-            currentCapital = round2(currentCapital + netPnL);
-            double tradeReturnPct = round2((netPnL / (entryPrice * quantity)) * 100.0);
-
-            // Track consecutive losses and drawdowns
-            if (netPnL < 0) {
-                currentConsecutiveLosses++;
-                maxConsecutiveLosses = Math.max(maxConsecutiveLosses, currentConsecutiveLosses);
-            } else {
-                currentConsecutiveLosses = 0;
-            }
-
+            // Daily Equity Curve Point
+            double dayNetPnL = round2(currentCapital - dayStartCapital);
             peakCapital = Math.max(peakCapital, currentCapital);
             double currentDdRupees = Math.max(0.0, peakCapital - currentCapital);
             double currentDdPct = peakCapital > 0 ? (currentDdRupees / peakCapital) * 100.0 : 0.0;
             maxDrawdownRupees = Math.max(maxDrawdownRupees, currentDdRupees);
             maxDrawdownPct = Math.max(maxDrawdownPct, currentDdPct);
 
-            double dailyReturn = preTradeCapital > 0 ? (netPnL / preTradeCapital) : 0.0;
+            double dailyReturn = dayStartCapital > 0 ? (dayNetPnL / dayStartCapital) : 0.0;
             dailyReturns.add(dailyReturn);
-
-            trades.add(new BacktestTrade(
-                tradeCounter++,
-                date.toString(),
-                winner.symbol(),
-                winner.totalScore(),
-                entryPrice,
-                exitPrice,
-                quantity,
-                "09:30",
-                exitTime,
-                exitReason,
-                grossPnL,
-                totalCharges,
-                netPnL,
-                tradeReturnPct
-            ));
 
             equityCurve.add(new BacktestEquityPoint(
                 date.toString(),
-                currentCapital,
-                grossPnL,
-                netPnL,
+                round2(currentCapital),
+                0.0,
+                dayNetPnL,
                 round2(currentDdPct)
             ));
         }
@@ -337,6 +400,23 @@ public class BacktestEngineService {
 
     private double floorToTick(double price) {
         return Math.floor(price * 20.0) / 20.0;
+    }
+
+    private static List<String> generate5mTimeSlots() {
+        List<String> slots = new ArrayList<>();
+        // 09:15 to 15:30 in 5m increments (75 slots)
+        for (int m = 9 * 60 + 15; m <= 15 * 60 + 30; m += 5) {
+            slots.add(String.format("%02d:%02d", m / 60, m % 60));
+        }
+        return slots;
+    }
+
+    private static HistoricalMarketDataService.IntradayBar findBarAtTime(List<HistoricalMarketDataService.IntradayBar> bars, String timeStr) {
+        if (bars == null || bars.isEmpty()) return null;
+        for (HistoricalMarketDataService.IntradayBar b : bars) {
+            if (b.time().equals(timeStr)) return b;
+        }
+        return null;
     }
 
     private double round2(double val) {
