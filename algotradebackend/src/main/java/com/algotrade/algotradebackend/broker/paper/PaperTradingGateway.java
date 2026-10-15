@@ -123,8 +123,6 @@ public class PaperTradingGateway implements BrokerGateway {
                 log.info("RESTORED PERSISTED PAPER POSITION: {} x {} @ ₹{} (SL: ₹{}, HWM: ₹{})",
                     entity.getQuantity(), entity.getSymbol(), entity.getEntryPrice(),
                     entity.getActiveTrailingStop(), entity.getHighWaterMark());
-            } else {
-                restoreLostAirtelTradeIfApplicable();
             }
         } catch (Throwable t) {
             log.warn("Could not restore active paper position: {}", t.getMessage());

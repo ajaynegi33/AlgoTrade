@@ -101,20 +101,12 @@ public class PositionSizingEngineCircuitBreakerTest {
     }
 
     @Test
-    void testBhartiAirtelAutoRecoveryOnStartupIfEmpty() {
+    void testNoActivePositionWhenRepositoryEmpty() {
         when(paperActivePositionRepository.findFirstByOrderByEntryTimeDesc()).thenReturn(Optional.empty());
-        when(paperTradeRepository.findByEntryTimeBetween(any(), any())).thenReturn(Collections.emptyList());
 
         PaperTradingGateway gateway = new PaperTradingGateway(paperTradeRepository, paperActivePositionRepository, 10000.0);
 
         Optional<Position> optPos = gateway.getOpenPosition();
-        assertTrue(optPos.isPresent());
-        assertEquals("BHARTIARTL", optPos.get().symbol());
-        assertEquals(21, optPos.get().quantity());
-        assertEquals(1852.73, optPos.get().entryPrice());
-        assertEquals(1841.40, optPos.get().activeTrailingStop());
-        assertEquals(1868.20, optPos.get().highWaterMark());
-
-        verify(paperActivePositionRepository, times(1)).save(any(PaperActivePositionEntity.class));
+        assertTrue(optPos.isEmpty());
     }
 }
