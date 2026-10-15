@@ -152,6 +152,10 @@ public class HistoricalMarketDataService {
         preloadUniverse(getWatchlistSymbols(), start, end);
     }
 
+    public boolean hasCachedDailyCandles(String symbol) {
+        return Files.exists(cacheDir.resolve(symbol + "_daily.json"));
+    }
+
     /**
      * Retrieves or fetches daily candle series for a symbol.
      */

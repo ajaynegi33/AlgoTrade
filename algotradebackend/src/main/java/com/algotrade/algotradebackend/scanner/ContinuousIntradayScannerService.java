@@ -160,7 +160,7 @@ public class ContinuousIntradayScannerService {
                 double avgVol = 2_000_000.0;
                 double atrPct = 2.0;
 
-                if (historicalMarketDataService != null) {
+                if (historicalMarketDataService != null && historicalMarketDataService.hasCachedDailyCandles(sym)) {
                     var ref = baselineCache.computeIfAbsent(sym, s -> historicalMarketDataService.getBaselineReference(s, today));
                     if (ref != null) {
                         if (prevClose <= 0) prevClose = ref.prevClose();
@@ -169,12 +169,10 @@ public class ContinuousIntradayScannerService {
                         atrPct = ref.atrPct();
                     }
                 }
-                if (pdh <= 0) {
-                    if (now.isBefore(MarketCalendarService.MARKET_OPEN_TIME) && q.ohlc.high > 0) {
-                        pdh = q.ohlc.high;
-                    } else if (prevClose > 0) {
-                        pdh = prevClose * 1.01;
-                    }
+                if (now.isBefore(MarketCalendarService.MARKET_OPEN_TIME) && q.ohlc.high > 0) {
+                    pdh = q.ohlc.high;
+                } else if (pdh <= 0 || (prevClose > 0 && pdh < prevClose)) {
+                    pdh = prevClose > 0 ? Math.round(prevClose * 1.005 * 100.0) / 100.0 : 0.0;
                 }
 
                 double openPrice = (q.ohlc.open > 0) ? q.ohlc.open : 0.0;

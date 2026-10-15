@@ -90,6 +90,8 @@ public class MomentumScoringEngine {
             && s.previousDayHigh() > 0
             && s.ltp() > s.vwap()                // Must be trading above VWAP
             && s.ltp() > s.previousDayHigh()     // Breakout above PDH
+            && (s.prevClose() <= 0 || s.ltp() >= s.prevClose()) // Cannot be down on the day
+            && s.gapPct() >= -0.10               // Cannot have significant negative pre-open gap
             && s.windowVolume() > 0
             && s.avgDailyVolume10Day() > 0;
     }

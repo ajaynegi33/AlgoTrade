@@ -68,14 +68,21 @@ public class LeaderboardDiagnosticsTest {
     }
 
     @Test
-    void testUninitializedConstituentFailsGracefullyWithoutCrashing() {
-        CandidateMetrics raw = new CandidateMetrics("UNKNOWN");
-        assertEquals(0.0, raw.getGapPct());
-        assertEquals(0, raw.getWindowVolume());
-
+    void testRedStockOrNegativeGapCannotPassHardGates() {
         MomentumScoringEngine scoringEngine = new MomentumScoringEngine();
-        ScoredCandidate scored = scoringEngine.evaluate(raw, LocalTime.of(10, 0));
-        assertFalse(scored.isQualified());
+
+        // Stock like SRF: Previous Close = 2499.75, Open = 2499.0 (-0.03% gap), LTP = 2495.0 (-0.19% down on day)
+        CandidateMetrics m = new CandidateMetrics("SRF");
+        m.setReferenceData(2499.75, 2490.0, 1_000_000.0, 2.0, 2499.0);
+        m.setOpeningVolumeBaseline(0);
+        m.updateTick(2495.0, 500_000, 30_000, 10_000, 2493.0, false);
+
+        CandidateSnapshot snapshot = m.getSnapshot();
+        // Even though LTP (2495) > synthetic PDH (2490), the stock is RED on the day (2495 < 2499.75)
+        assertFalse(scoringEngine.passesHardGates(snapshot), "A stock trading below previous close must fail hard gates");
+
+        ScoredCandidate scored = scoringEngine.evaluate(m, LocalTime.of(10, 15));
+        assertFalse(scored.isQualified(), "Red stock must be disqualified regardless of score");
         assertEquals("DISQUALIFIED", scored.status());
     }
 }

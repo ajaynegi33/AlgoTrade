@@ -177,6 +177,7 @@ export default function LeaderboardTab({
                 <th className="py-3 px-4">Rank</th>
                 <th className="py-3 px-4">Symbol</th>
                 <th className="py-3 px-4">LTP</th>
+                <th className="py-3 px-4">Day Change %</th>
                 <th className="py-3 px-4">Pre-Open Gap</th>
                 <th className="py-3 px-4">RVOL (/30)</th>
                 <th className="py-3 px-4">VWAP (/25)</th>
@@ -189,7 +190,7 @@ export default function LeaderboardTab({
             <tbody className="divide-y divide-slate-800/60 font-mono">
               {leaderboard.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="py-10 text-center text-slate-500 font-sans">
+                  <td colSpan={11} className="py-10 text-center text-slate-500 font-sans">
                     <div className="flex flex-col items-center justify-center gap-2">
                       <span className="text-xl">📡</span>
                       <span>Real-time WebSocket engine is streaming the 210 F&amp;O universe...</span>
@@ -224,32 +225,31 @@ export default function LeaderboardTab({
                         )}
                       </td>
                       <td className="py-3.5 px-4 font-mono font-semibold text-white">
-                        <div className="flex items-center gap-1.5">
-                          <span>₹{currentLtp.toFixed(2)}</span>
-                          {liveTick && (
-                            <span className={`text-[10px] font-bold ${liveTick.change >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                              {liveTick.change >= 0 ? "▲" : "▼"}
-                            </span>
-                          )}
-                        </div>
+                        ₹{currentLtp.toFixed(2)}
+                      </td>
+                      <td className="py-3.5 px-4 font-mono font-semibold" title="Live Day Change % (LTP vs Previous Day Close)">
+                        {liveTick && liveTick.changePct !== undefined ? (
+                          <span
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold ${
+                              liveTick.changePct >= 0
+                                ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
+                                : "bg-rose-500/10 text-rose-400 border border-rose-500/30"
+                            }`}
+                          >
+                            <span>{liveTick.changePct >= 0 ? "▲" : "▼"}</span>
+                            <span>{liveTick.changePct >= 0 ? `+${liveTick.changePct.toFixed(2)}%` : `${liveTick.changePct.toFixed(2)}%`}</span>
+                          </span>
+                        ) : (
+                          <span className="text-slate-500 font-normal">--</span>
+                        )}
                       </td>
                       {(() => {
                         const isZeroGap = Math.abs(item.gapPct) < 0.005;
                         const gapColor = isZeroGap ? "text-slate-400" : item.gapPct > 0 ? "text-emerald-400" : "text-rose-400";
                         const gapText = isZeroGap ? "0.00%" : item.gapPct > 0 ? `+${item.gapPct.toFixed(2)}%` : `${item.gapPct.toFixed(2)}%`;
                         return (
-                          <td className={`py-3.5 px-4 ${gapColor}`} title="Pre-Open Gap % (Open vs Previous Day Close)">
-                            <div className="flex items-center gap-1">
-                              <span>{gapText}</span>
-                              {liveTick && liveTick.changePct !== undefined && (
-                                <span
-                                  className={`text-[10px] font-sans ${liveTick.changePct >= 0 ? "text-emerald-500/80" : "text-rose-500/80"}`}
-                                  title="Live Day Change % (LTP vs Previous Day Close)"
-                                >
-                                  ({liveTick.changePct >= 0 ? `+${liveTick.changePct.toFixed(2)}%` : `${liveTick.changePct.toFixed(2)}%`})
-                                </span>
-                              )}
-                            </div>
+                          <td className={`py-3.5 px-4 font-mono ${gapColor}`} title="Pre-Open Gap % (Open vs Previous Day Close)">
+                            <span>{gapText}</span>
                           </td>
                         );
                       })()}
