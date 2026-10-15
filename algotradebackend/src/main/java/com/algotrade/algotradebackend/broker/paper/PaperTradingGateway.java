@@ -212,23 +212,30 @@ public class PaperTradingGateway implements BrokerGateway {
 
     @Override
     public synchronized TradeOrder modifyOrder(String orderId, double newPrice, double newTriggerPrice) {
+        return modifyOrder(orderId, 0, newPrice, newTriggerPrice);
+    }
+
+    @Override
+    public synchronized TradeOrder modifyOrder(String orderId, int newQuantity, double newPrice, double newTriggerPrice) {
         TradeOrder existing = orders.get(orderId);
         if (existing == null) {
             throw new IllegalArgumentException("Paper order not found: " + orderId);
         }
 
+        int finalQty = newQuantity > 0 ? newQuantity : existing.quantity();
         TradeOrder modified = new TradeOrder(
             existing.orderId(), existing.symbol(), existing.transactionType(),
-            existing.quantity(), newPrice, newTriggerPrice, existing.orderType(),
+            finalQty, newPrice, newTriggerPrice, existing.orderType(),
             existing.status(), ExecutionMode.PAPER, existing.createdAt()
         );
         orders.put(orderId, modified);
 
-        // Update position's trailing stop
+        // Update position's trailing stop and quantity if expanded
         Position current = openPosition.get();
         if (current != null && current.symbol().equals(existing.symbol())) {
+            int posQty = newQuantity > 0 ? Math.max(current.quantity(), newQuantity) : current.quantity();
             openPosition.set(new Position(
-                current.symbol(), current.quantity(), current.entryPrice(), current.currentPrice(),
+                current.symbol(), posQty, current.entryPrice(), current.currentPrice(),
                 current.initialStopLoss(), newTriggerPrice, current.highWaterMark(), current.entryTime(), ExecutionMode.PAPER
             ));
             if (paperActivePositionRepository != null) {
@@ -237,6 +244,7 @@ public class PaperTradingGateway implements BrokerGateway {
                     if (opt.isPresent()) {
                         PaperActivePositionEntity e = opt.get();
                         e.setActiveTrailingStop(newTriggerPrice);
+                        if (newQuantity > 0) e.setQuantity(posQty);
                         paperActivePositionRepository.save(e);
                     }
                 } catch (Throwable t) {
@@ -245,7 +253,7 @@ public class PaperTradingGateway implements BrokerGateway {
             }
         }
 
-        log.info("PAPER SL MODIFIED: {} New Trigger @ ₹{}", existing.symbol(), newTriggerPrice);
+        log.info("PAPER SL MODIFIED: {} Qty={}, New Trigger @ ₹{}", existing.symbol(), finalQty, newTriggerPrice);
         return modified;
     }
 
@@ -290,9 +298,9 @@ public class PaperTradingGateway implements BrokerGateway {
             } catch (Throwable ignored) {}
         }
 
-        // Check if Stop-Loss trigger was breached
+        // Check if Stop-Loss trigger was breached (0.15% slippage to match live SL-Limit offset)
         if (current.activeTrailingStop() > 0 && ltp <= current.activeTrailingStop()) {
-            double exitPrice = Math.round((current.activeTrailingStop() * 0.9995) * 100.0) / 100.0;
+            double exitPrice = Math.round((current.activeTrailingStop() * 0.9985) * 100.0) / 100.0;
             log.warn("PAPER STOP HIT: {} Triggered @ ₹{}, Exited @ ₹{}", symbol, current.activeTrailingStop(), exitPrice);
             closePosition(symbol, exitPrice, "STOP_LOSS_HIT");
         }

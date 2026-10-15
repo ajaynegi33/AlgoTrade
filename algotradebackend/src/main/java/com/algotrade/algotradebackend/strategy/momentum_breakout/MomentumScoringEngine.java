@@ -32,6 +32,10 @@ public class MomentumScoringEngine {
         return evaluate(m.getSnapshot(), currentTime);
     }
 
+    public ScoredCandidate evaluate(CandidateMetrics m, java.time.LocalTime currentTime, boolean isBacktestMode) {
+        return evaluate(m.getSnapshot(), currentTime, isBacktestMode);
+    }
+
     /**
      * Evaluates a single candidate snapshot and outputs an immutable ScoredCandidate record.
      * Enforces mandatory hard eligibility gates (PDH breakout, above VWAP, positive volume)
@@ -42,6 +46,10 @@ public class MomentumScoringEngine {
     }
 
     public ScoredCandidate evaluate(CandidateSnapshot s, java.time.LocalTime currentTime) {
+        return evaluate(s, currentTime, false);
+    }
+
+    public ScoredCandidate evaluate(CandidateSnapshot s, java.time.LocalTime currentTime, boolean isBacktestMode) {
         // Metric 1: Time-Normalized RVOL Score (Max 30)
         double expectedVol = calculateExpectedCumulativeVolume(s.avgDailyVolume10Day(), currentTime);
         double rvol = expectedVol > 0 ? (double) s.windowVolume() / expectedVol : 0.0;
@@ -54,12 +62,16 @@ public class MomentumScoringEngine {
 
         // Metric 3: Depth Imbalance Score (Max 25)
         double di = s.depthImbalance();
-        int depthScore = calculateDepthScore(di);
+        int depthScore = isBacktestMode ? 0 : calculateDepthScore(di);
 
         // Metric 4: PDH & HOD Breakout & ATR Score (Max 20)
         int pdhScore = calculatePdhAndHodScore(ltp, s.previousDayHigh(), s.high15(), s.atrPct());
 
-        int totalScore = rvolScore + vwapScore + depthScore + pdhScore;
+        // In backtest mode, since Level 2 order book depth is unavailable in historical OHLCV data,
+        // normalize the remaining 75 points of price action and volume factors to the 100-point scale.
+        int totalScore = isBacktestMode
+            ? (int) Math.min(100, Math.round((rvolScore + vwapScore + pdhScore) * (100.0 / 75.0)))
+            : (rvolScore + vwapScore + depthScore + pdhScore);
 
         // Hard Eligibility Gate: Price must be strictly above VWAP and strictly breaking previous day high
         boolean eligible = passesHardGates(s);

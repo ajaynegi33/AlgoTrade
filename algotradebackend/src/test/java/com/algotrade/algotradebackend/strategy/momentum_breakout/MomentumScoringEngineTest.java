@@ -87,4 +87,23 @@ public class MomentumScoringEngineTest {
         assertEquals("DISQUALIFIED", ranked.get(1).status());
         assertFalse(ranked.get(1).isQualified());
     }
+
+    @Test
+    void testBacktestModeExcludesDepthAndNormalizesScore() {
+        CandidateMetrics c = new CandidateMetrics("BACKTEST_SYM", 700.0, 710.0, 10_000_000, 2.5);
+        c.updateTick(715.0, 100_000, 0, 0);
+        c.updateTick(715.0, 3_000_000, 0, 0);
+        c.updateTick(720.0, 3_100_000, 0, 0); // RVOL=30, VWAP=25, Depth=0, PDH=20 -> Raw sum = 75
+
+        // In live mode with neutral depth (di=0.0), depthScore is 5, total = 80
+        ScoredCandidate liveScore = engine.evaluate(c, java.time.LocalTime.of(9, 30), false);
+        assertEquals(5, liveScore.depthImbalanceScore());
+        assertEquals(80, liveScore.totalScore());
+
+        // In backtest mode, depth is excluded and 75/75 points normalizes to 100!
+        ScoredCandidate btScore = engine.evaluate(c, java.time.LocalTime.of(9, 30), true);
+        assertEquals(0, btScore.depthImbalanceScore(), "Depth must be 0 in backtest mode without synthetic depth");
+        assertEquals(100, btScore.totalScore(), "75 raw points from RVOL+VWAP+PDH must normalize to 100 points in backtest mode");
+        assertTrue(btScore.isQualified());
+    }
 }

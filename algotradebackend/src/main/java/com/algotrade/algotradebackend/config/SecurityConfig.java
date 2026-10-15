@@ -47,7 +47,8 @@ public class SecurityConfig {
                 response.getWriter().write("{\"error\":\"UNAUTHORIZED\",\"message\":\"Authentication required or token expired\"}");
             }))
             .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/api/auth/**", "/actuator/health", "/error", "/ws/**").permitAll()
+                .requestMatchers("/api/auth/login", "/api/auth/refresh", "/actuator/health", "/error", "/ws/**").permitAll()
+                .requestMatchers("/api/auth/me", "/api/auth/logout").authenticated()
                 .anyRequest().authenticated()
             )
             .addFilterBefore(jwtAuthenticationFilter, org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter.class);

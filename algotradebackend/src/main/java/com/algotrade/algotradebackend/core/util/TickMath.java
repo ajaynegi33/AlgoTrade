@@ -12,6 +12,15 @@ public final class TickMath {
     private TickMath() {}
 
     /**
+     * Resolves the authoritative exchange tick size per NSE Circular CMTR62174:
+     * - Equity price <= ₹250.00: ₹0.01 tick size
+     * - Equity price > ₹250.00: ₹0.05 tick size
+     */
+    public static double getExchangeTickSize(double price) {
+        return (price > 0.0 && price <= 250.0) ? 0.01 : 0.05;
+    }
+
+    /**
      * Floors price down to the nearest valid exchange tick increment.
      * Normalizes floating point subtraction drift (e.g. 99.55 - 0.01 = 99.53999999999999) to 6 decimal places.
      */

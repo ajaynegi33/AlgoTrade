@@ -109,4 +109,65 @@ public class PositionSizingEngineCircuitBreakerTest {
         Optional<Position> optPos = gateway.getOpenPosition();
         assertTrue(optPos.isEmpty());
     }
+
+    @Test
+    void testRupeeDrawdownCircuitBreakerTripsInPaperMode() {
+        PaperTradeEntity loss = mock(PaperTradeEntity.class);
+        when(loss.getNetPnL()).thenReturn(-420.0);
+        when(paperTradeRepository.findByEntryTimeBetween(any(), any())).thenReturn(List.of(loss));
+        ReflectionTestUtils.setField(sizingEngine, "maxDailyLossRupees", 400.0);
+
+        // Even though loss count is only 1 (< maxDailyLosses = 2), rupee limit has been exceeded!
+        assertFalse(sizingEngine.canTradeToday(), "Paper rupee drawdown exceeding ₹400 must halt trading");
+    }
+
+    @Test
+    void testRupeeDrawdownCircuitBreakerTripsInLiveMode() {
+        com.algotrade.algotradebackend.broker.BrokerGatewayManager manager = mock(com.algotrade.algotradebackend.broker.BrokerGatewayManager.class);
+        when(manager.getActiveMode()).thenReturn(ExecutionMode.LIVE);
+        @SuppressWarnings("unchecked")
+        org.springframework.beans.factory.ObjectProvider<com.algotrade.algotradebackend.broker.BrokerGatewayManager> provider = mock(org.springframework.beans.factory.ObjectProvider.class);
+        when(provider.getIfAvailable()).thenReturn(manager);
+
+        ReflectionTestUtils.setField(sizingEngine, "brokerGatewayManagerProvider", provider);
+        ReflectionTestUtils.setField(sizingEngine, "maxDailyLossRupees", 400.0);
+
+        // Record a single large loss of ₹420 in live mode
+        sizingEngine.recordTradeLoss(ExecutionMode.LIVE, 420.0);
+
+        // Even though loss count is only 1 (< maxDailyLosses = 2), rupee limit has been exceeded!
+        assertFalse(sizingEngine.canTradeToday(), "Live rupee drawdown exceeding ₹400 must halt trading");
+    }
+
+    @Test
+    void testDynamicExchangeTickSize() {
+        assertEquals(0.01, com.algotrade.algotradebackend.core.util.TickMath.getExchangeTickSize(50.0));
+        assertEquals(0.01, com.algotrade.algotradebackend.core.util.TickMath.getExchangeTickSize(249.95));
+        assertEquals(0.01, com.algotrade.algotradebackend.core.util.TickMath.getExchangeTickSize(250.00));
+        assertEquals(0.05, com.algotrade.algotradebackend.core.util.TickMath.getExchangeTickSize(250.05));
+        assertEquals(0.05, com.algotrade.algotradebackend.core.util.TickMath.getExchangeTickSize(1500.00));
+    }
+
+    @Test
+    void testAllInclusiveSizingGuaranteesRealizedLossWithinBudget() {
+        double capital = 10000.0;
+        double entryPrice = 1000.0;
+        double stopPrice = 985.0; // ₹15 stop distance
+        double riskBudgetPct = 2.0; // ₹200 budget
+        double slippagePct = 0.15;
+
+        int allInclusiveQty = PositionSizingEngine.calculateAllInclusiveSizingQuantity(
+            capital, entryPrice, stopPrice, riskBudgetPct, 5.0, 0.4, 2.0, slippagePct
+        );
+        assertTrue(allInclusiveQty > 0);
+
+        // Verify total loss (price drop + slippage + statutory taxes & fees) strictly <= ₹200
+        double exitPriceWithSlippage = stopPrice * (1.0 - slippagePct / 100.0);
+        var charges = com.algotrade.algotradebackend.core.model.ChargesBreakdown.calculate(
+            allInclusiveQty, entryPrice, exitPriceWithSlippage
+        );
+        double totalRealizedLoss = Math.abs(charges.netPnL());
+        assertTrue(totalRealizedLoss <= 200.0,
+            "Total realized loss (" + totalRealizedLoss + ") must strictly be within ₹200 risk budget");
+    }
 }

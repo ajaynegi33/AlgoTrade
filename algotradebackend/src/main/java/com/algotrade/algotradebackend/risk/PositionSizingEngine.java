@@ -1,6 +1,7 @@
 package com.algotrade.algotradebackend.risk;
 
 import com.algotrade.algotradebackend.broker.BrokerGateway;
+import com.algotrade.algotradebackend.core.model.ChargesBreakdown;
 import com.algotrade.algotradebackend.core.model.ExecutionMode;
 import com.algotrade.algotradebackend.persistence.repository.PaperTradeRepository;
 import org.slf4j.Logger;
@@ -49,6 +50,9 @@ public class PositionSizingEngine {
     @Value("${algotrade.risk.max-daily-losses:2}")
     private int maxDailyLosses;
 
+    @Value("${algotrade.risk.max-daily-loss-rupees:400.00}")
+    private double maxDailyLossRupees;
+
     private final PaperTradeRepository paperTradeRepository;
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
@@ -56,6 +60,7 @@ public class PositionSizingEngine {
 
     private final java.util.concurrent.atomic.AtomicInteger liveTradesToday = new java.util.concurrent.atomic.AtomicInteger(0);
     private final java.util.concurrent.atomic.AtomicInteger liveLossesToday = new java.util.concurrent.atomic.AtomicInteger(0);
+    private final java.util.concurrent.atomic.AtomicReference<Double> liveRupeeLossToday = new java.util.concurrent.atomic.AtomicReference<>(0.0);
     private volatile java.time.LocalDate lastTradeDate;
 
     // High-frequency tick caching and log debouncing
@@ -97,13 +102,20 @@ public class PositionSizingEngine {
     }
 
     public void recordTradeLoss() {
-        recordTradeLoss(getActiveExecutionMode());
+        recordTradeLoss(getActiveExecutionMode(), 0.0);
     }
 
     public void recordTradeLoss(ExecutionMode mode) {
+        recordTradeLoss(mode, 0.0);
+    }
+
+    public void recordTradeLoss(ExecutionMode mode, double netLossRupees) {
         resetLiveTradesIfNewDay();
         if (mode == ExecutionMode.LIVE) {
             liveLossesToday.incrementAndGet();
+            if (netLossRupees > 0) {
+                liveRupeeLossToday.updateAndGet(curr -> curr + netLossRupees);
+            }
         }
         lastCanTradeCheckMs = 0L; // Invalidate cache immediately on trade loss
     }
@@ -116,6 +128,7 @@ public class PositionSizingEngine {
         resetLiveTradesIfNewDay();
         liveTradesToday.set(0);
         liveLossesToday.set(0);
+        liveRupeeLossToday.set(0.0);
         circuitBreakerLogged.set(false);
         dailyLimitLogged.set(false);
         paperCircuitResetInstant = Instant.now();
@@ -130,6 +143,7 @@ public class PositionSizingEngine {
             lastTradeDate = today;
             liveTradesToday.set(0);
             liveLossesToday.set(0);
+            liveRupeeLossToday.set(0.0);
             circuitBreakerLogged.set(false);
             dailyLimitLogged.set(false);
             paperCircuitResetInstant = null;
@@ -140,9 +154,10 @@ public class PositionSizingEngine {
     /**
      * Determines whether the system is authorized to trade today based on:
      * 1. Maximum total daily trades limit
-     * 2. Daily loss circuit-breaker (max 2 losses before emergency halt)
+     * 2. Daily loss count circuit-breaker (max 2 losses before emergency halt)
+     * 3. Cumulative daily rupee drawdown limit (max ₹400 loss on ₹10k capital)
      * 
-     * @return true if trades taken today < maxDailyTrades AND losses < maxDailyLosses
+     * @return true if trades taken today < maxDailyTrades AND losses < maxDailyLosses AND rupeeLoss < maxDailyLossRupees
      */
     public boolean canTradeToday() {
         long now = System.currentTimeMillis();
@@ -164,10 +179,17 @@ public class PositionSizingEngine {
         long paperLosses = (todayPaperTrades != null)
             ? todayPaperTrades.stream().filter(t -> t.getNetPnL() != null && t.getNetPnL() < 0).count()
             : 0;
+        double paperRupeeLoss = (todayPaperTrades != null)
+            ? todayPaperTrades.stream()
+                .filter(t -> t.getNetPnL() != null && t.getNetPnL() < 0)
+                .mapToDouble(t -> Math.abs(t.getNetPnL()))
+                .sum()
+            : 0.0;
 
         ExecutionMode activeMode = getActiveExecutionMode();
         long effectiveTrades = (activeMode == ExecutionMode.LIVE) ? liveTradesToday.get() : paperTrades;
         long effectiveLosses = (activeMode == ExecutionMode.LIVE) ? liveLossesToday.get() : paperLosses;
+        double effectiveRupeeLoss = (activeMode == ExecutionMode.LIVE) ? liveRupeeLossToday.get() : paperRupeeLoss;
 
         if (effectiveTrades >= maxDailyTrades) {
             if (!dailyLimitLogged.getAndSet(true) || (now - lastWarningLogMs > 300_000L)) {
@@ -181,11 +203,11 @@ public class PositionSizingEngine {
         }
         dailyLimitLogged.set(false);
 
-        // Daily Loss Circuit Breaker
-        if (effectiveLosses >= maxDailyLosses) {
+        // Daily Loss Circuit Breaker (Count Limit or Rupee Drawdown Limit)
+        if (effectiveLosses >= maxDailyLosses || (maxDailyLossRupees > 0 && effectiveRupeeLoss >= maxDailyLossRupees)) {
             if (!circuitBreakerLogged.getAndSet(true) || (now - lastWarningLogMs > 300_000L)) {
-                log.warn("DAILY LOSS CIRCUIT BREAKER HIT [{} Mode]: {}/{} losses incurred today (Paper: {}, Live: {}). Halting trading for capital preservation.",
-                    activeMode, effectiveLosses, maxDailyLosses, paperLosses, liveLossesToday.get());
+                log.warn("DAILY LOSS CIRCUIT BREAKER HIT [{} Mode]: {}/{} losses incurred (₹{}/₹{} drawdown today). Halting trading for capital preservation.",
+                    activeMode, effectiveLosses, maxDailyLosses, Math.round(effectiveRupeeLoss * 100.0) / 100.0, maxDailyLossRupees);
                 lastWarningLogMs = now;
             }
             cachedCanTrade = false;
@@ -230,6 +252,55 @@ public class PositionSizingEngine {
         int qExposure = (int) Math.floor(maxPositionValue / entryPrice);
 
         return Math.max(0, Math.min(qRisk, qExposure));
+    }
+
+    /**
+     * Institutional all-inclusive sizing formula factoring in:
+     * 1. Direct price distance (entry - stop)
+     * 2. Exit slippage buffer (e.g. 0.15% limit offset)
+     * 3. Statutory Indian equity transaction costs (STT, brokerage, exchange turnover, SEBI, GST, stamp duty)
+     * 4. Strict exposure leverage ceiling cap
+     */
+    public static int calculateAllInclusiveSizingQuantity(
+        double accountCapital,
+        double entryPrice,
+        double stopPrice,
+        double riskBudgetPct,
+        double maxExposureMultiplier,
+        double minStopDistancePct,
+        double maxStopDistancePct,
+        double slippagePct
+    ) {
+        if (entryPrice <= 0 || stopPrice <= 0 || accountCapital <= 0 || entryPrice <= stopPrice) return 0;
+        double stopDistance = entryPrice - stopPrice;
+        double stopDistancePct = (stopDistance / entryPrice) * 100.0;
+        if (stopDistancePct < minStopDistancePct || stopDistancePct > maxStopDistancePct) {
+            return 0;
+        }
+
+        double plannedRiskBudget = accountCapital * (riskBudgetPct / 100.0);
+        double maxPositionValue = accountCapital * maxExposureMultiplier;
+        int qExposure = (int) Math.floor(maxPositionValue / entryPrice);
+
+        double expectedSlippagePerShare = stopPrice * (Math.max(0.0, slippagePct) / 100.0);
+        double grossRiskPerShare = stopDistance + expectedSlippagePerShare;
+        if (grossRiskPerShare <= 0) return 0;
+
+        int candidateQty = (int) Math.floor(plannedRiskBudget / grossRiskPerShare);
+        candidateQty = Math.min(candidateQty, qExposure);
+
+        // Fail-closed verification loop factoring in statutory Indian equity taxes, brokerage, and slippage
+        while (candidateQty > 0) {
+            double exitPriceWithSlippage = stopPrice - expectedSlippagePerShare;
+            ChargesBreakdown charges = ChargesBreakdown.calculate(candidateQty, entryPrice, exitPriceWithSlippage);
+            double totalLoss = Math.abs(charges.netPnL());
+            if (totalLoss <= plannedRiskBudget) {
+                break;
+            }
+            candidateQty--;
+        }
+
+        return Math.max(0, candidateQty);
     }
 
     /**

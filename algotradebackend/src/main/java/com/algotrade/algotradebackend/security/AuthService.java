@@ -35,16 +35,45 @@ public class AuthService {
     // In-memory sliding window rate limiter: IP -> List of failure timestamps (ms)
     private final ConcurrentHashMap<String, List<Long>> failedAttemptsPerIp = new ConcurrentHashMap<>();
 
+    @org.springframework.beans.factory.annotation.Autowired
     public AuthService(
         JwtTokenService jwtTokenService,
-        @Value("${algotrade.auth.password:${ALGOTRADE_AUTH_PASSWORD:AjayNegi@!#}}") String configuredPassword
+        @Value("${algotrade.auth.password:${ALGOTRADE_AUTH_PASSWORD:}}") String configuredPassword,
+        @org.springframework.beans.factory.annotation.Autowired(required = false) org.springframework.core.env.Environment env
     ) {
         this.jwtTokenService = jwtTokenService;
         String rawPassword = (configuredPassword != null && !configuredPassword.isBlank()) 
             ? configuredPassword.trim() 
-            : "AjayNegi@!#";
+            : null;
+
+        boolean isProd = env != null && java.util.Arrays.asList(env.getActiveProfiles()).contains("prod");
+        if (rawPassword == null) {
+            if (isProd) {
+                throw new IllegalStateException("CRITICAL SECURITY ERROR: algotrade.auth.password or ALGOTRADE_AUTH_PASSWORD environment variable MUST be configured in production!");
+            }
+            rawPassword = generateSecureEphemeralPassword();
+            log.warn("********************************************************************************");
+            log.warn("SECURITY WARNING: No ALGOTRADE_AUTH_PASSWORD configured. Generated ephemeral dev password:");
+            log.warn("-->  {}  <--", rawPassword);
+            log.warn("Set ALGOTRADE_AUTH_PASSWORD environment variable to use a permanent password.");
+            log.warn("********************************************************************************");
+        }
         this.adminPasswordHash = passwordEncoder.encode(rawPassword);
         log.info("Initialized AuthService with BCrypt hashed master operator credentials.");
+    }
+
+    public AuthService(JwtTokenService jwtTokenService, String configuredPassword) {
+        this(jwtTokenService, configuredPassword, null);
+    }
+
+    private static String generateSecureEphemeralPassword() {
+        String chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%";
+        java.security.SecureRandom sr = new java.security.SecureRandom();
+        StringBuilder sb = new StringBuilder(16);
+        for (int i = 0; i < 16; i++) {
+            sb.append(chars.charAt(sr.nextInt(chars.length())));
+        }
+        return sb.toString();
     }
 
     /**

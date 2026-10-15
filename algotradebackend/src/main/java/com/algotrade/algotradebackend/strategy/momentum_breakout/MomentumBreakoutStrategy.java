@@ -3,6 +3,7 @@ package com.algotrade.algotradebackend.strategy.momentum_breakout;
 import com.algotrade.algotradebackend.broker.BrokerGateway;
 import com.algotrade.algotradebackend.broker.BrokerGatewayManager;
 import com.algotrade.algotradebackend.core.model.ChargesBreakdown;
+import com.algotrade.algotradebackend.core.model.ExecutionMode;
 import com.algotrade.algotradebackend.core.model.Position;
 import com.algotrade.algotradebackend.core.model.ScoredCandidate;
 import com.algotrade.algotradebackend.core.model.TradeOrder;
@@ -76,6 +77,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
     private volatile double strategyHighWaterMark = 0.0;
     private volatile double plannedStopPrice = 0.0;
     private volatile double currentArmedStopPrice = 0.0;
+    private volatile double confirmedEntryPrice = 0.0;
     private volatile int plannedQuantity = 0;
     private volatile int currentProtectedQuantity = 0;
     private volatile long entryOrderTimestampMs = 0L;
@@ -149,6 +151,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                     this.strategyHighWaterMark = pos.highWaterMark();
                     this.currentArmedStopPrice = pos.activeTrailingStop();
                     this.currentProtectedQuantity = pos.quantity();
+                    this.confirmedEntryPrice = pos.entryPrice();
                     this.activeTradeId = "RESTORED-" + pos.symbol();
                     log.info("RE-HYDRATED ACTIVE POSITION IN STRATEGY: {} x {} @ ₹{} (SL: ₹{}, HWM: ₹{})",
                         pos.quantity(), pos.symbol(), pos.entryPrice(), pos.activeTrailingStop(), pos.highWaterMark());
@@ -183,7 +186,9 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         if (symbol != null) {
             CandidateMetrics m = metricsMap.get(symbol);
             if (m != null) {
-                return m.getTickSize();
+                double ts = m.getTickSize();
+                if (ts > 0.0) return ts;
+                if (m.getLtp() > 0.0) return TickMath.getExchangeTickSize(m.getLtp());
             }
         }
         return 0.05;
@@ -505,6 +510,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                         activeSlOrderId = slOrder.orderId();
                         currentArmedStopPrice = triggerPrice;
                         currentProtectedQuantity = pos.quantity();
+                        confirmedEntryPrice = pos.entryPrice();
                         lifecycleState = TradeLifecycleState.ACTIVE_POSITION; // ONLY transition once stop order is placed!
                         strategyHighWaterMark = Math.max(pos.entryPrice(), ltp);
                         log.info("PROTECTIVE SL CONFIRMED & ARMED: OrderId={}, Qty={}, Trigger=₹{}, Limit=₹{}",
@@ -543,17 +549,15 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                 Position pos = optPos.get();
                 // Partial Fill Protection: If position quantity expanded since initial SL placement, resize the protective stop
                 if (activeSlOrderId != null && pos.quantity() > currentProtectedQuantity) {
-                    log.warn("PARTIAL FILL EXPANSION: Position quantity ({} shares) > Protected SL quantity ({} shares). Resizing stop order...",
+                    log.warn("PARTIAL FILL EXPANSION: Position quantity ({} shares) > Protected SL quantity ({} shares). Resizing stop order in-place...",
                         pos.quantity(), currentProtectedQuantity);
                     try {
-                        gateway.cancelOrder(activeSlOrderId);
                         double tickSize = getSymbolTickSize(symbol);
                         double triggerPrice = TickMath.floorToTick(currentArmedStopPrice > 0 ? currentArmedStopPrice : plannedStopPrice, tickSize);
                         double slLimitPrice = TickMath.floorToTick(triggerPrice * 0.9985, tickSize);
-                        TradeOrder resizedSl = gateway.placeOrder(symbol, "SELL", pos.quantity(), slLimitPrice, triggerPrice, "SL");
-                        activeSlOrderId = resizedSl.orderId();
+                        gateway.modifyOrder(activeSlOrderId, pos.quantity(), slLimitPrice, triggerPrice);
                         currentProtectedQuantity = pos.quantity();
-                        log.info("PROTECTIVE SL RESIZED: OrderId={}, New Qty={}, Trigger=₹{}, Limit=₹{}",
+                        log.info("PROTECTIVE SL RESIZED (IN-PLACE): OrderId={}, New Qty={}, Trigger=₹{}, Limit=₹{}",
                             activeSlOrderId, pos.quantity(), triggerPrice, slLimitPrice);
                         activityFeedService.record(
                             "ORDERS",
@@ -561,11 +565,25 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                             gateway.getExecutionMode().name(),
                             activeTradeId,
                             "Protective Stop-Loss Resized",
-                            "Additional shares filled. Protective stop resized to " + pos.quantity() + " shares @ Trigger ₹" + triggerPrice,
+                            "Additional shares filled. Protective stop resized in-place to " + pos.quantity() + " shares @ Trigger ₹" + triggerPrice,
                             symbol
                         );
                     } catch (Throwable t) {
-                        log.error("Failed to resize protective stop for expanded position: {}", t.getMessage());
+                        log.error("Failed to in-place resize protective stop: {}. Verifying resting order status...", t.getMessage());
+                        TradeOrder slStatus = gateway.getOrderStatus(activeSlOrderId);
+                        if (slStatus == null || "CANCELLED".equalsIgnoreCase(slStatus.status()) || "REJECTED".equalsIgnoreCase(slStatus.status())) {
+                            try {
+                                double tickSize = getSymbolTickSize(symbol);
+                                double triggerPrice = TickMath.floorToTick(currentArmedStopPrice > 0 ? currentArmedStopPrice : plannedStopPrice, tickSize);
+                                double slLimitPrice = TickMath.floorToTick(triggerPrice * 0.9985, tickSize);
+                                TradeOrder fallbackSl = gateway.placeOrder(symbol, "SELL", pos.quantity(), slLimitPrice, triggerPrice, "SL");
+                                activeSlOrderId = fallbackSl.orderId();
+                                currentProtectedQuantity = pos.quantity();
+                                log.info("RECOVERY: Replaced failed stop with new SL order {}", activeSlOrderId);
+                            } catch (Throwable t2) {
+                                log.error("CRITICAL: Failed emergency SL replacement for {}: {}", symbol, t2.getMessage());
+                            }
+                        }
                     }
                 }
 
@@ -630,36 +648,18 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                     }
                 }
             } else {
-                // Position closed (stop-loss was hit or manually closed)
+                // Position closed (stop-loss was hit or closed at broker)
                 log.info("Position for {} is no longer open at broker. Trade completed.", symbol);
-                if (currentArmedStopPrice > 0 && ltp <= currentArmedStopPrice * 1.002) {
-                    positionSizingEngine.recordTradeLoss(gateway.getExecutionMode());
-                }
-                activityFeedService.record(
-                    "LIFECYCLE",
-                    "INFO",
-                    gateway.getExecutionMode().name(),
-                    activeTradeId,
-                    "Trade Closed",
-                    "Position for " + symbol + " closed at broker (Stop-Loss filled or squared off).",
-                    symbol
-                );
-                lifecycleState = TradeLifecycleState.FLAT;
-                activeSymbol = null;
-                activeSlOrderId = null;
-                activeTradeId = null;
-                strategyHighWaterMark = 0.0;
-                currentProtectedQuantity = 0;
+                handleTradeCompleted(gateway, symbol, currentProtectedQuantity > 0 ? currentProtectedQuantity : plannedQuantity, confirmedEntryPrice, ltp, "STOP_LOSS_HIT");
             }
             return;
         }
 
         if (lifecycleState == TradeLifecycleState.PENDING_EXIT) {
-            // Waiting for square-off exit to confirm flat
+            // Waiting for square-off exit or manual exit to confirm flat
             if (optPos.isEmpty() || (optPos.get().quantity() <= 0)) {
-                log.info("Square-off exit confirmed flat for {}.", symbol);
-                setFlatState();
-                broadcastOverviewIfAvailable();
+                log.info("Exit confirmed flat at broker for {}.", symbol);
+                handleTradeCompleted(gateway, symbol, currentProtectedQuantity > 0 ? currentProtectedQuantity : plannedQuantity, confirmedEntryPrice, ltp, "EXIT_CONFIRMED");
             } else if (now.isAfter(LocalTime.of(15, 6))) {
                 long nowMs = System.currentTimeMillis();
                 if (exitOrderInFlight.get()) {
@@ -987,6 +987,60 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         }
     }
 
+    private synchronized void handleTradeCompleted(
+        BrokerGateway gateway,
+        String symbol,
+        int quantity,
+        double entryPrice,
+        double exitPrice,
+        String exitReason
+    ) {
+        if (lifecycleState == TradeLifecycleState.FLAT && activeSymbol == null) {
+            return; // Already settled
+        }
+
+        int finalQty = quantity > 0 ? quantity : (currentProtectedQuantity > 0 ? currentProtectedQuantity : 1);
+        double finalEntry = entryPrice > 0 ? entryPrice : (confirmedEntryPrice > 0 ? confirmedEntryPrice : exitPrice);
+        double finalExit = exitPrice > 0 ? exitPrice : finalEntry;
+
+        ChargesBreakdown charges = ChargesBreakdown.calculate(finalQty, finalEntry, finalExit);
+        double netPnL = charges.netPnL();
+        double grossPnL = charges.grossPnL();
+
+        if (netPnL < 0.0) {
+            positionSizingEngine.recordTradeLoss(gateway.getExecutionMode(), Math.abs(netPnL));
+            log.warn("REALIZED NET LOSS SETTLED: {} x {} entered @ ₹{}, exited @ ₹{} [Gross: ₹{}, Net: -₹{}, Charges: ₹{}]. Counted towards loss circuit breaker.",
+                finalQty, symbol, finalEntry, finalExit, grossPnL, Math.abs(netPnL), charges.totalCharges());
+        } else {
+            log.info("REALIZED NET PROFIT SETTLED: {} x {} entered @ ₹{}, exited @ ₹{} [Gross: ₹{}, Net: +₹{}, Charges: ₹{}].",
+                finalQty, symbol, finalEntry, finalExit, grossPnL, netPnL, charges.totalCharges());
+        }
+
+        activityFeedService.record(
+            "LIFECYCLE",
+            netPnL >= 0 ? "SUCCESS" : "WARN",
+            gateway.getExecutionMode().name(),
+            activeTradeId != null ? activeTradeId : "TRADE-" + symbol,
+            "Trade Settled: " + (netPnL >= 0 ? "Profit" : "Loss"),
+            String.format("%s %dx %s: Entry ₹%.2f, Exit ₹%.2f (Net P&L: %s₹%.2f)",
+                exitReason, finalQty, symbol, finalEntry, finalExit, (netPnL >= 0 ? "+" : "-"), Math.abs(netPnL)),
+            symbol,
+            Map.of(
+                "symbol", symbol,
+                "quantity", finalQty,
+                "entryPrice", finalEntry,
+                "exitPrice", finalExit,
+                "grossPnL", grossPnL,
+                "netPnL", netPnL,
+                "totalCharges", charges.totalCharges(),
+                "exitReason", exitReason
+            )
+        );
+
+        setFlatState();
+        broadcastOverviewIfAvailable();
+    }
+
     private void setFlatState() {
         lifecycleState = TradeLifecycleState.FLAT;
         activeSymbol = null;
@@ -996,6 +1050,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         activeExitOrderId = null;
         strategyHighWaterMark = 0.0;
         currentArmedStopPrice = 0.0;
+        confirmedEntryPrice = 0.0;
         currentProtectedQuantity = 0;
         exitOrderInFlight.set(false);
         lastExitOrderDispatchMs.set(0L);
@@ -1082,12 +1137,19 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             }
         }
 
-        // 3. Check if broker confirms fill immediately (e.g. Paper simulation) or position is already flat
-        Optional<Position> postExitPos = gateway.getOpenPosition();
-        if ((exitOrder != null && "FILLED".equalsIgnoreCase(exitOrder.status())) 
-                || postExitPos.isEmpty() 
-                || postExitPos.get().quantity() <= 0) {
-            setFlatState();
+        // 3. Check if broker confirms fill immediately (Paper simulation or instant broker execution)
+        boolean isInstantlyFilled = exitOrder != null && "FILLED".equalsIgnoreCase(exitOrder.status());
+        if (isInstantlyFilled || gateway.getExecutionMode() == ExecutionMode.PAPER) {
+            handleTradeCompleted(gateway, pos.symbol(), pos.quantity(), pos.entryPrice(), executedPrice, exitReason);
+        } else {
+            // Live execution: trigger async sync but remain in PENDING_EXIT until confirmed flat
+            if (gateway instanceof com.algotrade.algotradebackend.broker.zerodha.ZerodhaLiveGateway liveGw) {
+                liveGw.syncPositionsFromBroker();
+                var confirmedPos = liveGw.getOpenPosition();
+                if (confirmedPos.isEmpty() || confirmedPos.get().quantity() <= 0) {
+                    handleTradeCompleted(gateway, pos.symbol(), pos.quantity(), pos.entryPrice(), executedPrice, exitReason);
+                }
+            }
         }
 
         // 4. Audit in Activity Feed
@@ -1126,7 +1188,6 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         result.put("exitPrice", executedPrice);
         result.put("grossPnL", grossPnL);
         result.put("grossPnLPct", grossPnLPct);
-        result.put("status", "FLAT");
         return result;
     }
 

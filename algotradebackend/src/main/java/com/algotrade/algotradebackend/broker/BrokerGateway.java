@@ -41,6 +41,20 @@ public interface BrokerGateway {
     TradeOrder modifyOrder(String orderId, double newPrice, double newTriggerPrice);
 
     /**
+     * In-place atomic modification of an existing resting order with quantity expansion.
+     * Crucial for partial fill resizing and ratcheting stops without creating an unhedged gap.
+     * 
+     * @param orderId Identifier of the open order
+     * @param newQuantity New total order quantity (if > 0)
+     * @param newPrice New limit price
+     * @param newTriggerPrice New trigger price
+     * @return Updated TradeOrder instance
+     */
+    default TradeOrder modifyOrder(String orderId, int newQuantity, double newPrice, double newTriggerPrice) {
+        return modifyOrder(orderId, newPrice, newTriggerPrice);
+    }
+
+    /**
      * Cancels an open resting order.
      * 
      * @param orderId Identifier of the order to cancel

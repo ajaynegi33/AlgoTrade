@@ -43,21 +43,21 @@ public class AuthController {
         try {
             JwtTokenService.TokenPair tokenPair = authService.login(request.password(), clientIp);
 
-            // Set refresh token in HttpOnly Cookie (SameSite=Lax/Strict, 24h Max-Age)
+            boolean isHttps = httpRequest.isSecure() || "https".equalsIgnoreCase(httpRequest.getHeader("X-Forwarded-Proto"));
+            // Set refresh token in HttpOnly Cookie (SameSite=Strict, 24h Max-Age)
             ResponseCookie refreshCookie = ResponseCookie.from(REFRESH_COOKIE_NAME, tokenPair.refreshToken())
                 .httpOnly(true)
-                .secure(false) // Set to true if running under HTTPS, false for HTTP/LAN/dev
+                .secure(isHttps)
                 .path("/api/auth")
                 .maxAge(24 * 60 * 60)
-                .sameSite("Lax")
+                .sameSite("Strict")
                 .build();
             httpResponse.addHeader(HttpHeaders.SET_COOKIE, refreshCookie.toString());
 
             return ResponseEntity.ok(Map.of(
                 "accessToken", tokenPair.accessToken(),
                 "expiresIn", tokenPair.expiresInSeconds(),
-                "tokenType", "Bearer",
-                "refreshToken", tokenPair.refreshToken()
+                "tokenType", "Bearer"
             ));
         } catch (AuthService.RateLimitExceededException rle) {
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).body(Map.of("error", rle.getMessage()));
@@ -90,21 +90,21 @@ public class AuthController {
 
         try {
             JwtTokenService.TokenPair tokenPair = authService.refresh(token);
+            boolean isHttps = httpRequest.isSecure() || "https".equalsIgnoreCase(httpRequest.getHeader("X-Forwarded-Proto"));
 
             ResponseCookie refreshCookie = ResponseCookie.from(REFRESH_COOKIE_NAME, tokenPair.refreshToken())
                 .httpOnly(true)
-                .secure(false)
+                .secure(isHttps)
                 .path("/api/auth")
                 .maxAge(24 * 60 * 60)
-                .sameSite("Lax")
+                .sameSite("Strict")
                 .build();
             httpResponse.addHeader(HttpHeaders.SET_COOKIE, refreshCookie.toString());
 
             return ResponseEntity.ok(Map.of(
                 "accessToken", tokenPair.accessToken(),
                 "expiresIn", tokenPair.expiresInSeconds(),
-                "tokenType", "Bearer",
-                "refreshToken", tokenPair.refreshToken()
+                "tokenType", "Bearer"
             ));
         } catch (BadCredentialsException bce) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", bce.getMessage()));
@@ -144,9 +144,17 @@ public class AuthController {
     }
 
     @GetMapping("/me")
-    public ResponseEntity<?> me() {
+    public ResponseEntity<?> me(org.springframework.security.core.Authentication authentication) {
+        if (authentication == null || !authentication.isAuthenticated() 
+            || authentication instanceof org.springframework.security.authentication.AnonymousAuthenticationToken) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of(
+                "authenticated", false,
+                "error", "Unauthorized"
+            ));
+        }
         return ResponseEntity.ok(Map.of(
             "authenticated", true,
+            "username", authentication.getName(),
             "role", "admin"
         ));
     }

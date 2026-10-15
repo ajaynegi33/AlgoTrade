@@ -109,17 +109,14 @@ export function useEngineWebSocket(token?: string | null): UseEngineWebSocketRet
   // Helper to resolve ws:// or wss:// URL from backend environment variable
   const getWebSocketUrl = useCallback((): string => {
     const rawUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8080";
-    const effectiveToken = token || (typeof window !== "undefined" ? localStorage.getItem(TOKEN_STORAGE_KEY) : null);
     try {
       const parsed = new URL(rawUrl);
       const protocol = parsed.protocol === "https:" ? "wss:" : "ws:";
-      const baseWsUrl = `${protocol}//${parsed.host}/ws/live`;
-      return effectiveToken ? `${baseWsUrl}?token=${encodeURIComponent(effectiveToken)}` : baseWsUrl;
+      return `${protocol}//${parsed.host}/ws/live`;
     } catch {
-      const baseWsUrl = "ws://localhost:8080/ws/live";
-      return effectiveToken ? `${baseWsUrl}?token=${encodeURIComponent(effectiveToken)}` : baseWsUrl;
+      return "ws://localhost:8080/ws/live";
     }
-  }, [token]);
+  }, []);
 
   const connect = useCallback(() => {
     // Avoid double instantiation
@@ -148,6 +145,14 @@ export function useEngineWebSocket(token?: string | null): UseEngineWebSocketRet
       ws.onopen = () => {
         setConnectionStatus("connected");
         retryCountRef.current = 0;
+
+        // In-band First-Frame Authentication (RFC 6750: avoids leaking JWT in URL logs)
+        const effectiveToken = token || (typeof window !== "undefined" ? localStorage.getItem(TOKEN_STORAGE_KEY) : null);
+        if (effectiveToken) {
+          try {
+            ws.send(JSON.stringify({ type: "AUTH", token: effectiveToken }));
+          } catch {}
+        }
 
         // Resubscribe any previously tracked symbols on reconnect
         if (subscribedSymbolsRef.current.size > 0) {

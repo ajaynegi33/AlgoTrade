@@ -365,22 +365,30 @@ public class ZerodhaLiveGateway implements BrokerGateway {
 
     @Override
     public TradeOrder modifyOrder(String orderId, double newPrice, double newTriggerPrice) {
+        return modifyOrder(orderId, 0, newPrice, newTriggerPrice);
+    }
+
+    @Override
+    public TradeOrder modifyOrder(String orderId, int newQuantity, double newPrice, double newTriggerPrice) {
         if (!sessionActive) {
             throw new IllegalStateException("Zerodha live session is not authenticated.");
         }
 
         try {
             OrderParams params = new OrderParams();
+            if (newQuantity > 0) {
+                params.quantity = newQuantity;
+            }
             params.price = newPrice;
             if (newTriggerPrice > 0) {
                 params.triggerPrice = newTriggerPrice;
             }
 
             com.zerodhatech.models.Order resp = kiteConnect.modifyOrder(orderId, params, Constants.VARIETY_REGULAR);
-            log.info("ZERODHA LIVE ORDER MODIFIED: ID={}, New Price={}, Trigger={}", resp.orderId, newPrice, newTriggerPrice);
+            log.info("ZERODHA LIVE ORDER MODIFIED: ID={}, New Qty={}, New Price={}, Trigger={}", resp.orderId, newQuantity, newPrice, newTriggerPrice);
             triggerAsyncPositionSync();
 
-            return new TradeOrder(orderId, "", "", 0, newPrice, newTriggerPrice, "SL", "MODIFIED", ExecutionMode.LIVE, Instant.now());
+            return new TradeOrder(orderId, "", "", newQuantity, newPrice, newTriggerPrice, "SL", "MODIFIED", ExecutionMode.LIVE, Instant.now());
         } catch (Throwable e) {
             log.error("Failed to modify Zerodha live order {}: {}", orderId, e.getMessage(), e);
             throw new RuntimeException("Zerodha order modification failed: " + e.getMessage(), e);
@@ -554,13 +562,16 @@ public class ZerodhaLiveGateway implements BrokerGateway {
         cumulativeLivePnL.updateAndGet(pnl -> pnl + netPnL);
     }
 
+    private final ConcurrentHashMap<String, Double> symbolMarginMultiplierCache = new ConcurrentHashMap<>();
+
     @Override
     public double calculateOrderMargin(String symbol, int quantity, double price) {
+        String cleanSymbol = symbol.replace("NSE:", "").trim();
         if (sessionActive && kiteConnect != null && quantity > 0 && price > 0) {
             try {
                 MarginCalculationParams param = new MarginCalculationParams();
                 param.exchange = Constants.EXCHANGE_NSE;
-                param.tradingSymbol = symbol.replace("NSE:", "").trim();
+                param.tradingSymbol = cleanSymbol;
                 param.transactionType = Constants.TRANSACTION_TYPE_BUY;
                 param.variety = Constants.VARIETY_REGULAR;
                 param.product = Constants.PRODUCT_MIS;
@@ -571,16 +582,21 @@ public class ZerodhaLiveGateway implements BrokerGateway {
                 List<MarginCalculationData> marginList = kiteConnect.getMarginCalculation(List.of(param));
                 if (marginList != null && !marginList.isEmpty() && marginList.get(0).total > 0) {
                     double realMargin = marginList.get(0).total;
-                    log.info("KITE MARGIN CALCULATION for {} x {} @ ₹{}: Required Margin=₹{}, Leverage={}x",
-                        quantity, symbol, price, realMargin, marginList.get(0).leverage);
+                    double marginPct = realMargin / (quantity * price);
+                    symbolMarginMultiplierCache.put(cleanSymbol, marginPct);
+                    log.info("KITE MARGIN CALCULATION for {} x {} @ ₹{}: Required Margin=₹{}, Leverage={}x (MarginPct: {}%)",
+                        quantity, cleanSymbol, price, realMargin, marginList.get(0).leverage, Math.round(marginPct * 1000.0) / 10.0);
                     return realMargin;
                 }
             } catch (Throwable t) {
-                log.warn("Dynamic Kite margin query failed for {}: {}. Falling back to 20% estimate.", symbol, t.getMessage());
+                log.warn("Dynamic Kite margin query failed for {}: {}. Attempting cached/conservative fallback.", cleanSymbol, t.getMessage());
             }
         }
-        // Fallback approximation of 20% margin for intraday equity if order margins API fails
-        return (quantity * price) * 0.20;
+        // Conservative fallback: use cached symbol margin multiplier if previously verified today,
+        // otherwise default to a safe 40% margin (2.5x leverage) rather than blind 20% (5x) to avoid RMS rejections.
+        Double cachedMultiplier = symbolMarginMultiplierCache.get(cleanSymbol);
+        double effectiveMultiplier = (cachedMultiplier != null) ? cachedMultiplier : 0.40;
+        return (quantity * price) * effectiveMultiplier;
     }
 
     @Override

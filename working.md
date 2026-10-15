@@ -335,9 +335,10 @@ $$\text{Stop Distance \%} = \frac{\text{Entry Price} - \text{Initial Stop Price}
 - **Minimum Stop Distance:** $0.35\%$. Trades below $0.35\%$ are rejected as vulnerable to market noise.
 - **Maximum Stop Distance:** $2.00\%$. Trades above $2.00\%$ are rejected as over-extended.
 
-### 3. Session Limits & Circuit Breaker
+### 3. Session Limits & Dual Circuit Breaker
 - **Daily Trade Limit:** Maximum **3 trades per day** (`max-daily-trades: 3`).
-- **Daily Loss Circuit Breaker:** Trading is halted immediately if **2 losses** occur today (`max-daily-losses: 2`).
+- **Daily Loss Circuit Breaker:** Trading is halted immediately if **2 losses** occur today (`max-daily-losses: 2`) OR if **cumulative daily net drawdown exceeds ₹400** (`max-daily-loss-rupees: 400.00`).
+- **Realized P&L Accounting:** Losses are tracked strictly against realized post-tax Net PnL calculated via `ChargesBreakdown.calculate()`. Trailed stops executing in net profit do not count as losses.
 - **Mode Isolation:** Paper trading executions and losses are tracked in SQLite `paper_trades`; Live trading executions and losses are tracked via live broker counters. Paper tests never lock real-money Live trading.
 - **High-Frequency In-Memory Caching (2s TTL):** `canTradeToday()` results are cached in memory for 2 seconds to eliminate database queries on KiteTicker's high-frequency tick thread.
 - **Debounced Logging:** Warning messages are logged strictly upon state transitions (and at most once every 5 minutes if persistent), completely silencing log flooding.
@@ -478,9 +479,16 @@ Implemented in `BacktestEngineService.java` & `HistoricalMarketDataService.java`
   - Evaluates candidate metrics using the production `MomentumScoringEngine` (100-point model with hard qualification gates).
   - Reuses `PositionSizingEngine.calculateSizingQuantity` to enforce user-configured leverage ($1.0\times$ cash up to $5.0\times$ SEBI MIS) and $0.35\% - 2.00\%$ stop distance boundaries.
   - Risk Budget is calculated directly on total leveraged position capacity ($\text{Capital} \times \text{Leverage} \times \text{Risk\%}$).
-- **Realistic Intrabar Sequencing (No Peeking Bias):**
-  - Models candle direction realistically: on bullish candles ($C \ge O$, $O \to L \to H \to C$), checks Low against stops before updating HWM. On bearish candles ($C < O$, $O \to H \to L \to C$), models High before Low.
-  - Mandatory 15:05 PM EOD square-off if stop-loss is not hit.
+- **Zero Lookahead Next-Bar Open Execution:**
+  - Evaluates candidate breakout confirmation on completed candle $t$ close (`09:25` candle) and queues `PendingSignal`.
+  - Fills entry order at the **Open of candle $t+1$** (`09:30` candle) with slippage and over-extension checks, completely eliminating bar-peeking bias.
+- **Strict Zero Synthetic Depth Wicks:**
+  - Disables artificial bid/ask synthesis from candle bodies. Normalizes the 75 non-depth points (RVOL, VWAP distance, PDH breakout, ATR expansion) to 100 points in `isBacktestMode`.
+- **Directional Microstructure Path Modeling:**
+  - Bullish candles ($C \ge O$): models path $O \to L \to H \to C$. Tests low against stop first; only updates HWM and ratchets trailing stop if low survives; checks intra-candle retracement at close.
+  - Bearish candles ($C < O$): models path $O \to H \to L \to C$. Ratchets trailing stop to high first, then tests low against ratcheted stop.
+- **Dynamic Date-Range Ingestion & Chunking:**
+  - Accepts user-specified `startDate` and `endDate`. Queries Zerodha Kite Historical Data API in 60-day chunks and validates Yahoo Finance 60-day boundaries.
 - **Institutional Financial Analytics:**
   - Net Profit Factor computed strictly on post-tax Net PnL via `ChargesBreakdown`.
   - Annualized Sharpe Ratio ($\sqrt{252}$) adjusted with the 6.5% Indian benchmark repo rate.
@@ -502,3 +510,19 @@ Implemented in `BacktestEngineService.java` & `HistoricalMarketDataService.java`
    `MomentumBreakoutStrategy` remains in `PENDING_ENTRY` until the broker acknowledges placement of the protective stop-loss order.
 6. **NSE Trading Holiday Guard:**
    `MarketCalendarService` cross-references official NSE holiday schedules, blocking automated order placement on market holidays.
+7. **Dynamic NSE Tick Size Compliance:**
+   Adheres to NSE circular `CMTR62174`: dynamically applies ₹0.01 tick size for stocks $\le$ ₹250 and ₹0.05 for stocks > ₹250 via `TickMath.getExchangeTickSize()`.
+8. **Atomic In-Place Stop Modification:**
+   Updates active stop orders via broker native `modifyOrder` with new trigger and limit prices, eliminating cancel-before-replace execution exposure gaps during trailing stop adjustments.
+9. **Accurate Manual Exit Synchronization:**
+   Manual sell actions transition the FSM to `PENDING_EXIT` and verify true zero position from broker feeds before reporting `FLAT` state.
+10. **Zero Plaintext Fallback & Ephemeral Dev Passwords:**
+    Master password requires `ALGOTRADE_AUTH_PASSWORD` in production; generates ephemeral 16-character dev passwords when running locally without hardcoded plaintext strings in code.
+11. **Granular Auth Route Protection & /me Hardening:**
+    `/api/auth/me` and `/api/auth/logout` require verified JWT authentication via Spring Security, returning 401 Unauthorized for unauthenticated callers.
+12. **HttpOnly & Strict Cookie Isolation:**
+    Refresh tokens are never returned in JSON response bodies, and cookies use dynamic `Secure` (under HTTPS), `HttpOnly`, and `SameSite=Strict`.
+13. **In-Band WebSocket Authentication (RFC 6750):**
+    Frontend connects cleanly to `/ws/live` without exposing sensitive JWTs in URL query strings, authenticating via a first-frame `AUTH` message within a 3-second grace window.
+14. **Dynamic Margin Multicache & Conservative Fallback:**
+    Caches verified per-symbol Kite margin percentages, defaulting to a conservative 40% margin (2.5x leverage max) rather than blind 20% (5x) on API timeouts to avoid RMS rejections.

@@ -478,8 +478,17 @@ public class HistoricalMarketDataService {
     }
 
     public List<IntradayBar> getIntradayBars(String symbol, LocalDate date) {
-        Map<LocalDate, List<IntradayBar>> symbolMap = intradayBarsCache.computeIfAbsent(symbol, this::loadOrFetchIntradayBars);
-        List<IntradayBar> bars = symbolMap.get(date);
+        return getIntradayBars(symbol, date, null, null);
+    }
+
+    public List<IntradayBar> getIntradayBars(String symbol, LocalDate date, LocalDate requestedStart, LocalDate requestedEnd) {
+        Map<LocalDate, List<IntradayBar>> symbolMap = intradayBarsCache.compute(symbol, (k, existing) -> {
+            if (existing != null && (date == null || existing.containsKey(date))) {
+                return existing;
+            }
+            return loadOrFetchIntradayBars(symbol, requestedStart, requestedEnd);
+        });
+        List<IntradayBar> bars = (symbolMap != null) ? symbolMap.get(date) : null;
         if (bars != null && !bars.isEmpty()) {
             return bars;
         }
@@ -487,6 +496,10 @@ public class HistoricalMarketDataService {
     }
 
     private Map<LocalDate, List<IntradayBar>> loadOrFetchIntradayBars(String symbol) {
+        return loadOrFetchIntradayBars(symbol, null, null);
+    }
+
+    private Map<LocalDate, List<IntradayBar>> loadOrFetchIntradayBars(String symbol, LocalDate requestedStart, LocalDate requestedEnd) {
         Path diskCache = cacheDir.resolve(symbol + "_5m.json");
         Map<LocalDate, List<IntradayBar>> result = new HashMap<>();
 
@@ -508,26 +521,44 @@ public class HistoricalMarketDataService {
                         .add(new IntradayBar(t, op, hi, lo, cl, vo));
                 }
                 result.values().forEach(list -> list.sort(Comparator.comparing(IntradayBar::time)));
-                return result;
+                // If requestedStart and requestedEnd are covered by the disk cache, return directly
+                if (requestedStart != null && requestedEnd != null 
+                    && result.containsKey(requestedStart) && result.containsKey(requestedEnd)) {
+                    return result;
+                }
             } catch (Exception e) {
                 log.warn("Failed reading 5m disk cache for {}: {}", symbol, e.getMessage());
             }
         }
 
-        // 2. Priority 1: Zerodha Official Historical Data API (Active Kite Session)
+        LocalDate startDate = (requestedStart != null) ? requestedStart : LocalDate.now(IST_ZONE).minusDays(60);
+        LocalDate endDate = (requestedEnd != null) ? requestedEnd : LocalDate.now(IST_ZONE);
+
+        // 2. Priority 1: Zerodha Official Historical Data API (Active Kite Session) with 60-day chunking
         if (liveGateway != null && liveGateway.isSessionActive()) {
             try {
                 Long token = liveGateway.getInstrumentToken(symbol);
                 if (token != null && token > 0) {
-                    Date fromDate = Date.from(LocalDate.now(IST_ZONE).minusDays(60).atStartOfDay(IST_ZONE).toInstant());
-                    Date toDate = Date.from(LocalDate.now(IST_ZONE).plusDays(1).atStartOfDay(IST_ZONE).toInstant());
-                    var kiteData = liveGateway.getHistoricalData(token, fromDate, toDate, "5minute");
-                    Map<LocalDate, List<IntradayBar>> parsed = parseKiteIntradayData(kiteData);
-                    if (!parsed.isEmpty()) {
-                        saveIntradayBarsToDisk(diskCache, parsed);
-                        log.info("Loaded {} real 5m bars across {} days for {} from Zerodha Kite Historical API.",
-                            parsed.values().stream().mapToInt(List::size).sum(), parsed.size(), symbol);
-                        return parsed;
+                    LocalDate cur = startDate;
+                    while (!cur.isAfter(endDate)) {
+                        LocalDate chunkEnd = cur.plusDays(60);
+                        if (chunkEnd.isAfter(endDate)) chunkEnd = endDate;
+
+                        Date fromDate = Date.from(cur.atStartOfDay(IST_ZONE).toInstant());
+                        Date toDate = Date.from(chunkEnd.plusDays(1).atStartOfDay(IST_ZONE).toInstant());
+                        var kiteData = liveGateway.getHistoricalData(token, fromDate, toDate, "5minute");
+                        Map<LocalDate, List<IntradayBar>> parsedChunk = parseKiteIntradayData(kiteData);
+                        if (!parsedChunk.isEmpty()) {
+                            result.putAll(parsedChunk);
+                        }
+                        cur = chunkEnd.plusDays(1);
+                    }
+
+                    if (!result.isEmpty()) {
+                        saveIntradayBarsToDisk(diskCache, result);
+                        log.info("Loaded {} real 5m bars across {} days for {} from Zerodha Kite Historical API (Range: {} to {}).",
+                            result.values().stream().mapToInt(List::size).sum(), result.size(), symbol, startDate, endDate);
+                        return result;
                     }
                 }
             } catch (Exception e) {
@@ -536,6 +567,10 @@ public class HistoricalMarketDataService {
         }
 
         // 3. Priority 2: Yahoo Finance 5m feed fallback
+        if (requestedStart != null && requestedStart.isBefore(LocalDate.now(IST_ZONE).minusDays(60))) {
+            log.warn("Yahoo Finance free feed only provides 5m intraday data within the rolling 60 days. Requested start date {} exceeds 60 days.", requestedStart);
+        }
+
         try {
             String url = "https://query1.finance.yahoo.com/v8/finance/chart/" + symbol + ".NS?interval=5m&range=60d";
             HttpRequest request = HttpRequest.newBuilder()
@@ -549,10 +584,11 @@ public class HistoricalMarketDataService {
             if (response.statusCode() == 200) {
                 Map<LocalDate, List<IntradayBar>> parsed = parseYahooIntradayJson(response.body());
                 if (!parsed.isEmpty()) {
-                    saveIntradayBarsToDisk(diskCache, parsed);
+                    result.putAll(parsed);
+                    saveIntradayBarsToDisk(diskCache, result);
                     log.info("Loaded {} real 5m bars across {} days for {} from Yahoo Finance feed.",
-                        parsed.values().stream().mapToInt(List::size).sum(), parsed.size(), symbol);
-                    return parsed;
+                        result.values().stream().mapToInt(List::size).sum(), result.size(), symbol);
+                    return result;
                 }
             }
         } catch (Exception e) {
@@ -560,6 +596,9 @@ public class HistoricalMarketDataService {
         }
 
         // 4. Strict Zero Synthetic Data Policy: Fail closed
+        if (!result.isEmpty()) {
+            return result;
+        }
         log.warn("CRITICAL: Failed to acquire verified 5m intraday data for {}. Failing closed (empty series).", symbol);
         return Collections.emptyMap();
     }

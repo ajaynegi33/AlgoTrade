@@ -77,4 +77,42 @@ class AuthServiceTest {
             authService.refresh(tokens.refreshToken())
         );
     }
+
+    @Test
+    void testAuthControllerMeReturns401WhenUnauthenticated() {
+        AuthController controller = new AuthController(authService);
+        org.springframework.http.ResponseEntity<?> response = controller.me(null);
+        assertEquals(org.springframework.http.HttpStatus.UNAUTHORIZED, response.getStatusCode());
+
+        org.springframework.security.core.Authentication anonymousAuth = 
+            new org.springframework.security.authentication.AnonymousAuthenticationToken("key", "anonymousUser", 
+                java.util.List.of(new org.springframework.security.core.authority.SimpleGrantedAuthority("ROLE_ANONYMOUS")));
+        org.springframework.http.ResponseEntity<?> anonResponse = controller.me(anonymousAuth);
+        assertEquals(org.springframework.http.HttpStatus.UNAUTHORIZED, anonResponse.getStatusCode());
+    }
+
+    @Test
+    void testAuthControllerLoginDoesNotContainRefreshTokenInBody() {
+        AuthController controller = new AuthController(authService);
+        jakarta.servlet.http.HttpServletRequest req = org.mockito.Mockito.mock(jakarta.servlet.http.HttpServletRequest.class);
+        jakarta.servlet.http.HttpServletResponse res = org.mockito.Mockito.mock(jakarta.servlet.http.HttpServletResponse.class);
+
+        org.springframework.http.ResponseEntity<?> response = controller.login(
+            new AuthController.LoginRequest(TEST_PASSWORD), req, res
+        );
+        assertEquals(org.springframework.http.HttpStatus.OK, response.getStatusCode());
+
+        @SuppressWarnings("unchecked")
+        java.util.Map<String, Object> body = (java.util.Map<String, Object>) response.getBody();
+        assertNotNull(body);
+        assertTrue(body.containsKey("accessToken"));
+        assertFalse(body.containsKey("refreshToken"), "Security violation: refreshToken MUST NOT be leaked in JSON body!");
+
+        // Verify Set-Cookie header was set with HttpOnly
+        org.mockito.ArgumentCaptor<String> cookieCaptor = org.mockito.ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(res).addHeader(org.mockito.Mockito.eq(org.springframework.http.HttpHeaders.SET_COOKIE), cookieCaptor.capture());
+        String cookieStr = cookieCaptor.getValue();
+        assertTrue(cookieStr.contains("HttpOnly"));
+        assertTrue(cookieStr.contains("SameSite=Strict"));
+    }
 }

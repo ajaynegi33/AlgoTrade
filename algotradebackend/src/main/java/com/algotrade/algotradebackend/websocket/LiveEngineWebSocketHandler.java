@@ -56,6 +56,12 @@ public class LiveEngineWebSocketHandler extends TextWebSocketHandler {
     private final Gson gson;
 
     private final Map<String, WebSocketSession> activeSessions = new ConcurrentHashMap<>();
+    private final Map<String, WebSocketSession> pendingAuthSessions = new ConcurrentHashMap<>();
+    private final java.util.concurrent.ScheduledExecutorService authScheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "ws-auth-timeout");
+        t.setDaemon(true);
+        return t;
+    });
 
     private final com.algotrade.algotradebackend.security.JwtTokenService jwtTokenService;
 
@@ -98,15 +104,28 @@ public class LiveEngineWebSocketHandler extends TextWebSocketHandler {
     public void afterConnectionEstablished(WebSocketSession session) {
         if (jwtTokenService != null) {
             String token = extractToken(session);
-            if (token == null || !jwtTokenService.isValidToken(token)) {
-                log.warn("Unauthorized WebSocket connection rejected: session={}", session.getId());
-                try {
-                    session.close(CloseStatus.POLICY_VIOLATION.withReason("Unauthorized: Valid JWT required"));
-                } catch (IOException ignored) {}
+            if (token != null && jwtTokenService.isValidToken(token)) {
+                registerAuthenticatedSession(session);
                 return;
             }
+
+            // Put into pending auth with a 3-second grace window to receive an in-band AUTH frame
+            pendingAuthSessions.put(session.getId(), session);
+            authScheduler.schedule(() -> {
+                if (pendingAuthSessions.remove(session.getId()) != null) {
+                    try {
+                        log.warn("WebSocket session {} timed out waiting for in-band AUTH frame. Closing.", session.getId());
+                        session.close(CloseStatus.POLICY_VIOLATION.withReason("Authentication timeout"));
+                    } catch (IOException ignored) {}
+                }
+            }, 3, java.util.concurrent.TimeUnit.SECONDS);
+            return;
         }
 
+        registerAuthenticatedSession(session);
+    }
+
+    private void registerAuthenticatedSession(WebSocketSession session) {
         activeSessions.put(session.getId(), session);
         log.info("New authenticated WebSocket connection established: ID={}. Total active clients: {}",
             session.getId(), activeSessions.size());
@@ -154,6 +173,25 @@ public class LiveEngineWebSocketHandler extends TextWebSocketHandler {
 
         try {
             com.google.gson.JsonObject json = com.google.gson.JsonParser.parseString(payload).getAsJsonObject();
+            if (json.has("type") && "AUTH".equalsIgnoreCase(json.get("type").getAsString())) {
+                String token = json.has("token") ? json.get("token").getAsString() : null;
+                if (jwtTokenService != null && (token == null || !jwtTokenService.isValidToken(token))) {
+                    pendingAuthSessions.remove(session.getId());
+                    session.close(CloseStatus.POLICY_VIOLATION.withReason("Unauthorized: Invalid JWT"));
+                    return;
+                }
+                pendingAuthSessions.remove(session.getId());
+                registerAuthenticatedSession(session);
+                sendSafeMessage(session, "{\"type\":\"AUTH_SUCCESS\",\"timestamp\":\"" + Instant.now() + "\"}");
+                return;
+            }
+
+            // If session is still pending auth, ignore other commands
+            if (pendingAuthSessions.containsKey(session.getId())) {
+                log.warn("Ignored command from unauthenticated session {}", session.getId());
+                return;
+            }
+
             if (json.has("action") && "SUBSCRIBE_SYMBOL".equalsIgnoreCase(json.get("action").getAsString())) {
                 if (json.has("symbol")) {
                     String sym = json.get("symbol").getAsString();
@@ -168,6 +206,7 @@ public class LiveEngineWebSocketHandler extends TextWebSocketHandler {
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         activeSessions.remove(session.getId());
+        pendingAuthSessions.remove(session.getId());
         log.info("WebSocket connection closed: ID={}, Code={}, Reason={}. Remaining clients: {}",
             session.getId(), status.getCode(), status.getReason(), activeSessions.size());
     }
