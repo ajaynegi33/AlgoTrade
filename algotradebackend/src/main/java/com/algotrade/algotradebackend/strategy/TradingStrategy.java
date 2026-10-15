@@ -43,9 +43,11 @@ public interface TradingStrategy {
 
     /**
      * Runs the continuous all-day intraday evaluation cycle across the universe.
+     * @return true if an entry order was dispatched, false otherwise
      */
-    default void evaluateContinuousCycle() {
+    default boolean evaluateContinuousCycle() {
         evaluate0930();
+        return false;
     }
 
     /**

@@ -8,6 +8,7 @@ import StockMetricsOverview from "./StockMetricsOverview";
 import ZerodhaAuthCard from "../auth/ZerodhaAuthCard";
 import { SkeletonStockExplorer } from "../common/Skeleton";
 import { TickUpdate } from "@/hooks/useEngineWebSocket";
+import { apiFetch } from "@/lib/apiClient";
 
 interface StockExplorerTabProps {
   backendUrl: string;
@@ -82,8 +83,8 @@ export default function StockExplorerTab({
       setChartLoading(true);
     }
     try {
-      const res = await fetch(
-        `${backendUrl}/api/dashboard/stock-chart?symbol=${encodeURIComponent(clean)}&timeframe=${encodeURIComponent(tf)}&interval=${encodeURIComponent(intvl)}`
+      const res = await apiFetch(
+        `/api/dashboard/stock-chart?symbol=${encodeURIComponent(clean)}&timeframe=${encodeURIComponent(tf)}&interval=${encodeURIComponent(intvl)}`
       );
       if (res.ok) {
         const points: StockChartPoint[] = await res.json();
@@ -120,7 +121,7 @@ export default function StockExplorerTab({
 
     try {
       // 1. Fetch live quote & depth
-      const res = await fetch(`${backendUrl}/api/dashboard/stock-quote?symbol=${encodeURIComponent(clean)}`);
+      const res = await apiFetch(`/api/dashboard/stock-quote?symbol=${encodeURIComponent(clean)}`);
       if (res.ok) {
         const data: StockQuoteData = await res.json();
         if (data.error === "ZERODHA_SESSION_REQUIRED" || !data.authenticated) {
@@ -315,7 +316,7 @@ export default function StockExplorerTab({
         params.append("entryPrice", quote.lastPrice.toString());
       }
 
-      const res = await fetch(`${backendUrl}/api/dashboard/strategy/manual-entry?${params.toString()}`, {
+      const res = await apiFetch(`/api/dashboard/strategy/manual-entry?${params.toString()}`, {
         method: "POST",
       });
       const data = await res.json();

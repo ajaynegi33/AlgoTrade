@@ -351,24 +351,31 @@ public class KiteMarketDataService {
                     double open = tick.getOpenPrice();
                     int ltq = (int) tick.getLastTradedQuantity();
                     String ltt = tick.getLastTradedTime() != null ? tick.getLastTradedTime().toString() : null;
+                    Map<String, Object> finalDepthMap = depthMap;
 
-                    broadcastService.broadcastTick(
-                        symbol,
-                        ltp,
-                        volume,
-                        Math.round(change * 100.0) / 100.0,
-                        Math.round(changePct * 100.0) / 100.0,
-                        high,
-                        low,
-                        buyQty,
-                        sellQty,
-                        depthMap,
-                        open,
-                        prevClose,
-                        vwap,
-                        ltq,
-                        ltt
-                    );
+                    Thread.ofVirtual().name("tick-ui-broadcast").start(() -> {
+                        try {
+                            broadcastService.broadcastTick(
+                                symbol,
+                                ltp,
+                                volume,
+                                Math.round(change * 100.0) / 100.0,
+                                Math.round(changePct * 100.0) / 100.0,
+                                high,
+                                low,
+                                buyQty,
+                                sellQty,
+                                finalDepthMap,
+                                open,
+                                prevClose,
+                                vwap,
+                                ltq,
+                                ltt
+                            );
+                        } catch (Throwable t) {
+                            log.debug("UI tick broadcast skipped for {}: {}", symbol, t.getMessage());
+                        }
+                    });
                 }
             }
         }
@@ -508,5 +515,13 @@ public class KiteMarketDataService {
 
     public boolean isConnected() {
         return connected;
+    }
+
+    public Long getInstrumentToken(String symbol) {
+        if (symbol == null || symbol.isBlank()) return null;
+        String cleanSym = symbol.trim().toUpperCase().replace("NSE:", "");
+        Long token = symbolToTokenMap.get(cleanSym);
+        if (token != null && token > 0) return token;
+        return DEFAULT_NSE_TOKENS.get(cleanSym);
     }
 }

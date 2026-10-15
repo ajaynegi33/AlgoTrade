@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ScoredCandidate } from "../types";
 import { TickUpdate } from "@/hooks/useEngineWebSocket";
 import { SkeletonLeaderboard } from "../common/Skeleton";
+import { apiFetch } from "@/lib/apiClient";
 
 interface LeaderboardTabProps {
   leaderboard: ScoredCandidate[];
@@ -60,11 +61,10 @@ export default function LeaderboardTab({
   const currentPhaseInfo = formatPhase(marketPhase || "OPENING_DISCOVERY");
 
   const handleManualScan = async () => {
-    const url = backendUrl || process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8080";
     setTriggeringScan(true);
     setTriggerMessage(null);
     try {
-      const res = await fetch(`${url}/api/dashboard/scan/trigger`, { method: "POST" });
+      const res = await apiFetch("/api/dashboard/scan/trigger", { method: "POST" });
       const data = await res.json();
       if (res.ok && data.success) {
         setTriggerMessage("✅ Continuous scan cycle executed! Leaderboard updated.");

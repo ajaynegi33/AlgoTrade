@@ -57,6 +57,8 @@ public class LiveEngineWebSocketHandler extends TextWebSocketHandler {
 
     private final Map<String, WebSocketSession> activeSessions = new ConcurrentHashMap<>();
 
+    private final com.algotrade.algotradebackend.security.JwtTokenService jwtTokenService;
+
     @Autowired
     public LiveEngineWebSocketHandler(
         BrokerGatewayManager brokerGatewayManager,
@@ -64,7 +66,8 @@ public class LiveEngineWebSocketHandler extends TextWebSocketHandler {
         PositionSizingEngine positionSizingEngine,
         MarketCalendarService marketCalendarService,
         EngineActivityFeedService activityFeedService,
-        ObjectProvider<PreMarketScannerService> scannerProvider
+        ObjectProvider<PreMarketScannerService> scannerProvider,
+        @Autowired(required = false) com.algotrade.algotradebackend.security.JwtTokenService jwtTokenService
     ) {
         this.brokerGatewayManager = brokerGatewayManager;
         this.strategyManager = strategyManager;
@@ -72,6 +75,7 @@ public class LiveEngineWebSocketHandler extends TextWebSocketHandler {
         this.marketCalendarService = marketCalendarService;
         this.activityFeedService = activityFeedService;
         this.scannerProvider = scannerProvider;
+        this.jwtTokenService = jwtTokenService;
         this.gson = new GsonBuilder()
             .registerTypeAdapter(Instant.class, (JsonSerializer<Instant>) (src, type, ctx) -> new JsonPrimitive(src.toString()))
             .registerTypeAdapter(java.time.LocalDate.class, (JsonSerializer<java.time.LocalDate>) (src, type, ctx) -> new JsonPrimitive(src.toString()))
@@ -79,14 +83,59 @@ public class LiveEngineWebSocketHandler extends TextWebSocketHandler {
             .create();
     }
 
+    public LiveEngineWebSocketHandler(
+        BrokerGatewayManager brokerGatewayManager,
+        StrategyManager strategyManager,
+        PositionSizingEngine positionSizingEngine,
+        MarketCalendarService marketCalendarService,
+        EngineActivityFeedService activityFeedService,
+        ObjectProvider<PreMarketScannerService> scannerProvider
+    ) {
+        this(brokerGatewayManager, strategyManager, positionSizingEngine, marketCalendarService, activityFeedService, scannerProvider, null);
+    }
+
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
+        if (jwtTokenService != null) {
+            String token = extractToken(session);
+            if (token == null || !jwtTokenService.isValidToken(token)) {
+                log.warn("Unauthorized WebSocket connection rejected: session={}", session.getId());
+                try {
+                    session.close(CloseStatus.POLICY_VIOLATION.withReason("Unauthorized: Valid JWT required"));
+                } catch (IOException ignored) {}
+                return;
+            }
+        }
+
         activeSessions.put(session.getId(), session);
-        log.info("New WebSocket connection established: ID={}. Total active clients: {}",
+        log.info("New authenticated WebSocket connection established: ID={}. Total active clients: {}",
             session.getId(), activeSessions.size());
 
         // Send immediate comprehensive snapshot so UI renders instantly with zero polling
         sendInitialSnapshot(session);
+    }
+
+    private String extractToken(WebSocketSession session) {
+        java.net.URI uri = session.getUri();
+        if (uri != null && uri.getQuery() != null) {
+            String query = uri.getQuery();
+            for (String param : query.split("&")) {
+                String[] pair = param.split("=", 2);
+                if (pair.length == 2 && "token".equalsIgnoreCase(pair[0])) {
+                    return pair[1];
+                }
+            }
+        }
+        if (session.getHandshakeHeaders() != null) {
+            List<String> authHeaders = session.getHandshakeHeaders().get("Authorization");
+            if (authHeaders != null && !authHeaders.isEmpty()) {
+                String authHeader = authHeaders.get(0);
+                if (authHeader.startsWith("Bearer ")) {
+                    return authHeader.substring(7);
+                }
+            }
+        }
+        return null;
     }
 
     @Autowired(required = false)

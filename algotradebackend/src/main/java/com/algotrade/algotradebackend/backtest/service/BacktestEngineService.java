@@ -100,10 +100,12 @@ public class BacktestEngineService {
 
             for (String sym : watchlist) {
                 HistoricalMarketDataService.BaselineReference ref = dataService.getBaselineReference(sym, date);
-                if (ref.prevClose() <= 0) continue;
+                if (ref == null || ref.prevClose() <= 0 || ref.pdh() <= 0) continue;
+                List<HistoricalMarketDataService.IntradayBar> dayBars = dataService.getIntradayBars(sym, date);
+                if (dayBars == null || dayBars.isEmpty()) continue;
                 CandidateMetrics m = new CandidateMetrics(sym, ref.prevClose(), ref.pdh(), ref.avgDailyVol(), ref.atrPct());
                 metricsMap.put(sym, m);
-                barsMap.put(sym, dataService.getIntradayBars(sym, date));
+                barsMap.put(sym, dayBars);
             }
 
             if (metricsMap.isEmpty()) {

@@ -7,6 +7,7 @@ import {
   BacktestPreset,
   BacktestTrade,
 } from "../types";
+import { apiFetch } from "@/lib/apiClient";
 import {
   ResponsiveContainer,
   AreaChart,
@@ -41,7 +42,7 @@ export default function BacktestTab({ backendUrl }: BacktestTabProps) {
   useEffect(() => {
     const fetchPresets = async () => {
       try {
-        const res = await fetch(`${backendUrl}/api/backtest/presets`);
+        const res = await apiFetch("/api/backtest/presets");
         if (res.ok) {
           const data: BacktestPreset[] = await res.json();
           setPresets(data);
@@ -82,9 +83,8 @@ export default function BacktestTab({ backendUrl }: BacktestTabProps) {
         leverageMultiplier,
       };
 
-      const res = await fetch(`${backendUrl}/api/backtest/run`, {
+      const res = await apiFetch("/api/backtest/run", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
 

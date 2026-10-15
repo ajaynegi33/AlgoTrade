@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { apiFetch } from "@/lib/apiClient";
 
 export interface PreMarketCandidate {
   id: number;
@@ -40,7 +41,7 @@ export default function PreMarketScannerTab() {
   const fetchScanResults = async () => {
     try {
       setLoading(true);
-      const res = await fetch(`${BACKEND_URL}/api/scanner/latest`);
+      const res = await apiFetch("/api/scanner/latest");
       if (res.ok) {
         const data = await res.json();
         setCandidates(data.allCandidates || []);
@@ -58,7 +59,7 @@ export default function PreMarketScannerTab() {
 
   const fetchUniverseInfo = async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/scanner/universe`);
+      const res = await apiFetch("/api/scanner/universe");
       if (res.ok) {
         const data = await res.json();
         setUniverseInfo({
@@ -75,7 +76,7 @@ export default function PreMarketScannerTab() {
   const handleTriggerScan = async () => {
     try {
       setScanning(true);
-      const res = await fetch(`${BACKEND_URL}/api/scanner/trigger`, { method: "POST" });
+      const res = await apiFetch("/api/scanner/trigger", { method: "POST" });
       if (res.ok) {
         await fetchScanResults();
       }
@@ -89,7 +90,7 @@ export default function PreMarketScannerTab() {
   const handleSyncUniverse = async () => {
     try {
       setSyncingUniverse(true);
-      const res = await fetch(`${BACKEND_URL}/api/scanner/universe/sync`, { method: "POST" });
+      const res = await apiFetch("/api/scanner/universe/sync", { method: "POST" });
       if (res.ok) {
         await fetchUniverseInfo();
         await fetchScanResults();

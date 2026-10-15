@@ -73,10 +73,15 @@ public class PaperTradingGateway implements BrokerGateway {
         String orderId = "PAPER-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
 
         if ("BUY".equalsIgnoreCase(transactionType) && ("LIMIT".equalsIgnoreCase(orderType) || "MARKET".equalsIgnoreCase(orderType))) {
-            // Simulate realistic entry slippage (0.05% adverse price impact)
+            // Realistic entry execution: If LIMIT order with price specified, fills at the limit price (no secondary slippage penalty)
             Position existing = openPosition.get();
-            double basePrice = price > 0.0 ? price : (existing != null ? existing.currentPrice() : 0.0);
-            double executedPrice = Math.round((basePrice * 1.0005) * 100.0) / 100.0;
+            double executedPrice;
+            if ("LIMIT".equalsIgnoreCase(orderType) && price > 0.0) {
+                executedPrice = price; // Strategy already factored in marketable limit price
+            } else {
+                double basePrice = price > 0.0 ? price : (existing != null ? existing.currentPrice() : 0.0);
+                executedPrice = Math.round((basePrice * 1.0005) * 100.0) / 100.0;
+            }
             TradeOrder filledOrder = new TradeOrder(orderId, symbol, "BUY", quantity, executedPrice, 0.0, orderType.toUpperCase(), "FILLED", ExecutionMode.PAPER, Instant.now());
             orders.put(orderId, filledOrder);
 
@@ -295,5 +300,10 @@ public class PaperTradingGateway implements BrokerGateway {
         result.put("error", "ZERODHA_SESSION_REQUIRED");
         result.put("message", "Zerodha Kite session is not active. Please authenticate your Zerodha account to stream live quotes from NSE.");
         return result;
+    }
+
+    @Override
+    public TradeOrder getOrderStatus(String orderId) {
+        return orders.get(orderId);
     }
 }

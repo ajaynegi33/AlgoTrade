@@ -49,6 +49,16 @@ public interface BrokerGateway {
     TradeOrder cancelOrder(String orderId);
 
     /**
+     * Retrieves the status of a specific order by ID, if available.
+     * 
+     * @param orderId Identifier of the order
+     * @return Current TradeOrder details or null if unknown
+     */
+    default TradeOrder getOrderStatus(String orderId) {
+        return null;
+    }
+
+    /**
      * Retrieves the currently held open position, if any.
      */
     Optional<Position> getOpenPosition();

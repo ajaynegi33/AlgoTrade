@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useMemo } from "react";
 import { EngineActivityEvent } from "../types";
+import { apiFetch } from "@/lib/apiClient";
 
 interface DecisionFeedTerminalProps {
   backendUrl: string;
@@ -51,7 +52,7 @@ export default function DecisionFeedTerminal({
 
       try {
         const sinceParam = maxEventIdRef.current > 0 ? `?sinceId=${maxEventIdRef.current}&limit=50` : "?limit=50";
-        const res = await fetch(`${backendUrl}/api/dashboard/activity-feed${sinceParam}`);
+        const res = await apiFetch(`/api/dashboard/activity-feed${sinceParam}`);
 
         if (!res.ok) {
           if (isMounted) setConnectionStatus("error");

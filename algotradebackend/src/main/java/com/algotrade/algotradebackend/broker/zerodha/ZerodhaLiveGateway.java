@@ -84,6 +84,9 @@ public class ZerodhaLiveGateway implements BrokerGateway {
     private KiteConnect kiteConnect;
     private volatile boolean sessionActive = false;
     private volatile String accessToken;
+    private final java.util.concurrent.atomic.AtomicReference<Optional<Position>> cachedPosition = new java.util.concurrent.atomic.AtomicReference<>(Optional.empty());
+    private final java.util.concurrent.atomic.AtomicLong lastPositionSyncMs = new java.util.concurrent.atomic.AtomicLong(0);
+    private static final long POSITION_CACHE_TTL_MS = 2500;
     private final java.util.concurrent.atomic.AtomicReference<com.zerodhatech.models.Margin> cachedMargin = new java.util.concurrent.atomic.AtomicReference<>(null);
     private final java.util.concurrent.atomic.AtomicLong lastMarginFetchTimeMs = new java.util.concurrent.atomic.AtomicLong(0);
     private final java.util.concurrent.atomic.AtomicReference<Double> cumulativeLivePnL = new java.util.concurrent.atomic.AtomicReference<>(0.0);
@@ -216,6 +219,7 @@ public class ZerodhaLiveGateway implements BrokerGateway {
     }
 
     private void onSessionActivated() {
+        triggerAsyncPositionSync();
         if (marketDataServiceProvider != null && marketDataServiceProvider.getIfAvailable() != null) {
             try {
                 KiteMarketDataService mds = marketDataServiceProvider.getIfAvailable();
@@ -350,6 +354,7 @@ public class ZerodhaLiveGateway implements BrokerGateway {
 
             OrderResponse resp = kiteConnect.placeOrder(params, Constants.VARIETY_REGULAR);
             log.info("ZERODHA LIVE ORDER PLACED: ID={}, {} {} x {} @ {}", resp.orderId, transactionType, quantity, symbol, price);
+            triggerAsyncPositionSync();
 
             return new TradeOrder(resp.orderId, symbol, transactionType, quantity, price, triggerPrice, orderType, "SUBMITTED", ExecutionMode.LIVE, Instant.now());
         } catch (Throwable e) {
@@ -373,6 +378,7 @@ public class ZerodhaLiveGateway implements BrokerGateway {
 
             com.zerodhatech.models.Order resp = kiteConnect.modifyOrder(orderId, params, Constants.VARIETY_REGULAR);
             log.info("ZERODHA LIVE ORDER MODIFIED: ID={}, New Price={}, Trigger={}", resp.orderId, newPrice, newTriggerPrice);
+            triggerAsyncPositionSync();
 
             return new TradeOrder(orderId, "", "", 0, newPrice, newTriggerPrice, "SL", "MODIFIED", ExecutionMode.LIVE, Instant.now());
         } catch (Throwable e) {
@@ -390,6 +396,7 @@ public class ZerodhaLiveGateway implements BrokerGateway {
         try {
             com.zerodhatech.models.Order resp = kiteConnect.cancelOrder(orderId, Constants.VARIETY_REGULAR);
             log.info("ZERODHA LIVE ORDER CANCELLED: ID={}", resp.orderId);
+            triggerAsyncPositionSync();
             return new TradeOrder(orderId, "", "", 0, 0, 0, "", "CANCELLED", ExecutionMode.LIVE, Instant.now());
         } catch (Throwable e) {
             log.error("Failed to cancel Zerodha live order {}: {}", orderId, e.getMessage(), e);
@@ -403,13 +410,29 @@ public class ZerodhaLiveGateway implements BrokerGateway {
             return Optional.empty();
         }
 
+        long now = System.currentTimeMillis();
+        // If cache TTL has expired, trigger background refresh without blocking the tick thread
+        if (now - lastPositionSyncMs.get() >= POSITION_CACHE_TTL_MS) {
+            triggerAsyncPositionSync();
+        }
+
+        return cachedPosition.get();
+    }
+
+    public synchronized void syncPositionsFromBroker() {
+        if (!sessionActive || kiteConnect == null) {
+            cachedPosition.set(Optional.empty());
+            return;
+        }
+
         try {
             Map<String, java.util.List<com.zerodhatech.models.Position>> posMap = kiteConnect.getPositions();
-            java.util.List<com.zerodhatech.models.Position> netPositions = posMap.get("net");
+            java.util.List<com.zerodhatech.models.Position> netPositions = (posMap != null) ? posMap.get("net") : null;
+            Optional<Position> detected = Optional.empty();
             if (netPositions != null) {
                 for (com.zerodhatech.models.Position p : netPositions) {
                     if (p.netQuantity > 0 && Constants.PRODUCT_MIS.equalsIgnoreCase(p.product)) {
-                        return Optional.of(new Position(
+                        detected = Optional.of(new Position(
                             p.tradingSymbol,
                             p.netQuantity,
                             p.averagePrice,
@@ -420,14 +443,51 @@ public class ZerodhaLiveGateway implements BrokerGateway {
                             Instant.now(),
                             ExecutionMode.LIVE
                         ));
+                        break;
                     }
                 }
             }
+            cachedPosition.set(detected);
+            lastPositionSyncMs.set(System.currentTimeMillis());
         } catch (Throwable e) {
-            log.error("Failed to query Zerodha live positions: {}", e.getMessage());
-            throw new RuntimeException("Failed to query Zerodha live positions: " + e.getMessage(), e);
+            log.warn("Zerodha live position reconciliation warning: {}", e.getMessage());
         }
-        return Optional.empty();
+    }
+
+    public void triggerAsyncPositionSync() {
+        if (!sessionActive) return;
+        Thread.ofVirtual().name("zerodha-pos-sync").start(this::syncPositionsFromBroker);
+    }
+
+    @Override
+    public TradeOrder getOrderStatus(String orderId) {
+        if (!sessionActive || kiteConnect == null || orderId == null || orderId.isBlank()) {
+            return null;
+        }
+        try {
+            java.util.List<com.zerodhatech.models.Order> history = kiteConnect.getOrderHistory(orderId);
+            if (history != null && !history.isEmpty()) {
+                com.zerodhatech.models.Order latest = history.get(history.size() - 1);
+                double p = latest.price != null ? Double.parseDouble(latest.price) : 0.0;
+                double tp = latest.triggerPrice != null ? Double.parseDouble(latest.triggerPrice) : 0.0;
+                int q = latest.quantity != null ? Integer.parseInt(latest.quantity) : 0;
+                return new TradeOrder(
+                    orderId,
+                    latest.tradingSymbol,
+                    latest.transactionType,
+                    q,
+                    p,
+                    tp,
+                    latest.orderType,
+                    latest.status,
+                    ExecutionMode.LIVE,
+                    Instant.now()
+                );
+            }
+        } catch (Throwable t) {
+            log.warn("Could not query Zerodha order status for {}: {}", orderId, t.getMessage());
+        }
+        return null;
     }
 
     private Margin getCachedMargin() {
@@ -952,6 +1012,28 @@ public class ZerodhaLiveGateway implements BrokerGateway {
             log.warn("Kite Historical API threw KiteException for token {}: {}", token, e.getMessage());
         } catch (Exception e) {
             log.warn("Kite Historical API execution failed for token {}: {}", token, e.getMessage());
+        }
+        return null;
+    }
+
+    public List<com.zerodhatech.models.HistoricalData> getHistoricalData(Long token, Date fromDate, Date toDate, String interval) {
+        if (!sessionActive || kiteConnect == null || token == null || token <= 0) {
+            return null;
+        }
+        try {
+            var hist = kiteConnect.getHistoricalData(fromDate, toDate, String.valueOf(token), interval, false, false);
+            if (hist != null && hist.dataArrayList != null && !hist.dataArrayList.isEmpty()) {
+                return hist.dataArrayList;
+            }
+        } catch (Throwable t) {
+            log.warn("Kite Historical API query failed for token {}: {}", token, t.getMessage());
+        }
+        return null;
+    }
+
+    public Long getInstrumentToken(String symbol) {
+        if (marketDataServiceProvider != null && marketDataServiceProvider.getIfAvailable() != null) {
+            return marketDataServiceProvider.getIfAvailable().getInstrumentToken(symbol);
         }
         return null;
     }

@@ -2,6 +2,7 @@ package com.algotrade.algotradebackend.backtest.service;
 
 import com.algotrade.algotradebackend.broker.zerodha.ZerodhaLiveGateway;
 import com.algotrade.algotradebackend.strategy.momentum_breakout.CandidateMetrics;
+import com.zerodhatech.models.HistoricalData;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.slf4j.Logger;
@@ -192,7 +193,28 @@ public class HistoricalMarketDataService {
             }
         }
 
-        // 2. Fetch real official daily candles from Yahoo Finance NSE feed (SYMBOL.NS)
+        // 2. Priority 1: Zerodha Official Historical Data API (Active Kite Session)
+        if (liveGateway != null && liveGateway.isSessionActive()) {
+            try {
+                Long token = liveGateway.getInstrumentToken(symbol);
+                if (token != null && token > 0) {
+                    Date fromDate = Date.from(LocalDate.now(IST_ZONE).minusYears(1).atStartOfDay(IST_ZONE).toInstant());
+                    Date toDate = Date.from(LocalDate.now(IST_ZONE).plusDays(1).atStartOfDay(IST_ZONE).toInstant());
+                    var kiteData = liveGateway.getHistoricalData(token, fromDate, toDate, "day");
+                    List<DailyCandle> parsed = parseKiteDailyData(kiteData);
+                    if (!parsed.isEmpty()) {
+                        parsed.sort(Comparator.comparing(DailyCandle::date));
+                        saveDailyCandlesToDisk(diskCache, parsed);
+                        log.info("Loaded {} real daily candles for {} from Zerodha Kite Historical API.", parsed.size(), symbol);
+                        return parsed;
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("Zerodha Historical API lookup failed for {}: {}. Attempting Yahoo Finance fallback.", symbol, e.getMessage());
+            }
+        }
+
+        // 3. Priority 2: Yahoo Finance NSE feed (SYMBOL.NS) fallback
         try {
             String url = "https://query1.finance.yahoo.com/v8/finance/chart/" + symbol + ".NS?interval=1d&range=1y";
             HttpRequest request = HttpRequest.newBuilder()
@@ -207,33 +229,57 @@ public class HistoricalMarketDataService {
                 List<DailyCandle> parsed = parseYahooDailyJson(response.body());
                 if (!parsed.isEmpty()) {
                     parsed.sort(Comparator.comparing(DailyCandle::date));
-                    // Persist to disk cache
-                    try {
-                        JSONArray arr = new JSONArray();
-                        for (DailyCandle c : parsed) {
-                            JSONObject o = new JSONObject();
-                            o.put("date", c.date().toString());
-                            o.put("open", c.open());
-                            o.put("high", c.high());
-                            o.put("low", c.low());
-                            o.put("close", c.close());
-                            o.put("volume", c.volume());
-                            arr.put(o);
-                        }
-                        Files.writeString(diskCache, arr.toString());
-                    } catch (Exception io) {
-                        log.warn("Failed saving disk cache for {}: {}", symbol, io.getMessage());
-                    }
-                    log.info("Loaded {} real daily candles for {} from NSE historical feed.", parsed.size(), symbol);
+                    saveDailyCandlesToDisk(diskCache, parsed);
+                    log.info("Loaded {} real daily candles for {} from Yahoo Finance NSE feed.", parsed.size(), symbol);
                     return parsed;
                 }
             }
         } catch (Exception e) {
-            log.warn("Real market feed lookup failed for {}: {}. Using resilient baseline fallback.", symbol, e.getMessage());
+            log.warn("Yahoo Finance daily lookup failed for {}: {}.", symbol, e.getMessage());
         }
 
-        // 3. Fallback: generate realistic baseline series if external feed is unreachable
-        return generateSyntheticFallbackDaily(symbol);
+        // 4. Strict Zero Synthetic Data Policy: Fail closed
+        log.warn("CRITICAL: Failed to acquire verified daily historical data for {}. Failing closed (empty series).", symbol);
+        return Collections.emptyList();
+    }
+
+    private List<DailyCandle> parseKiteDailyData(List<HistoricalData> dataList) {
+        List<DailyCandle> list = new ArrayList<>();
+        if (dataList == null) return list;
+        for (var c : dataList) {
+            if (c == null || c.timeStamp == null || c.timeStamp.length() < 10) continue;
+            try {
+                LocalDate d = LocalDate.parse(c.timeStamp.substring(0, 10));
+                double open = Math.round(c.open * 100.0) / 100.0;
+                double high = Math.round(c.high * 100.0) / 100.0;
+                double low = Math.round(c.low * 100.0) / 100.0;
+                double close = Math.round(c.close * 100.0) / 100.0;
+                long volume = c.volume;
+                list.add(new DailyCandle(d, open, high, low, close, volume));
+            } catch (Exception e) {
+                log.debug("Skipping unparseable Kite daily candle timestamp: {}", c.timeStamp);
+            }
+        }
+        return list;
+    }
+
+    private void saveDailyCandlesToDisk(Path diskCache, List<DailyCandle> candles) {
+        try {
+            JSONArray arr = new JSONArray();
+            for (DailyCandle c : candles) {
+                JSONObject o = new JSONObject();
+                o.put("date", c.date().toString());
+                o.put("open", c.open());
+                o.put("high", c.high());
+                o.put("low", c.low());
+                o.put("close", c.close());
+                o.put("volume", c.volume());
+                arr.put(o);
+            }
+            Files.writeString(diskCache, arr.toString());
+        } catch (Exception io) {
+            log.warn("Failed saving disk cache to {}: {}", diskCache, io.getMessage());
+        }
     }
 
     private List<DailyCandle> parseYahooDailyJson(String json) {
@@ -274,30 +320,6 @@ public class HistoricalMarketDataService {
             }
         } catch (Exception e) {
             log.error("Error parsing Yahoo Finance daily JSON: {}", e.getMessage());
-        }
-        return list;
-    }
-
-    private List<DailyCandle> generateSyntheticFallbackDaily(String symbol) {
-        List<DailyCandle> list = new ArrayList<>();
-        double base = BASE_PRICES.getOrDefault(symbol, 1000.0);
-        LocalDate today = LocalDate.now();
-
-        double curr = base;
-        for (int i = 250; i >= 0; i--) {
-            LocalDate d = today.minusDays(i);
-            long seed = symbol.hashCode() * 31L + d.toEpochDay() * 101L;
-            Random rng = new Random(seed);
-
-            double change = (rng.nextDouble() - 0.49) * 0.03;
-            double open = Math.round(curr * 100.0) / 100.0;
-            curr = Math.max(10.0, curr * (1.0 + change));
-            double close = Math.round(curr * 100.0) / 100.0;
-            double high = Math.round(Math.max(open, close) * (1.0 + rng.nextDouble() * 0.012) * 100.0) / 100.0;
-            double low = Math.round(Math.min(open, close) * (1.0 - rng.nextDouble() * 0.012) * 100.0) / 100.0;
-            long vol = 1_000_000 + rng.nextInt(3_000_000);
-
-            list.add(new DailyCandle(d, open, high, low, close, vol));
         }
         return list;
     }
@@ -394,9 +416,8 @@ public class HistoricalMarketDataService {
     public BaselineReference getBaselineReference(String symbol, LocalDate date) {
         List<DailyCandle> candles = getDailyCandles(symbol);
         double tickSize = 0.05;
-        if (candles.isEmpty()) {
-            double basePrice = BASE_PRICES.getOrDefault(symbol, 100.0);
-            return new BaselineReference(symbol, date, basePrice, basePrice * 1.01, 2_000_000.0, 1.5, tickSize);
+        if (candles == null || candles.isEmpty()) {
+            return null;
         }
 
         int targetIdx = -1;
@@ -417,13 +438,16 @@ public class HistoricalMarketDataService {
         }
 
         if (targetIdx <= 0) {
-            DailyCandle c = candles.get(0);
-            return new BaselineReference(symbol, date, c.close(), c.high(), c.volume(), 1.5, tickSize);
+            return null; // Strict Zero Synthetic Data: Cannot establish PDH / PrevClose without prior day
         }
 
         DailyCandle prevCandle = candles.get(targetIdx - 1);
         double prevClose = prevCandle.close();
         double pdh = prevCandle.high();
+
+        if (prevClose <= 0 || pdh <= 0) {
+            return null;
+        }
 
         int advLookback = Math.min(20, targetIdx);
         long volSum = 0;
@@ -446,6 +470,10 @@ public class HistoricalMarketDataService {
         double atr = atrLookback > 0 ? trSum / atrLookback : (prevCandle.high() - prevCandle.low());
         double atrPct = prevClose > 0 ? Math.round((atr / prevClose) * 100.0 * 100.0) / 100.0 : 1.5;
 
+        if (avgDailyVol <= 0 || atrPct <= 0) {
+            return null;
+        }
+
         return new BaselineReference(symbol, date, prevClose, pdh, avgDailyVol, atrPct, tickSize);
     }
 
@@ -455,13 +483,14 @@ public class HistoricalMarketDataService {
         if (bars != null && !bars.isEmpty()) {
             return bars;
         }
-        return generateSynthetic5mBarsFromDaily(symbol, date);
+        return Collections.emptyList();
     }
 
     private Map<LocalDate, List<IntradayBar>> loadOrFetchIntradayBars(String symbol) {
         Path diskCache = cacheDir.resolve(symbol + "_5m.json");
         Map<LocalDate, List<IntradayBar>> result = new HashMap<>();
 
+        // 1. Check local persistent disk cache
         if (Files.exists(diskCache)) {
             try {
                 String content = Files.readString(diskCache);
@@ -485,6 +514,28 @@ public class HistoricalMarketDataService {
             }
         }
 
+        // 2. Priority 1: Zerodha Official Historical Data API (Active Kite Session)
+        if (liveGateway != null && liveGateway.isSessionActive()) {
+            try {
+                Long token = liveGateway.getInstrumentToken(symbol);
+                if (token != null && token > 0) {
+                    Date fromDate = Date.from(LocalDate.now(IST_ZONE).minusDays(60).atStartOfDay(IST_ZONE).toInstant());
+                    Date toDate = Date.from(LocalDate.now(IST_ZONE).plusDays(1).atStartOfDay(IST_ZONE).toInstant());
+                    var kiteData = liveGateway.getHistoricalData(token, fromDate, toDate, "5minute");
+                    Map<LocalDate, List<IntradayBar>> parsed = parseKiteIntradayData(kiteData);
+                    if (!parsed.isEmpty()) {
+                        saveIntradayBarsToDisk(diskCache, parsed);
+                        log.info("Loaded {} real 5m bars across {} days for {} from Zerodha Kite Historical API.",
+                            parsed.values().stream().mapToInt(List::size).sum(), parsed.size(), symbol);
+                        return parsed;
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("Zerodha 5m Historical API lookup failed for {}: {}. Attempting Yahoo Finance fallback.", symbol, e.getMessage());
+            }
+        }
+
+        // 3. Priority 2: Yahoo Finance 5m feed fallback
         try {
             String url = "https://query1.finance.yahoo.com/v8/finance/chart/" + symbol + ".NS?interval=5m&range=60d";
             HttpRequest request = HttpRequest.newBuilder()
@@ -496,167 +547,121 @@ public class HistoricalMarketDataService {
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() == 200) {
-                JSONObject root = new JSONObject(response.body());
-                JSONObject chart = root.getJSONObject("chart");
-                JSONArray resArr = chart.optJSONArray("result");
-                if (resArr != null && resArr.length() > 0) {
-                    JSONObject resObj = resArr.getJSONObject(0);
-                    JSONArray timestamps = resObj.optJSONArray("timestamp");
-                    JSONObject indicators = resObj.getJSONObject("indicators");
-                    JSONArray quoteArr = indicators.optJSONArray("quote");
-                    if (timestamps != null && quoteArr != null && quoteArr.length() > 0) {
-                        JSONObject quote = quoteArr.getJSONObject(0);
-                        JSONArray opens = quote.optJSONArray("open");
-                        JSONArray highs = quote.optJSONArray("high");
-                        JSONArray lows = quote.optJSONArray("low");
-                        JSONArray closes = quote.optJSONArray("close");
-                        JSONArray volumes = quote.optJSONArray("volume");
-
-                        JSONArray saveArr = new JSONArray();
-
-                        for (int i = 0; i < timestamps.length(); i++) {
-                            if (opens.isNull(i) || highs.isNull(i) || lows.isNull(i) || closes.isNull(i)) continue;
-                            long ts = timestamps.getLong(i);
-                            java.time.LocalDateTime dt = java.time.LocalDateTime.ofInstant(Instant.ofEpochSecond(ts), IST_ZONE);
-                            LocalDate d = dt.toLocalDate();
-                            java.time.LocalTime t = dt.toLocalTime();
-
-                            if (t.isBefore(java.time.LocalTime.of(9, 15)) || t.isAfter(java.time.LocalTime.of(15, 30))) {
-                                continue;
-                            }
-
-                            String timeStr = String.format("%02d:%02d", t.getHour(), t.getMinute());
-                            double op = Math.round(opens.getDouble(i) * 100.0) / 100.0;
-                            double hi = Math.round(highs.getDouble(i) * 100.0) / 100.0;
-                            double lo = Math.round(lows.getDouble(i) * 100.0) / 100.0;
-                            double cl = Math.round(closes.getDouble(i) * 100.0) / 100.0;
-                            long vo = (volumes != null && !volumes.isNull(i)) ? volumes.getLong(i) : 0L;
-
-                            result.computeIfAbsent(d, k -> new ArrayList<>())
-                                .add(new IntradayBar(timeStr, op, hi, lo, cl, vo));
-
-                            JSONObject o = new JSONObject();
-                            o.put("date", d.toString());
-                            o.put("time", timeStr);
-                            o.put("open", op);
-                            o.put("high", hi);
-                            o.put("low", lo);
-                            o.put("close", cl);
-                            o.put("volume", vo);
-                            saveArr.put(o);
-                        }
-
-                        result.values().forEach(list -> list.sort(Comparator.comparing(IntradayBar::time)));
-                        if (saveArr.length() > 0) {
-                            try {
-                                Files.writeString(diskCache, saveArr.toString());
-                            } catch (Exception ignored) {}
-                            log.info("Loaded {} real 5m bars across {} days for {} from NSE historical feed.", saveArr.length(), result.size(), symbol);
-                            return result;
-                        }
-                    }
+                Map<LocalDate, List<IntradayBar>> parsed = parseYahooIntradayJson(response.body());
+                if (!parsed.isEmpty()) {
+                    saveIntradayBarsToDisk(diskCache, parsed);
+                    log.info("Loaded {} real 5m bars across {} days for {} from Yahoo Finance feed.",
+                        parsed.values().stream().mapToInt(List::size).sum(), parsed.size(), symbol);
+                    return parsed;
                 }
             }
         } catch (Exception e) {
-            log.warn("5m market feed lookup failed for {}: {}. Will use daily reconstruction fallback.", symbol, e.getMessage());
+            log.warn("Yahoo Finance 5m lookup failed for {}: {}.", symbol, e.getMessage());
         }
 
+        // 4. Strict Zero Synthetic Data Policy: Fail closed
+        log.warn("CRITICAL: Failed to acquire verified 5m intraday data for {}. Failing closed (empty series).", symbol);
+        return Collections.emptyMap();
+    }
+
+    private Map<LocalDate, List<IntradayBar>> parseKiteIntradayData(List<HistoricalData> dataList) {
+        Map<LocalDate, List<IntradayBar>> map = new HashMap<>();
+        if (dataList == null) return map;
+        for (var c : dataList) {
+            if (c == null || c.timeStamp == null || c.timeStamp.length() < 16) continue;
+            try {
+                LocalDate d = LocalDate.parse(c.timeStamp.substring(0, 10));
+                String timeStr = c.timeStamp.substring(11, 16);
+                java.time.LocalTime t = java.time.LocalTime.parse(timeStr);
+                if (t.isBefore(java.time.LocalTime.of(9, 15)) || t.isAfter(java.time.LocalTime.of(15, 30))) {
+                    continue;
+                }
+                double op = Math.round(c.open * 100.0) / 100.0;
+                double hi = Math.round(c.high * 100.0) / 100.0;
+                double lo = Math.round(c.low * 100.0) / 100.0;
+                double cl = Math.round(c.close * 100.0) / 100.0;
+                long vo = c.volume;
+                map.computeIfAbsent(d, k -> new ArrayList<>())
+                    .add(new IntradayBar(timeStr, op, hi, lo, cl, vo));
+            } catch (Exception e) {
+                log.debug("Skipping unparseable Kite intraday candle: {}", c.timeStamp);
+            }
+        }
+        map.values().forEach(list -> list.sort(Comparator.comparing(IntradayBar::time)));
+        return map;
+    }
+
+    private Map<LocalDate, List<IntradayBar>> parseYahooIntradayJson(String json) {
+        Map<LocalDate, List<IntradayBar>> result = new HashMap<>();
+        try {
+            JSONObject root = new JSONObject(json);
+            JSONObject chart = root.getJSONObject("chart");
+            JSONArray resArr = chart.optJSONArray("result");
+            if (resArr == null || resArr.length() == 0) return result;
+
+            JSONObject resObj = resArr.getJSONObject(0);
+            JSONArray timestamps = resObj.optJSONArray("timestamp");
+            JSONObject indicators = resObj.getJSONObject("indicators");
+            JSONArray quoteArr = indicators.optJSONArray("quote");
+            if (timestamps == null || quoteArr == null || quoteArr.length() == 0) return result;
+
+            JSONObject quote = quoteArr.getJSONObject(0);
+            JSONArray opens = quote.optJSONArray("open");
+            JSONArray highs = quote.optJSONArray("high");
+            JSONArray lows = quote.optJSONArray("low");
+            JSONArray closes = quote.optJSONArray("close");
+            JSONArray volumes = quote.optJSONArray("volume");
+
+            for (int i = 0; i < timestamps.length(); i++) {
+                if (opens.isNull(i) || closes.isNull(i)) continue;
+                long ts = timestamps.getLong(i);
+                java.time.LocalDateTime dt = java.time.LocalDateTime.ofInstant(Instant.ofEpochSecond(ts), IST_ZONE);
+                LocalDate d = dt.toLocalDate();
+                java.time.LocalTime t = dt.toLocalTime();
+
+                if (t.isBefore(java.time.LocalTime.of(9, 15)) || t.isAfter(java.time.LocalTime.of(15, 30))) {
+                    continue;
+                }
+
+                String timeStr = String.format("%02d:%02d", t.getHour(), t.getMinute());
+                double op = Math.round(opens.getDouble(i) * 100.0) / 100.0;
+                double hi = (highs != null && !highs.isNull(i)) ? Math.round(highs.getDouble(i) * 100.0) / 100.0 : op;
+                double lo = (lows != null && !lows.isNull(i)) ? Math.round(lows.getDouble(i) * 100.0) / 100.0 : op;
+                double cl = Math.round(closes.getDouble(i) * 100.0) / 100.0;
+                long vo = (volumes != null && !volumes.isNull(i)) ? volumes.getLong(i) : 0L;
+
+                result.computeIfAbsent(d, k -> new ArrayList<>())
+                    .add(new IntradayBar(timeStr, op, hi, lo, cl, vo));
+            }
+            result.values().forEach(list -> list.sort(Comparator.comparing(IntradayBar::time)));
+        } catch (Exception e) {
+            log.error("Error parsing Yahoo Finance 5m JSON: {}", e.getMessage());
+        }
         return result;
     }
 
-    private List<IntradayBar> generateSynthetic5mBarsFromDaily(String symbol, LocalDate date) {
-        List<IntradayBar> bars = new ArrayList<>();
-        List<DailyCandle> candles = getDailyCandles(symbol);
-        DailyCandle dayCandle = candles.stream()
-            .filter(c -> c.date().equals(date))
-            .findFirst()
-            .orElse(null);
-
-        double open = (dayCandle != null) ? dayCandle.open() : BASE_PRICES.getOrDefault(symbol, 100.0);
-        double high = (dayCandle != null) ? dayCandle.high() : open * 1.015;
-        double low = (dayCandle != null) ? dayCandle.low() : open * 0.985;
-        double close = (dayCandle != null) ? dayCandle.close() : open;
-        long totalVol = (dayCandle != null) ? dayCandle.volume() : 1_500_000;
-
-        long seed = symbol.hashCode() * 37L + date.toEpochDay() * 83L;
-        Random rng = new Random(seed);
-
-        double current = open;
-        int totalSlots = 75; // 09:15 to 15:30 in 5m increments
-        long perBarVol = Math.max(100, totalVol / totalSlots);
-
-        for (int i = 0; i < totalSlots; i++) {
-            int totalMinutes = 9 * 60 + 15 + (i * 5);
-            int hour = totalMinutes / 60;
-            int minute = totalMinutes % 60;
-            String timeStr = String.format("%02d:%02d", hour, minute);
-
-            double progress = (double) (i + 1) / totalSlots;
-            double path = open + (close - open) * progress;
-            double noise = rng.nextGaussian() * (current * 0.001);
-            double nextClose = Math.max(low, Math.min(high, path + noise));
-            double barOpen = current;
-            double barHigh = Math.min(high, Math.max(barOpen, nextClose) * (1.0 + rng.nextDouble() * 0.0005));
-            double barLow = Math.max(low, Math.min(barOpen, nextClose) * (1.0 - rng.nextDouble() * 0.0005));
-            double barClose = Math.round(nextClose * 100.0) / 100.0;
-
-            bars.add(new IntradayBar(timeStr, Math.round(barOpen * 100.0) / 100.0, Math.round(barHigh * 100.0) / 100.0, Math.round(barLow * 100.0) / 100.0, barClose, perBarVol));
-            current = barClose;
+    private void saveIntradayBarsToDisk(Path diskCache, Map<LocalDate, List<IntradayBar>> map) {
+        try {
+            JSONArray saveArr = new JSONArray();
+            for (var entry : map.entrySet()) {
+                LocalDate d = entry.getKey();
+                for (IntradayBar b : entry.getValue()) {
+                    JSONObject o = new JSONObject();
+                    o.put("date", d.toString());
+                    o.put("time", b.time());
+                    o.put("open", b.open());
+                    o.put("high", b.high());
+                    o.put("low", b.low());
+                    o.put("close", b.close());
+                    o.put("volume", b.volume());
+                    saveArr.put(o);
+                }
+            }
+            if (saveArr.length() > 0) {
+                Files.writeString(diskCache, saveArr.toString());
+            }
+        } catch (Exception e) {
+            log.warn("Failed saving 5m disk cache to {}: {}", diskCache, e.getMessage());
         }
-        return bars;
-    }
-
-    /**
-     * Generates a realistic minute-by-minute trajectory (09:30 to 15:05) for an entered trade.
-     * Strictly anchored to the actual historical High, Low, and Close of that exact trading session.
-     */
-    public List<IntradayBar> getIntradayTrajectory(LocalDate date, String symbol, double entryPrice, double initialSl) {
-        List<IntradayBar> trajectory = new ArrayList<>();
-        List<DailyCandle> candles = getDailyCandles(symbol);
-
-        DailyCandle dayCandle = candles.stream()
-            .filter(c -> c.date().equals(date))
-            .findFirst()
-            .orElse(null);
-
-        double targetHigh = (dayCandle != null) ? Math.max(dayCandle.high(), entryPrice) : entryPrice * 1.015;
-        double targetLow = (dayCandle != null) ? Math.min(dayCandle.low(), initialSl) : initialSl * 0.995;
-        double targetClose = (dayCandle != null) ? dayCandle.close() : entryPrice;
-
-        long seed = symbol.hashCode() * 73L + date.toEpochDay() * 59L;
-        Random rng = new Random(seed);
-
-        double currentPrice = entryPrice;
-        int totalMinutes = 335; // 09:30 to 15:05 is 335 minutes
-
-        for (int m = 1; m <= totalMinutes; m++) {
-            int hour = 9 + (30 + m) / 60;
-            int minute = (30 + m) % 60;
-            String timeStr = String.format("%02d:%02d", hour, minute);
-
-            double progress = (double) m / totalMinutes;
-            // Guide price path toward real historical close, keeping strictly within real session boundaries
-            double expectedPath = entryPrice + (targetClose - entryPrice) * progress;
-            double drift = (expectedPath - currentPrice) * 0.08;
-            double noise = rng.nextGaussian() * (currentPrice * 0.0006);
-
-            double nextPrice = Math.max(targetLow, Math.min(targetHigh, currentPrice + drift + noise));
-            double barOpen = currentPrice;
-            double barHigh = Math.min(targetHigh, Math.max(barOpen, nextPrice) * (1.0 + rng.nextDouble() * 0.0003));
-            double barLow = Math.max(targetLow, Math.min(barOpen, nextPrice) * (1.0 - rng.nextDouble() * 0.0003));
-            double barClose = Math.round(nextPrice * 100.0) / 100.0;
-
-            trajectory.add(new IntradayBar(
-                timeStr,
-                Math.round(barOpen * 100.0) / 100.0,
-                Math.round(barHigh * 100.0) / 100.0,
-                Math.round(barLow * 100.0) / 100.0,
-                barClose
-            ));
-
-            currentPrice = nextPrice;
-        }
-
-        return trajectory;
     }
 }

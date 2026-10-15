@@ -157,10 +157,10 @@ public class ContinuousIntradayScannerService {
             if (existingMetrics == null || existingMetrics.getPreviousDayHigh() <= 0 || existingMetrics.getPrevClose() <= 0) {
                 double prevClose = (q.ohlc.close > 0) ? q.ohlc.close : 0.0;
                 double pdh = 0.0;
-                double avgVol = 2_000_000.0;
-                double atrPct = 2.0;
+                double avgVol = 0.0;
+                double atrPct = 0.0;
 
-                if (historicalMarketDataService != null && historicalMarketDataService.hasCachedDailyCandles(sym)) {
+                if (historicalMarketDataService != null) {
                     var ref = baselineCache.computeIfAbsent(sym, s -> historicalMarketDataService.getBaselineReference(s, today));
                     if (ref != null) {
                         if (prevClose <= 0) prevClose = ref.prevClose();
@@ -169,10 +169,9 @@ public class ContinuousIntradayScannerService {
                         atrPct = ref.atrPct();
                     }
                 }
-                if (now.isBefore(MarketCalendarService.MARKET_OPEN_TIME) && q.ohlc.high > 0) {
-                    pdh = q.ohlc.high;
-                } else if (pdh <= 0 || (prevClose > 0 && pdh < prevClose)) {
-                    pdh = prevClose > 0 ? Math.round(prevClose * 1.005 * 100.0) / 100.0 : 0.0;
+
+                if (pdh <= 0 || prevClose <= 0 || avgVol <= 0) {
+                    continue; // Strict Zero Synthetic Data: Skip candidates with unverified baseline
                 }
 
                 double openPrice = (q.ohlc.open > 0) ? q.ohlc.open : 0.0;

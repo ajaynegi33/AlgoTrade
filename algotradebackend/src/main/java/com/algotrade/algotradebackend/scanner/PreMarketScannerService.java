@@ -406,7 +406,7 @@ public class PreMarketScannerService {
 
             double basePrice = 0.0;
             double cachedPdh = 0.0;
-            if (historicalMarketDataService != null && historicalMarketDataService.hasCachedDailyCandles(sym)) {
+            if (historicalMarketDataService != null) {
                 var ref = historicalMarketDataService.getBaselineReference(sym, LocalDate.now(IST_ZONE));
                 if (ref != null && ref.prevClose() > 0) {
                     basePrice = ref.prevClose();

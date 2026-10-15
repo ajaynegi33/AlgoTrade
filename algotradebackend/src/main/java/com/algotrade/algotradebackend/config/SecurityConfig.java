@@ -11,6 +11,8 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
+import com.algotrade.algotradebackend.security.JwtAuthenticationFilter;
+
 import java.util.Arrays;
 import java.util.List;
 
@@ -27,15 +29,28 @@ public class SecurityConfig {
     @Value("${algotrade.cors.allowed-origins:http://localhost:3000,http://127.0.0.1:3000}")
     private String allowedOrigins;
 
+    private final JwtAuthenticationFilter jwtAuthenticationFilter;
+
+    public SecurityConfig(JwtAuthenticationFilter jwtAuthenticationFilter) {
+        this.jwtAuthenticationFilter = jwtAuthenticationFilter;
+    }
+
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         http
             .csrf(AbstractHttpConfigurer::disable)
             .cors(cors -> cors.configurationSource(corsConfigurationSource()))
+            .sessionManagement(sm -> sm.sessionCreationPolicy(org.springframework.security.config.http.SessionCreationPolicy.STATELESS))
+            .exceptionHandling(ex -> ex.authenticationEntryPoint((request, response, authException) -> {
+                response.setStatus(org.springframework.http.HttpStatus.UNAUTHORIZED.value());
+                response.setContentType(org.springframework.http.MediaType.APPLICATION_JSON_VALUE);
+                response.getWriter().write("{\"error\":\"UNAUTHORIZED\",\"message\":\"Authentication required or token expired\"}");
+            }))
             .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/api/**", "/ws/**", "/actuator/**").permitAll()
-                .anyRequest().permitAll()
-            );
+                .requestMatchers("/api/auth/**", "/actuator/health", "/error", "/ws/**").permitAll()
+                .anyRequest().authenticated()
+            )
+            .addFilterBefore(jwtAuthenticationFilter, org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
     }

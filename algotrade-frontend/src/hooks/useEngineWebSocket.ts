@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { OverviewData, ScoredCandidate, EngineActivityEvent, MarketDepthLevel } from "@/components/types";
+import { TOKEN_STORAGE_KEY } from "@/lib/apiClient";
 
 export type WebSocketConnectionStatus =
   | "connected"
@@ -80,7 +81,7 @@ export function getCurrentMarketPhase(): string {
   return "MARKET_CLOSED";
 }
 
-export function useEngineWebSocket(): UseEngineWebSocketReturn {
+export function useEngineWebSocket(token?: string | null): UseEngineWebSocketReturn {
   const [overview, setOverview] = useState<OverviewData | null>(null);
   const [leaderboard, setLeaderboard] = useState<ScoredCandidate[]>([]);
   const [recentDecisions, setRecentDecisions] = useState<EngineActivityEvent[]>([]);
@@ -108,14 +109,17 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
   // Helper to resolve ws:// or wss:// URL from backend environment variable
   const getWebSocketUrl = useCallback((): string => {
     const rawUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8080";
+    const effectiveToken = token || (typeof window !== "undefined" ? localStorage.getItem(TOKEN_STORAGE_KEY) : null);
     try {
       const parsed = new URL(rawUrl);
       const protocol = parsed.protocol === "https:" ? "wss:" : "ws:";
-      return `${protocol}//${parsed.host}/ws/live`;
+      const baseWsUrl = `${protocol}//${parsed.host}/ws/live`;
+      return effectiveToken ? `${baseWsUrl}?token=${encodeURIComponent(effectiveToken)}` : baseWsUrl;
     } catch {
-      return "ws://localhost:8080/ws/live";
+      const baseWsUrl = "ws://localhost:8080/ws/live";
+      return effectiveToken ? `${baseWsUrl}?token=${encodeURIComponent(effectiveToken)}` : baseWsUrl;
     }
-  }, []);
+  }, [token]);
 
   const connect = useCallback(() => {
     // Avoid double instantiation
@@ -327,6 +331,15 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
           pingIntervalRef.current = null;
         }
 
+        // If unauthorized or policy violation (e.g. invalid/expired JWT), halt reconnect loop
+        if (event.code === 1008) {
+          setConnectionStatus("error");
+          if (typeof window !== "undefined") {
+            window.dispatchEvent(new CustomEvent("algotrade-auth-expired"));
+          }
+          return;
+        }
+
         // If closed cleanly with code 1000 upon component unmount, do not attempt reconnect
         if (isIntentionalCloseRef.current || event.code === 1000) {
           setConnectionStatus("disconnected");
@@ -374,7 +387,7 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
     }
   }, []);
 
-  // Mount & unmount lifecycle
+  // Mount & unmount lifecycle, plus token update
   useEffect(() => {
     connect();
 
@@ -389,11 +402,11 @@ export function useEngineWebSocket(): UseEngineWebSocketReturn {
         reconnectTimeoutRef.current = null;
       }
       if (socketRef.current) {
-        socketRef.current.close(1000, "Component unmounted");
+        socketRef.current.close(1000, "Component unmounted or token changed");
         socketRef.current = null;
       }
     };
-  }, [connect]);
+  }, [connect, token]);
 
   return {
     overview,

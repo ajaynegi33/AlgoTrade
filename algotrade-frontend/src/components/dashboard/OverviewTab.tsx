@@ -4,6 +4,7 @@ import { useState } from "react";
 import { OverviewData } from "../types";
 import { TickUpdate } from "@/hooks/useEngineWebSocket";
 import { SkeletonOverview } from "../common/Skeleton";
+import { apiFetch } from "@/lib/apiClient";
 import DecisionFeedTerminal from "./DecisionFeedTerminal";
 
 interface OverviewTabProps {
@@ -38,9 +39,8 @@ export default function OverviewTab({ overview, backendUrl = "http://localhost:8
     setSellError(null);
 
     try {
-      const res = await fetch(`${backendUrl}/api/dashboard/manual-exit`, {
+      const res = await apiFetch("/api/dashboard/manual-exit", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           symbol: overview.activePosition.symbol,
           reason: "MANUAL_OPERATOR_SELL",
@@ -54,6 +54,7 @@ export default function OverviewTab({ overview, backendUrl = "http://localhost:8
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : "Failed to exit position";
       setSellError(errorMessage);
+    } finally {
       setIsSelling(false);
     }
   };

@@ -89,7 +89,7 @@ public class StrategyManager {
                 long now = System.currentTimeMillis();
                 if (now - lastOverviewBroadcastMs.get() >= 500) {
                     lastOverviewBroadcastMs.set(now);
-                    broadcast.broadcastOverview();
+                    Thread.ofVirtual().name("overview-broadcast").start(broadcast::broadcastOverview);
                 }
             }
         }

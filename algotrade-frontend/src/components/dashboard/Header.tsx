@@ -12,6 +12,7 @@ interface HeaderProps {
   onEmergencyExit: () => void;
   onAutoLogin: () => Promise<void>;
   autoLoggingIn: boolean;
+  onLogout?: () => void;
 }
 
 export default function Header({
@@ -24,6 +25,7 @@ export default function Header({
   onEmergencyExit,
   onAutoLogin,
   autoLoggingIn,
+  onLogout,
 }: HeaderProps) {
   return (
     <header className="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-40 px-4 py-3 sm:px-6">
@@ -153,6 +155,20 @@ export default function Header({
               className="bg-rose-600 hover:bg-rose-700 text-white font-bold px-3 py-1.5 rounded-lg text-xs tracking-wider uppercase transition shadow-md shadow-rose-900/50 cursor-pointer"
             >
               Exit Now
+            </button>
+          )}
+
+          {/* Operator Terminal Lock */}
+          {onLogout && (
+            <button
+              onClick={onLogout}
+              title="Lock Terminal & Revoke Session"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-700/80 bg-slate-800/60 hover:bg-rose-500/10 hover:border-rose-500/30 text-slate-400 hover:text-rose-400 text-xs font-mono transition cursor-pointer"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+              </svg>
+              <span className="hidden md:inline">Lock</span>
             </button>
           )}
         </div>

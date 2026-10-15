@@ -15,7 +15,6 @@ import java.util.Map;
  */
 @RestController
 @RequestMapping("/api/scanner")
-@CrossOrigin(origins = "*")
 public class PreMarketScannerController {
 
     private final PreMarketScannerService scannerService;

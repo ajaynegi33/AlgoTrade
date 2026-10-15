@@ -8,6 +8,9 @@ import {
   ZerodhaSessionData,
 } from "@/components/types";
 import { useEngineWebSocket } from "@/hooks/useEngineWebSocket";
+import { useAuth } from "@/context/AuthContext";
+import { apiFetch } from "@/lib/apiClient";
+import LoginOverlay from "@/components/auth/LoginOverlay";
 import Header from "@/components/dashboard/Header";
 import OverviewTab from "@/components/dashboard/OverviewTab";
 import LeaderboardTab from "@/components/dashboard/LeaderboardTab";
@@ -19,6 +22,7 @@ import PreMarketScannerTab from "@/components/dashboard/PreMarketScannerTab";
 
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<"overview" | "leaderboard" | "scanner" | "analytics" | "explorer" | "decisions" | "backtest">("overview");
+  const { isAuthenticated, isLoading, accessToken, logout } = useAuth();
   
   // Real-time bidirectional WebSocket stream (0ms lag, zero HTTP polling)
   const {
@@ -32,7 +36,7 @@ export default function Dashboard() {
     latestTicks,
     subscribeSymbol,
     marketPhase,
-  } = useEngineWebSocket();
+  } = useEngineWebSocket(accessToken);
 
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [switchingMode, setSwitchingMode] = useState(false);
@@ -57,7 +61,7 @@ export default function Dashboard() {
   // Historical analytics fetcher (only called on mount or when switching to analytics tab)
   const fetchAnalytics = async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/dashboard/analytics`);
+      const res = await apiFetch("/api/dashboard/analytics");
       if (res.ok) {
         const data = await res.json();
         setAnalytics(data);
@@ -70,7 +74,7 @@ export default function Dashboard() {
   // Zerodha session details fetcher
   const fetchZerodhaStatus = async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/dashboard/zerodha/status`);
+      const res = await apiFetch("/api/dashboard/zerodha/status");
       if (res.ok) {
         const data: ZerodhaSessionData = await res.json();
         setZerodhaSession(data);
@@ -83,7 +87,7 @@ export default function Dashboard() {
   // Zerodha login URL fetcher
   const fetchLoginUrl = async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/dashboard/zerodha/login-url`);
+      const res = await apiFetch("/api/dashboard/zerodha/login-url");
       if (res.ok) {
         const data = await res.json();
         if (data.loginUrl) {
@@ -98,7 +102,7 @@ export default function Dashboard() {
   // Popular stocks list fetcher
   const fetchPopularStocks = async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/dashboard/popular-stocks`);
+      const res = await apiFetch("/api/dashboard/popular-stocks");
       if (res.ok) {
         const list = await res.json();
         if (Array.isArray(list) && list.length > 0) {
@@ -115,9 +119,8 @@ export default function Dashboard() {
     setAutoLoggingIn(true);
     setSessionAlert(null);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/dashboard/zerodha/auto-login`, {
+      const res = await apiFetch("/api/dashboard/zerodha/auto-login", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           password: password && password.trim() ? password.trim() : undefined,
           totpSecret: totpSecret && totpSecret.trim() ? totpSecret.trim() : undefined,
@@ -153,7 +156,7 @@ export default function Dashboard() {
     setActivatingToken(true);
     setSessionAlert(null);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/dashboard/zerodha/session?requestToken=${encodeURIComponent(token.trim())}`, {
+      const res = await apiFetch(`/api/dashboard/zerodha/session?requestToken=${encodeURIComponent(token.trim())}`, {
         method: "POST"
       });
       const data = await res.json();
@@ -220,7 +223,7 @@ export default function Dashboard() {
   // Fallback fetch if leaderboard is empty when user navigates to the leaderboard tab
   useEffect(() => {
     if (activeTab === "leaderboard" && leaderboard.length === 0) {
-      fetch(`${BACKEND_URL}/api/dashboard/leaderboard`)
+      apiFetch("/api/dashboard/leaderboard")
         .then((res) => (res.ok ? res.json() : []))
         .then((data: any) => {
           if (Array.isArray(data) && data.length > 0) {
@@ -232,7 +235,7 @@ export default function Dashboard() {
         })
         .catch(() => {});
     }
-  }, [activeTab, leaderboard.length, BACKEND_URL, setLeaderboard, subscribeSymbol]);
+  }, [activeTab, leaderboard.length, setLeaderboard, subscribeSymbol]);
 
   // Automatically subscribe to active position symbol over WebSocket as soon as a trade is entered
   useEffect(() => {
@@ -246,7 +249,7 @@ export default function Dashboard() {
     if (!overview?.activePosition) return;
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`${BACKEND_URL}/api/dashboard/overview`);
+        const res = await apiFetch("/api/dashboard/overview");
         if (res.ok) {
           const fresh = await res.json();
           setOverview((prev) => {
@@ -257,14 +260,14 @@ export default function Dashboard() {
       } catch {}
     }, 3000);
     return () => clearInterval(interval);
-  }, [overview?.activePosition?.symbol, BACKEND_URL, setOverview]);
+  }, [overview?.activePosition?.symbol, setOverview]);
 
   const handleToggleMode = async () => {
     if (!overview) return;
     const nextMode = overview.mode === "PAPER" ? "LIVE" : "PAPER";
     setSwitchingMode(true);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/dashboard/mode?mode=${nextMode}`, {
+      const res = await apiFetch(`/api/dashboard/mode?mode=${nextMode}`, {
         method: "POST",
       });
       if (!res.ok) {
@@ -284,11 +287,24 @@ export default function Dashboard() {
       return;
     }
     try {
-      await fetch(`${BACKEND_URL}/api/dashboard/emergency-exit`, { method: "POST" });
+      await apiFetch("/api/dashboard/emergency-exit", { method: "POST" });
     } catch (err) {
       alert("Failed to send emergency exit signal: " + err);
     }
   };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center gap-3">
+        <div className="w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+        <p className="text-xs font-mono text-slate-400">Verifying Operator Session...</p>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <LoginOverlay />;
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-emerald-500 selection:text-black">
@@ -303,6 +319,7 @@ export default function Dashboard() {
         onEmergencyExit={handleEmergencyExit}
         onAutoLogin={() => handleAutoLogin()}
         autoLoggingIn={autoLoggingIn}
+        onLogout={logout}
       />
 
       {/* Main Container */}
