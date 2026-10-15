@@ -357,7 +357,6 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         double pdh = metrics.getPreviousDayHigh();
         if (pdh <= 0 || ltp < pdh) {
             metrics.resetBreakoutTicks();
-            lastRadarEvaluationTimeMs.remove(symbol);
             return;
         }
 
@@ -368,17 +367,13 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         }
 
         // Cooldown & Noise Suppression:
-        // - Tick 2 is the initial breakout event: triggers evaluation cycle immediately and logs at INFO once.
-        // - Subsequent ticks while continuing to trade above PDH are throttled:
-        //   evaluated at most once every 30 seconds per symbol (and logged at DEBUG) to prevent CPU thrashing & log dumps.
+        // Evaluated at most once every 30 seconds per symbol to prevent CPU thrashing & log flooding.
         long nowMs = System.currentTimeMillis();
         Long lastSymbolEval = lastRadarEvaluationTimeMs.get(symbol);
-        boolean isInitialBreakout = (consecutiveTicks == 2 || lastSymbolEval == null);
+        boolean isInitialBreakout = (lastSymbolEval == null || (nowMs - lastSymbolEval) >= 30_000);
 
         if (!isInitialBreakout) {
-            if ((nowMs - lastSymbolEval) < 30_000) {
-                return;
-            }
+            return;
         }
 
         // Gated Checks: ONLY executed once a candidate actually breaks out above PDH with 2-tick confirmation
@@ -631,31 +626,23 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             double effLow15 = winnerMetrics.getLow15();
             double tickSize = winnerMetrics.getTickSize();
 
-            // Structural Support Filter: Check that Day's Session Low is valid and within allowable distance
+            // Structural Support: Day's Session Low. Fallback to 0.5% below entry if low is missing or at/above entry
             if (effLow15 <= 0 || effLow15 >= entryPrice) {
-                log.warn("Candidate {} skipped: Invalid structural support baseline (Low=₹{}, Entry=₹{})",
-                    winner.symbol(), effLow15, entryPrice);
-                continue;
+                effLow15 = TickMath.floorToTick(entryPrice * 0.995, tickSize);
             }
 
             double supportDistPct = ((entryPrice - effLow15) / entryPrice) * 100.0;
             if (supportDistPct > maxSupportDistancePct) {
-                log.info("Candidate {} skipped: Support distance {:.2f}% > {:.2f}% cap. Evaluating runner-up.",
-                    winner.symbol(), supportDistPct, maxSupportDistancePct);
-                activityFeedService.record(
-                    "RISK",
-                    "INFO",
-                    "Breakout Overextended",
-                    "Skipped " + winner.symbol() + " (Rank " + winner.rank() + "): Structural support is " + String.format("%.2f", supportDistPct) + "% away (> " + maxSupportDistancePct + "% limit). Trying runner-up.",
-                    winner.symbol()
-                );
+                log.debug("Candidate {} skipped: Support distance {}% > {}% cap. Evaluating runner-up.",
+                    winner.symbol(), String.format("%.2f", supportDistPct), maxSupportDistancePct);
                 continue;
             }
 
-            // Dynamic stop: Structural support 1 tick below session low, clamped to max allowed stop (0.8% distance) and noise floor
+            // Dynamic stop: Structural support 1 tick below session low, clamped to max allowed stop (0.8% distance) and noise floor (0.45%)
             double maxAllowedStop = TickMath.floorToTick(entryPrice * 0.992, tickSize); // 0.8% planned stop boundary
-            double calculatedStop = (supportDistPct < 0.25)
-                ? TickMath.floorToTick(entryPrice * 0.9965, tickSize) // Noise floor clamp (0.35%)
+            double noiseFloorStop = TickMath.floorToTick(entryPrice * 0.9955, tickSize); // 0.45% noise floor boundary
+            double calculatedStop = (supportDistPct < 0.45)
+                ? noiseFloorStop
                 : TickMath.floorToTick(effLow15 - tickSize, tickSize); // 1 tick below support
 
             double initialStop = Math.max(calculatedStop, maxAllowedStop);
@@ -668,14 +655,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
 
             int quantity = positionSizingEngine.calculateQuantity(winner.symbol(), entryPrice, initialStop, gateway);
             if (quantity < 1) {
-                log.warn("Candidate {} skipped: Calculated quantity is 0 shares. Evaluating runner-up.", winner.symbol());
-                activityFeedService.record(
-                    "RISK",
-                    "WARN",
-                    "Candidate Skipped: 0 Shares",
-                    "Risk constraints or stop distance resulted in 0 shares calculated for " + winner.symbol() + ". Trying runner-up.",
-                    winner.symbol()
-                );
+                log.debug("Candidate {} skipped: Calculated quantity is 0 shares. Evaluating runner-up.", winner.symbol());
                 continue;
             }
 

@@ -36,7 +36,7 @@ public class PositionSizingEngine {
     @Value("${algotrade.risk.max-exposure-multiplier:1.0}")
     private double maxExposureMultiplier;
 
-    @Value("${algotrade.risk.min-stop-distance-pct:0.4}")
+    @Value("${algotrade.risk.min-stop-distance-pct:0.35}")
     private double minStopDistancePct;
 
     @Value("${algotrade.risk.max-stop-distance-pct:2.0}")
@@ -246,7 +246,8 @@ public class PositionSizingEngine {
                 log.warn("INVALID STOP: Stop price (₹{}) must be strictly below entry price (₹{})", stopPrice, entryPrice);
             } else {
                 double stopDistancePct = (stopDistance / entryPrice) * 100.0;
-                log.warn("REJECTED: Stop distance ({:.2f}%) outside allowed range [{:.2f}%, {:.2f}%]", stopDistancePct, minStopDistancePct, maxStopDistancePct);
+                log.warn("REJECTED: Stop distance ({}%) outside allowed range [{}%, {}%]",
+                    String.format("%.2f", stopDistancePct), minStopDistancePct, maxStopDistancePct);
             }
             return 0;
         }

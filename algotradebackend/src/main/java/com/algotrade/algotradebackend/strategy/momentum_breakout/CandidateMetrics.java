@@ -189,9 +189,14 @@ public class CandidateMetrics {
 
         // Lock 15-minute range strictly to the 09:15–09:30 observation window
         if (inObservationWindow) {
-            this.low15 = Math.min(this.low15, price);
-            this.high15 = Math.max(this.high15, price);
-        } else if (this.low15 == Double.MAX_VALUE) {
+            if (this.low15 != Double.MAX_VALUE && price > 0 && Math.abs(this.low15 - price) / price > 0.20) {
+                this.low15 = price;
+                this.high15 = price;
+            } else {
+                this.low15 = Math.min(this.low15, price);
+                this.high15 = Math.max(this.high15, price);
+            }
+        } else if (this.low15 == Double.MAX_VALUE || (price > 0 && Math.abs(this.low15 - price) / price > 0.20)) {
             this.low15 = price;
             this.high15 = price;
         }

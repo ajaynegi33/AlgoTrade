@@ -85,4 +85,43 @@ public class LeaderboardDiagnosticsTest {
         assertFalse(scored.isQualified(), "Red stock must be disqualified regardless of score");
         assertEquals("DISQUALIFIED", scored.status());
     }
+
+    @Test
+    void testHeroMotoCoPositionSizingPassesWithNoiseFloorStop() {
+        double entryPrice = 5163.0;
+        double tickSize = 0.05;
+        double accountCapital = 10000.0;
+        double riskBudgetPct = 2.0;
+        double maxExposureMultiplier = 5.0;
+        double minStopDistancePct = 0.35;
+        double maxStopDistancePct = 2.0;
+
+        // Case A: Day's low equals entry price (e.g. freshly reset session)
+        double effLow15 = entryPrice;
+        if (effLow15 <= 0 || effLow15 >= entryPrice) {
+            effLow15 = com.algotrade.algotradebackend.core.util.TickMath.floorToTick(entryPrice * 0.995, tickSize);
+        }
+        assertEquals(5137.15, effLow15, 0.01);
+
+        double supportDistPct = ((entryPrice - effLow15) / entryPrice) * 100.0;
+        assertTrue(supportDistPct <= 1.5, "Support distance within 1.5% cap");
+
+        double maxAllowedStop = com.algotrade.algotradebackend.core.util.TickMath.floorToTick(entryPrice * 0.992, tickSize);
+        double noiseFloorStop = com.algotrade.algotradebackend.core.util.TickMath.floorToTick(entryPrice * 0.9955, tickSize);
+        double calculatedStop = (supportDistPct < 0.45)
+            ? noiseFloorStop
+            : com.algotrade.algotradebackend.core.util.TickMath.floorToTick(effLow15 - tickSize, tickSize);
+        double initialStop = com.algotrade.algotradebackend.core.util.TickMath.floorToTick(Math.max(calculatedStop, maxAllowedStop), tickSize);
+
+        assertTrue(initialStop > 0 && initialStop < entryPrice, "Stop must be strictly positive and below entry");
+        double stopDistPct = ((entryPrice - initialStop) / entryPrice) * 100.0;
+        assertTrue(stopDistPct >= minStopDistancePct && stopDistPct <= maxStopDistancePct,
+            "Stop distance % (" + stopDistPct + "%) must be within allowable bounds [" + minStopDistancePct + "%, " + maxStopDistancePct + "%]");
+
+        int qty = com.algotrade.algotradebackend.risk.PositionSizingEngine.calculateSizingQuantity(
+            accountCapital, entryPrice, initialStop, riskBudgetPct, maxExposureMultiplier, minStopDistancePct, maxStopDistancePct
+        );
+        assertTrue(qty > 0, "Calculated quantity must be positive (got: " + qty + ")");
+        assertEquals(7, qty, "HEROMOTOCO with ₹10,000 capital and 2% risk should size to 7 shares (risk: ₹181.30 <= ₹200)");
+    }
 }

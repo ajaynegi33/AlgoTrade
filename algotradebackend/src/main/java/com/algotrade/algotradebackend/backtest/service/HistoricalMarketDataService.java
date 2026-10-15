@@ -41,7 +41,7 @@ public class HistoricalMarketDataService {
         "ULTRACEMCO", "ASIANPAINT", "KOTAKBANK", "ITC", "TATACONSUM"
     );
 
-    private static final Map<String, Double> BASE_PRICES = Map.ofEntries(
+    public static final Map<String, Double> BASE_PRICES = Map.ofEntries(
         Map.entry("RELIANCE", 1250.0),
         Map.entry("TCS", 3850.0),
         Map.entry("INFY", 1820.0),

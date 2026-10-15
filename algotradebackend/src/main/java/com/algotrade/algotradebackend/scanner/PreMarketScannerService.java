@@ -2,6 +2,7 @@ package com.algotrade.algotradebackend.scanner;
 
 import com.algotrade.algotradebackend.broker.zerodha.KiteMarketDataService;
 import com.algotrade.algotradebackend.broker.zerodha.ZerodhaLiveGateway;
+import com.algotrade.algotradebackend.backtest.service.HistoricalMarketDataService;
 import com.algotrade.algotradebackend.core.service.MarketCalendarService;
 import com.algotrade.algotradebackend.core.service.EngineActivityFeedService;
 import com.algotrade.algotradebackend.persistence.entity.PreMarketCandidateEntity;
@@ -60,6 +61,10 @@ public class PreMarketScannerService {
 
     @Autowired(required = false)
     private com.algotrade.algotradebackend.websocket.LiveWebSocketBroadcastService broadcastService;
+
+    @Autowired(required = false)
+    @org.springframework.context.annotation.Lazy
+    private HistoricalMarketDataService historicalMarketDataService;
 
     @Value("${algotrade.scanner.pre-market.enabled:true}")
     private boolean scannerEnabled;
@@ -399,13 +404,25 @@ public class PreMarketScannerService {
             Quote q = new Quote();
             q.ohlc = new com.zerodhatech.models.OHLC();
 
-            double basePrice = 1000.0 + (rng.nextDouble() * 2000.0);
+            double basePrice = 0.0;
+            double cachedPdh = 0.0;
+            if (historicalMarketDataService != null && historicalMarketDataService.hasCachedDailyCandles(sym)) {
+                var ref = historicalMarketDataService.getBaselineReference(sym, LocalDate.now(IST_ZONE));
+                if (ref != null && ref.prevClose() > 0) {
+                    basePrice = ref.prevClose();
+                    cachedPdh = ref.pdh();
+                }
+            }
+            if (basePrice <= 0) {
+                basePrice = HistoricalMarketDataService.BASE_PRICES.getOrDefault(sym, 1000.0 + (rng.nextDouble() * 2000.0));
+            }
+
             double gapPct = -1.0 + (rng.nextDouble() * 3.5); // Range -1.0% to +2.5%
             double openPrice = Math.round((basePrice * (1.0 + gapPct / 100.0)) * 20.0) / 20.0;
 
             q.ohlc.close = Math.round(basePrice * 20.0) / 20.0;
             q.ohlc.open = openPrice;
-            q.ohlc.high = Math.round((basePrice * 1.01) * 20.0) / 20.0;
+            q.ohlc.high = cachedPdh > 0 ? cachedPdh : Math.round((basePrice * 1.01) * 20.0) / 20.0;
             q.ohlc.low = Math.round((basePrice * 0.99) * 20.0) / 20.0;
             q.lastPrice = openPrice;
             q.volumeTradedToday = (long) (2000 + (rng.nextDouble() * 15000));
