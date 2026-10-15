@@ -371,4 +371,48 @@ public class MomentumBreakoutStrategyLifecycleTest {
         strategy.onTick("TATACONSUM", 980.0, 105_000, 500_000, 200_000, true, java.time.LocalTime.of(10, 1));
         assertEquals(0, m.getConsecutiveBreakoutTicks());
     }
+
+    @Test
+    void testTrailingStopDoesNotTriggerAt11AmWithoutProfitMilestone() {
+        strategy.updateReferenceData("RELIANCE", 1000.0, 1010.0, 10_000_000, 2.5);
+        strategy.onTick("RELIANCE", 1005.0, 100_000, 2_000_000, 500_000);
+        strategy.onTick("RELIANCE", 1015.0, 3_000_000, 2_000_000, 500_000);
+        strategy.onTick("RELIANCE", 1020.0, 3_100_000, 2_000_000, 500_000);
+
+        when(positionSizingEngine.canTradeToday()).thenReturn(true);
+        when(positionSizingEngine.calculateQuantity(eq("RELIANCE"), anyDouble(), anyDouble(), any())).thenReturn(10);
+        when(mockGateway.placeOrder(eq("RELIANCE"), eq("BUY"), anyInt(), anyDouble(), anyDouble(), eq("LIMIT")))
+            .thenReturn(new TradeOrder("ORD-BUY-1", "RELIANCE", "BUY", 10, 1020.0, 0.0, "LIMIT", "FILLED", ExecutionMode.PAPER, Instant.now()));
+        when(mockGateway.placeOrder(eq("RELIANCE"), eq("SELL"), anyInt(), anyDouble(), anyDouble(), eq("SL")))
+            .thenReturn(new TradeOrder("ORD-SL-1", "RELIANCE", "SELL", 10, 1002.9, 1004.95, "SL", "TRIGGER PENDING", ExecutionMode.PAPER, Instant.now()));
+
+        Position initPos = new Position("RELIANCE", 10, 1020.0, 1020.0, 1004.95, 1004.95, 1020.0, Instant.now(), ExecutionMode.PAPER);
+        when(mockGateway.getOpenPosition())
+            .thenReturn(Optional.empty())
+            .thenReturn(Optional.of(initPos));
+
+        strategy.evaluate0930();
+        assertEquals(TradeLifecycleState.ACTIVE_POSITION, strategy.getLifecycleState());
+
+        // Price at 11:05 AM is 1023.0 (+0.29% gain, far below +1.5% milestone)
+        Position neutralPos = new Position("RELIANCE", 10, 1020.0, 1023.0, 1004.95, 1004.95, 1024.0, Instant.now(), ExecutionMode.PAPER);
+        when(mockGateway.getOpenPosition()).thenReturn(Optional.of(neutralPos));
+
+        java.time.LocalTime time1105 = java.time.LocalTime.of(11, 5);
+        strategy.onTick("RELIANCE", 1023.0, 3_500_000, 2_000_000, 500_000, false, time1105);
+
+        // Verify that stop is NOT modified at 11:05 AM when gain is under +1.5%
+        verify(mockGateway, never()).modifyOrder(eq("ORD-SL-1"), anyDouble(), anyDouble());
+
+        // Now price surges to 1036.0 (+1.57% gain >= +1.5%)
+        Position surgePos = new Position("RELIANCE", 10, 1020.0, 1036.0, 1004.95, 1004.95, 1036.0, Instant.now(), ExecutionMode.PAPER);
+        when(mockGateway.getOpenPosition()).thenReturn(Optional.of(surgePos));
+
+        java.time.LocalTime time1115 = java.time.LocalTime.of(11, 15);
+        strategy.onTick("RELIANCE", 1036.0, 4_000_000, 2_000_000, 500_000, false, time1115);
+
+        // Verify trailing stop ratchet IS triggered once profit milestone >= +1.5% is reached
+        // 1036 * (1 - 0.008) = 1027.70
+        verify(mockGateway, atLeastOnce()).modifyOrder(eq("ORD-SL-1"), anyDouble(), eq(1027.70));
+    }
 }

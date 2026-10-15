@@ -169,12 +169,13 @@ public class BacktestEngineService {
                                         activeSl = beOpt.get();
                                     }
                                 }
-                                // Stage 2: Progressive Trailing (>11:00 AM or +1.5% gain)
-                                if (barTime.compareTo(java.time.LocalTime.of(11, 0)) >= 0 || highWaterMark >= entryPrice * 1.015) {
+                                // Stage 2: Progressive Trailing (Active ONLY once gain reaches >= 1.5%)
+                                if (highWaterMark >= entryPrice * 1.015) {
                                     double trailTarget = com.algotrade.algotradebackend.core.util.TickMath.floorToTick(
                                         highWaterMark * (1.0 - req.trailingSlPct() / 100.0), tickSize
                                     );
-                                    if (trailTarget >= activeSl + (3 * tickSize)) {
+                                    // Price Inversion Guard: trailTarget must be strictly below current price
+                                    if (trailTarget >= activeSl + (3 * tickSize) && trailTarget < bar.close()) {
                                         activeSl = trailTarget;
                                     }
                                 }
@@ -188,11 +189,13 @@ public class BacktestEngineService {
                                     activeSl = beOpt.get();
                                 }
                             }
-                            if (barTime.compareTo(java.time.LocalTime.of(11, 0)) >= 0 || highWaterMark >= entryPrice * 1.015) {
+                            // Stage 2: Progressive Trailing (Active ONLY once gain reaches >= 1.5%)
+                            if (highWaterMark >= entryPrice * 1.015) {
                                 double trailTarget = com.algotrade.algotradebackend.core.util.TickMath.floorToTick(
                                     highWaterMark * (1.0 - req.trailingSlPct() / 100.0), tickSize
                                 );
-                                if (trailTarget >= activeSl + (3 * tickSize)) {
+                                // Price Inversion Guard: trailTarget must be strictly below current price
+                                if (trailTarget >= activeSl + (3 * tickSize) && trailTarget < bar.close()) {
                                     activeSl = trailTarget;
                                 }
                             }

@@ -34,9 +34,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
  *   <li><b>09:30:00 AM:</b> Scores candidates via 100-pt rubric. Enforces hard eligibility gates (PDH breakout + VWAP).</li>
  *   <li><b>09:30:05 AM:</b> Sizes position using 3 constraints (min Q_risk, Q_margin, Q_exposure). Places entry limit.</li>
  *   <li><b>Entry Fill:</b> Once broker confirms fill, arms protective stop-loss for exact confirmed quantity.</li>
- *   <li><b>09:30–11:00 AM:</b> Phase 1 "Let it breathe" (retains initial structural stop at 15-min low, unless +1.0% breakeven triggers).</li>
- *   <li><b>11:00–15:05 PM:</b> Phase 2 Dynamic trailing buffer (ratchets stop 0.8% below persistent High-Water Mark).</li>
- *   <li><b>15:05:00 PM:</b> Phase 3 Mandatory square-off. Cancels pending entry/SL orders and exits position ahead of Zerodha CAS 15:12 cutoff.</li>
+ *   <li><b>Phase 1: Initial & Breakeven:</b> Retains initial structural stop at 15-min low, until +1.0% gain milestone triggers exact statutory breakeven lock.</li>
+ *   <li><b>Phase 2: Progressive Trailing:</b> Once persistent High-Water Mark reaches +1.5% gain, ratchets stop 0.8% below HWM.</li>
+ *   <li><b>Phase 3: 15:05:00 PM Square-Off:</b> Cancels pending entry/SL orders and exits position ahead of Zerodha CAS 15:12 cutoff.</li>
  * </ol>
  */
 @Service
@@ -479,8 +479,8 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                         }
                     }
 
-                    // Stage 2: Progressive Trailing Buffer (Active after 11:00 AM IST or if gain >= 1.5%)
-                    if (now.isAfter(LocalTime.of(11, 0)) || strategyHighWaterMark >= entryPrice * 1.015) {
+                    // Stage 2: Progressive Trailing Buffer (Active ONLY once gain reaches >= 1.5%)
+                    if (strategyHighWaterMark >= entryPrice * 1.015) {
                         double trailTarget = TickMath.floorToTick(strategyHighWaterMark * (1.0 - trailingBufferPct / 100.0), tickSize);
                         if (trailTarget >= candidateStop + (3 * tickSize)) {
                             candidateStop = trailTarget;
