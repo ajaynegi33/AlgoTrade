@@ -131,43 +131,6 @@ public class PaperTradingGateway implements BrokerGateway {
         }
     }
 
-    private void restoreLostAirtelTradeIfApplicable() {
-        if (paperActivePositionRepository == null) return;
-        try {
-            java.time.ZoneId istZone = java.time.ZoneId.of("Asia/Kolkata");
-            Instant startOfDay = java.time.LocalDate.now(istZone).atStartOfDay(istZone).toInstant();
-            Instant endOfDay = startOfDay.plusSeconds(86400);
-            var settledToday = paperTradeRepository.findByEntryTimeBetween(startOfDay, endOfDay);
-            boolean alreadySettled = settledToday != null && settledToday.stream().anyMatch(t -> "BHARTIARTL".equalsIgnoreCase(t.getSymbol()));
-            if (!alreadySettled) {
-                Instant entryTime = Instant.now().minusSeconds(7200); // 10:55:41 AM IST entry
-                PaperActivePositionEntity airtel = new PaperActivePositionEntity(
-                    "BHARTIARTL",
-                    21,
-                    1852.73,
-                    1866.50,
-                    1841.40,
-                    1841.40,
-                    1868.20,
-                    entryTime,
-                    "PAPER-SL-BHARTIARTL"
-                );
-                paperActivePositionRepository.save(airtel);
-                Position pos = new Position(
-                    "BHARTIARTL", 21, 1852.73, 1866.50, 1841.40, 1841.40, 1868.20, entryTime, ExecutionMode.PAPER
-                );
-                this.openPosition.set(pos);
-                TradeOrder slOrder = new TradeOrder(
-                    "PAPER-SL-BHARTIARTL", "BHARTIARTL", "SELL", 21, 1838.65, 1841.40, "SL", "TRIGGER PENDING", ExecutionMode.PAPER, entryTime
-                );
-                this.orders.put(slOrder.orderId(), slOrder);
-                log.info("RECOVERED & RESTORED ACTIVE BHARTIARTL PAPER TRADE: 21 shares @ ₹1852.73 (LTP: ₹1866.50, SL: ₹1841.40, HWM: ₹1868.20)");
-            }
-        } catch (Throwable t) {
-            log.warn("Could not check/restore Bharti Airtel position: {}", t.getMessage());
-        }
-    }
-
     @Override
     public synchronized TradeOrder placeOrder(String symbol, String transactionType, int quantity, double price, double triggerPrice, String orderType) {
         String orderId = "PAPER-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
