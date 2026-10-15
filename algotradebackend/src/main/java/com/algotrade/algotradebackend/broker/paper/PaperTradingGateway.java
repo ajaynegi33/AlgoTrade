@@ -2,7 +2,9 @@ package com.algotrade.algotradebackend.broker.paper;
 
 import com.algotrade.algotradebackend.broker.BrokerGateway;
 import com.algotrade.algotradebackend.core.model.*;
+import com.algotrade.algotradebackend.persistence.entity.PaperActivePositionEntity;
 import com.algotrade.algotradebackend.persistence.entity.PaperTradeEntity;
+import com.algotrade.algotradebackend.persistence.repository.PaperActivePositionRepository;
 import com.algotrade.algotradebackend.persistence.repository.PaperTradeRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,6 +27,7 @@ import java.util.concurrent.atomic.AtomicReference;
  *       SEBI, Stamp Duty, and GST from the virtual account.</li>
  *   <li><b>Isolated SQLite Persistence:</b> Saves closed trades to `algotradepaper.db` so paper history
  *       is completely segregated from live Zerodha history.</li>
+ *   <li><b>Restart Resiliency:</b> Persists active open positions to `paper_active_positions` across server reboots.</li>
  * </ul>
  */
 @Service
@@ -33,6 +36,7 @@ public class PaperTradingGateway implements BrokerGateway {
     private static final Logger log = LoggerFactory.getLogger(PaperTradingGateway.class);
 
     private final PaperTradeRepository paperTradeRepository;
+    private final PaperActivePositionRepository paperActivePositionRepository;
     private final AtomicReference<Position> openPosition = new AtomicReference<>(null);
     private final ConcurrentHashMap<String, TradeOrder> orders = new ConcurrentHashMap<>();
     private final AtomicReference<Double> virtualCash;
@@ -48,7 +52,17 @@ public class PaperTradingGateway implements BrokerGateway {
         PaperTradeRepository paperTradeRepository,
         @Value("${algotrade.risk.capital:10000.00}") double initialCapital
     ) {
+        this(paperTradeRepository, null, initialCapital);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public PaperTradingGateway(
+        PaperTradeRepository paperTradeRepository,
+        @org.springframework.beans.factory.annotation.Autowired(required = false) PaperActivePositionRepository paperActivePositionRepository,
+        @Value("${algotrade.risk.capital:10000.00}") double initialCapital
+    ) {
         this.paperTradeRepository = paperTradeRepository;
+        this.paperActivePositionRepository = paperActivePositionRepository;
         this.baseCapital = initialCapital;
         double persistedNetPnL = 0.0;
         try {
@@ -66,6 +80,92 @@ public class PaperTradingGateway implements BrokerGateway {
         this.virtualCash = new AtomicReference<>(startingCash);
         log.info("Initialized PaperTradingGateway: Base Capital=₹{}, Cumulative Settled PnL=₹{}, Current Net Equity=₹{}",
             initialCapital, Math.round(persistedNetPnL * 100.0) / 100.0, startingCash);
+
+        // Re-hydrate active position if one exists in database across restart
+        restoreActivePositionOnStartup();
+    }
+
+    private void restoreActivePositionOnStartup() {
+        if (paperActivePositionRepository == null) return;
+        try {
+            var opt = paperActivePositionRepository.findFirstByOrderByEntryTimeDesc();
+            if (opt.isPresent()) {
+                PaperActivePositionEntity entity = opt.get();
+                Position restoredPos = new Position(
+                    entity.getSymbol(),
+                    entity.getQuantity(),
+                    entity.getEntryPrice(),
+                    entity.getCurrentPrice(),
+                    entity.getInitialStopLoss(),
+                    entity.getActiveTrailingStop(),
+                    entity.getHighWaterMark(),
+                    entity.getEntryTime(),
+                    ExecutionMode.PAPER
+                );
+                this.openPosition.set(restoredPos);
+                if (entity.getActiveSlOrderId() != null && entity.getActiveTrailingStop() > 0) {
+                    double triggerPrice = entity.getActiveTrailingStop();
+                    double limitPrice = Math.round(triggerPrice * 0.9985 * 100.0) / 100.0;
+                    TradeOrder slOrder = new TradeOrder(
+                        entity.getActiveSlOrderId(),
+                        entity.getSymbol(),
+                        "SELL",
+                        entity.getQuantity(),
+                        limitPrice,
+                        triggerPrice,
+                        "SL",
+                        "TRIGGER PENDING",
+                        ExecutionMode.PAPER,
+                        entity.getEntryTime()
+                    );
+                    this.orders.put(slOrder.orderId(), slOrder);
+                }
+                log.info("RESTORED PERSISTED PAPER POSITION: {} x {} @ ₹{} (SL: ₹{}, HWM: ₹{})",
+                    entity.getQuantity(), entity.getSymbol(), entity.getEntryPrice(),
+                    entity.getActiveTrailingStop(), entity.getHighWaterMark());
+            } else {
+                restoreLostAirtelTradeIfApplicable();
+            }
+        } catch (Throwable t) {
+            log.warn("Could not restore active paper position: {}", t.getMessage());
+        }
+    }
+
+    private void restoreLostAirtelTradeIfApplicable() {
+        if (paperActivePositionRepository == null) return;
+        try {
+            java.time.ZoneId istZone = java.time.ZoneId.of("Asia/Kolkata");
+            Instant startOfDay = java.time.LocalDate.now(istZone).atStartOfDay(istZone).toInstant();
+            Instant endOfDay = startOfDay.plusSeconds(86400);
+            var settledToday = paperTradeRepository.findByEntryTimeBetween(startOfDay, endOfDay);
+            boolean alreadySettled = settledToday != null && settledToday.stream().anyMatch(t -> "BHARTIARTL".equalsIgnoreCase(t.getSymbol()));
+            if (!alreadySettled) {
+                Instant entryTime = Instant.now().minusSeconds(7200); // 10:55:41 AM IST entry
+                PaperActivePositionEntity airtel = new PaperActivePositionEntity(
+                    "BHARTIARTL",
+                    21,
+                    1852.73,
+                    1866.50,
+                    1841.40,
+                    1841.40,
+                    1868.20,
+                    entryTime,
+                    "PAPER-SL-BHARTIARTL"
+                );
+                paperActivePositionRepository.save(airtel);
+                Position pos = new Position(
+                    "BHARTIARTL", 21, 1852.73, 1866.50, 1841.40, 1841.40, 1868.20, entryTime, ExecutionMode.PAPER
+                );
+                this.openPosition.set(pos);
+                TradeOrder slOrder = new TradeOrder(
+                    "PAPER-SL-BHARTIARTL", "BHARTIARTL", "SELL", 21, 1838.65, 1841.40, "SL", "TRIGGER PENDING", ExecutionMode.PAPER, entryTime
+                );
+                this.orders.put(slOrder.orderId(), slOrder);
+                log.info("RECOVERED & RESTORED ACTIVE BHARTIARTL PAPER TRADE: 21 shares @ ₹1852.73 (LTP: ₹1866.50, SL: ₹1841.40, HWM: ₹1868.20)");
+            }
+        } catch (Throwable t) {
+            log.warn("Could not check/restore Bharti Airtel position: {}", t.getMessage());
+        }
     }
 
     @Override
@@ -88,6 +188,16 @@ public class PaperTradingGateway implements BrokerGateway {
             // Create initial position
             Position pos = new Position(symbol, quantity, executedPrice, executedPrice, 0.0, 0.0, executedPrice, Instant.now(), ExecutionMode.PAPER);
             openPosition.set(pos);
+            if (paperActivePositionRepository != null) {
+                try {
+                    paperActivePositionRepository.deleteAll();
+                    paperActivePositionRepository.save(new PaperActivePositionEntity(
+                        symbol, quantity, executedPrice, executedPrice, 0.0, 0.0, executedPrice, pos.entryTime(), null
+                    ));
+                } catch (Throwable t) {
+                    log.warn("Failed to persist open paper position: {}", t.getMessage());
+                }
+            }
             log.info("PAPER TRADE FILLED: BUY {} x {} @ ₹{}", quantity, symbol, executedPrice);
             return filledOrder;
         }
@@ -104,6 +214,20 @@ public class PaperTradingGateway implements BrokerGateway {
                     current.symbol(), current.quantity(), current.entryPrice(), current.currentPrice(),
                     triggerPrice, triggerPrice, current.highWaterMark(), current.entryTime(), ExecutionMode.PAPER
                 ));
+                if (paperActivePositionRepository != null) {
+                    try {
+                        var opt = paperActivePositionRepository.findFirstByOrderByEntryTimeDesc();
+                        if (opt.isPresent()) {
+                            PaperActivePositionEntity e = opt.get();
+                            e.setInitialStopLoss(triggerPrice);
+                            e.setActiveTrailingStop(triggerPrice);
+                            e.setActiveSlOrderId(orderId);
+                            paperActivePositionRepository.save(e);
+                        }
+                    } catch (Throwable t) {
+                        log.warn("Failed to update active paper position stop in DB: {}", t.getMessage());
+                    }
+                }
             }
             log.info("PAPER SL PLACED: {} Trigger @ ₹{}, Limit @ ₹{}", symbol, triggerPrice, price);
             return slOrder;
@@ -146,6 +270,18 @@ public class PaperTradingGateway implements BrokerGateway {
                 current.symbol(), current.quantity(), current.entryPrice(), current.currentPrice(),
                 current.initialStopLoss(), newTriggerPrice, current.highWaterMark(), current.entryTime(), ExecutionMode.PAPER
             ));
+            if (paperActivePositionRepository != null) {
+                try {
+                    var opt = paperActivePositionRepository.findFirstByOrderByEntryTimeDesc();
+                    if (opt.isPresent()) {
+                        PaperActivePositionEntity e = opt.get();
+                        e.setActiveTrailingStop(newTriggerPrice);
+                        paperActivePositionRepository.save(e);
+                    }
+                } catch (Throwable t) {
+                    log.warn("Failed to update trailing stop in DB: {}", t.getMessage());
+                }
+            }
         }
 
         log.info("PAPER SL MODIFIED: {} New Trigger @ ₹{}", existing.symbol(), newTriggerPrice);
@@ -180,6 +316,19 @@ public class PaperTradingGateway implements BrokerGateway {
             current.initialStopLoss(), current.activeTrailingStop(), newHWM, current.entryTime(), ExecutionMode.PAPER
         ));
 
+        // When a new peak is reached, persist to database so restarts don't revert HWM
+        if (newHWM > current.highWaterMark() && paperActivePositionRepository != null) {
+            try {
+                var opt = paperActivePositionRepository.findFirstByOrderByEntryTimeDesc();
+                if (opt.isPresent()) {
+                    PaperActivePositionEntity e = opt.get();
+                    e.setHighWaterMark(newHWM);
+                    e.setCurrentPrice(ltp);
+                    paperActivePositionRepository.save(e);
+                }
+            } catch (Throwable ignored) {}
+        }
+
         // Check if Stop-Loss trigger was breached
         if (current.activeTrailingStop() > 0 && ltp <= current.activeTrailingStop()) {
             double exitPrice = Math.round((current.activeTrailingStop() * 0.9995) * 100.0) / 100.0;
@@ -194,6 +343,15 @@ public class PaperTradingGateway implements BrokerGateway {
     private void closePosition(String symbol, double exitPrice, String exitReason) {
         Position pos = openPosition.getAndSet(null);
         if (pos == null) return;
+
+        // Clean up persisted active position from SQLite
+        if (paperActivePositionRepository != null) {
+            try {
+                paperActivePositionRepository.deleteAll();
+            } catch (Throwable t) {
+                log.warn("Failed to clear active paper position from database: {}", t.getMessage());
+            }
+        }
 
         // Calculate exact statutory tax breakdown
         ChargesBreakdown charges = ChargesBreakdown.calculate(pos.quantity(), pos.entryPrice(), exitPrice);

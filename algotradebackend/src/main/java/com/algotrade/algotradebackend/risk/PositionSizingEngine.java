@@ -1,6 +1,7 @@
 package com.algotrade.algotradebackend.risk;
 
 import com.algotrade.algotradebackend.broker.BrokerGateway;
+import com.algotrade.algotradebackend.core.model.ExecutionMode;
 import com.algotrade.algotradebackend.persistence.repository.PaperTradeRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,21 +58,70 @@ public class PositionSizingEngine {
     private final java.util.concurrent.atomic.AtomicInteger liveLossesToday = new java.util.concurrent.atomic.AtomicInteger(0);
     private volatile java.time.LocalDate lastTradeDate;
 
+    // High-frequency tick caching and log debouncing
+    private final java.util.concurrent.atomic.AtomicBoolean circuitBreakerLogged = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.concurrent.atomic.AtomicBoolean dailyLimitLogged = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private volatile long lastWarningLogMs = 0L;
+    private volatile boolean cachedCanTrade = true;
+    private volatile long lastCanTradeCheckMs = 0L;
+    private static final long CAN_TRADE_CACHE_TTL_MS = 2000L; // 2 seconds cache to protect SQLite on ReadingThread
+    private volatile Instant paperCircuitResetInstant = null;
+
     public PositionSizingEngine(PaperTradeRepository paperTradeRepository) {
         this.paperTradeRepository = paperTradeRepository;
+    }
+
+    private ExecutionMode getActiveExecutionMode() {
+        if (brokerGatewayManagerProvider != null) {
+            var manager = brokerGatewayManagerProvider.getIfAvailable();
+            if (manager != null) {
+                return manager.getActiveMode();
+            }
+        }
+        return ExecutionMode.PAPER;
     }
 
     /**
      * Records a live or paper trade dispatch for the current trading day.
      */
     public void recordTradeDispatched() {
+        recordTradeDispatched(getActiveExecutionMode());
+    }
+
+    public void recordTradeDispatched(ExecutionMode mode) {
         resetLiveTradesIfNewDay();
-        liveTradesToday.incrementAndGet();
+        if (mode == ExecutionMode.LIVE) {
+            liveTradesToday.incrementAndGet();
+        }
+        lastCanTradeCheckMs = 0L; // Invalidate cache immediately on new order dispatch
     }
 
     public void recordTradeLoss() {
+        recordTradeLoss(getActiveExecutionMode());
+    }
+
+    public void recordTradeLoss(ExecutionMode mode) {
         resetLiveTradesIfNewDay();
-        liveLossesToday.incrementAndGet();
+        if (mode == ExecutionMode.LIVE) {
+            liveLossesToday.incrementAndGet();
+        }
+        lastCanTradeCheckMs = 0L; // Invalidate cache immediately on trade loss
+    }
+
+    /**
+     * Manually resets daily trade limits and loss circuit breakers.
+     * Useful for paper testing and resuming operations without database wipe.
+     */
+    public void resetCircuitBreaker() {
+        resetLiveTradesIfNewDay();
+        liveTradesToday.set(0);
+        liveLossesToday.set(0);
+        circuitBreakerLogged.set(false);
+        dailyLimitLogged.set(false);
+        paperCircuitResetInstant = Instant.now();
+        lastCanTradeCheckMs = 0L;
+        cachedCanTrade = true;
+        log.info("Risk engine daily trade limits and loss circuit breakers have been manually reset.");
     }
 
     private void resetLiveTradesIfNewDay() {
@@ -80,6 +130,10 @@ public class PositionSizingEngine {
             lastTradeDate = today;
             liveTradesToday.set(0);
             liveLossesToday.set(0);
+            circuitBreakerLogged.set(false);
+            dailyLimitLogged.set(false);
+            paperCircuitResetInstant = null;
+            lastCanTradeCheckMs = 0L;
         }
     }
 
@@ -91,32 +145,57 @@ public class PositionSizingEngine {
      * @return true if trades taken today < maxDailyTrades AND losses < maxDailyLosses
      */
     public boolean canTradeToday() {
+        long now = System.currentTimeMillis();
+        if (now - lastCanTradeCheckMs < CAN_TRADE_CACHE_TTL_MS) {
+            return cachedCanTrade;
+        }
+
         resetLiveTradesIfNewDay();
         // Calculate start and end of today's session in IST
         ZoneId istZone = ZoneId.of("Asia/Kolkata");
         Instant startOfDay = LocalDate.now(istZone).atStartOfDay(istZone).toInstant();
         Instant endOfDay = startOfDay.plusSeconds(86400);
 
-        var todayPaperTrades = paperTradeRepository.findByEntryTimeBetween(startOfDay, endOfDay);
-        long paperTrades = todayPaperTrades.size();
-        long totalTrades = paperTrades + liveTradesToday.get();
-        if (totalTrades >= maxDailyTrades) {
-            log.warn("DAILY TRADE LIMIT REACHED: Executed {}/{} trades today (Paper: {}, Live: {}). Standing down.",
-                totalTrades, maxDailyTrades, paperTrades, liveTradesToday.get());
+        Instant queryStart = (paperCircuitResetInstant != null && paperCircuitResetInstant.isAfter(startOfDay))
+            ? paperCircuitResetInstant : startOfDay;
+
+        var todayPaperTrades = paperTradeRepository.findByEntryTimeBetween(queryStart, endOfDay);
+        long paperTrades = (todayPaperTrades != null) ? todayPaperTrades.size() : 0;
+        long paperLosses = (todayPaperTrades != null)
+            ? todayPaperTrades.stream().filter(t -> t.getNetPnL() != null && t.getNetPnL() < 0).count()
+            : 0;
+
+        ExecutionMode activeMode = getActiveExecutionMode();
+        long effectiveTrades = (activeMode == ExecutionMode.LIVE) ? liveTradesToday.get() : paperTrades;
+        long effectiveLosses = (activeMode == ExecutionMode.LIVE) ? liveLossesToday.get() : paperLosses;
+
+        if (effectiveTrades >= maxDailyTrades) {
+            if (!dailyLimitLogged.getAndSet(true) || (now - lastWarningLogMs > 300_000L)) {
+                log.warn("DAILY TRADE LIMIT REACHED [{} Mode]: Executed {}/{} trades today (Paper: {}, Live: {}). Standing down.",
+                    activeMode, effectiveTrades, maxDailyTrades, paperTrades, liveTradesToday.get());
+                lastWarningLogMs = now;
+            }
+            cachedCanTrade = false;
+            lastCanTradeCheckMs = now;
             return false;
         }
+        dailyLimitLogged.set(false);
 
         // Daily Loss Circuit Breaker
-        long paperLosses = todayPaperTrades.stream()
-            .filter(t -> t.getNetPnL() != null && t.getNetPnL() < 0)
-            .count();
-        long totalLosses = paperLosses + liveLossesToday.get();
-        if (totalLosses >= maxDailyLosses) {
-            log.warn("DAILY LOSS CIRCUIT BREAKER HIT: {}/{} losses incurred today (Paper: {}, Live: {}). Halting trading for capital preservation.",
-                totalLosses, maxDailyLosses, paperLosses, liveLossesToday.get());
+        if (effectiveLosses >= maxDailyLosses) {
+            if (!circuitBreakerLogged.getAndSet(true) || (now - lastWarningLogMs > 300_000L)) {
+                log.warn("DAILY LOSS CIRCUIT BREAKER HIT [{} Mode]: {}/{} losses incurred today (Paper: {}, Live: {}). Halting trading for capital preservation.",
+                    activeMode, effectiveLosses, maxDailyLosses, paperLosses, liveLossesToday.get());
+                lastWarningLogMs = now;
+            }
+            cachedCanTrade = false;
+            lastCanTradeCheckMs = now;
             return false;
         }
+        circuitBreakerLogged.set(false);
 
+        cachedCanTrade = true;
+        lastCanTradeCheckMs = now;
         return true;
     }
 

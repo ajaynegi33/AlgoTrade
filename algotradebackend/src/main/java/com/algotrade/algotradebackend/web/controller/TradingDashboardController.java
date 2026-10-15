@@ -492,4 +492,18 @@ public class TradingDashboardController {
             "WIPRO", "MARUTI", "SUNPHARMA", "BAJFINANCE"
         ));
     }
+
+    /**
+     * Resets risk limits and daily loss circuit breaker counters.
+     * Useful for paper trading testing and resuming operations without manual database wipe.
+     */
+    @PostMapping("/risk/reset")
+    public ResponseEntity<Map<String, Object>> resetRiskCircuitBreaker() {
+        positionSizingEngine.resetCircuitBreaker();
+        return ResponseEntity.ok(Map.of(
+            "status", "SUCCESS",
+            "message", "Daily risk limits and circuit breakers reset successfully.",
+            "canTradeToday", positionSizingEngine.canTradeToday()
+        ));
+    }
 }

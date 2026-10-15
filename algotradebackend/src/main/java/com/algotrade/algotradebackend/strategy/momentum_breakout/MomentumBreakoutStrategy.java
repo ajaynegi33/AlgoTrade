@@ -134,6 +134,38 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                 log.warn("Could not pre-populate full universe into metricsMap: {}", t.getMessage());
             }
         }
+        rehydrateActivePositionIfPresent();
+    }
+
+    public synchronized void rehydrateActivePositionIfPresent() {
+        try {
+            BrokerGateway gateway = brokerGatewayManager.getActiveGateway();
+            if (gateway != null) {
+                var optPos = gateway.getOpenPosition();
+                if (optPos.isPresent()) {
+                    Position pos = optPos.get();
+                    this.activeSymbol = pos.symbol();
+                    this.lifecycleState = TradeLifecycleState.ACTIVE_POSITION;
+                    this.strategyHighWaterMark = pos.highWaterMark();
+                    this.currentArmedStopPrice = pos.activeTrailingStop();
+                    this.currentProtectedQuantity = pos.quantity();
+                    this.activeTradeId = "RESTORED-" + pos.symbol();
+                    log.info("RE-HYDRATED ACTIVE POSITION IN STRATEGY: {} x {} @ ₹{} (SL: ₹{}, HWM: ₹{})",
+                        pos.quantity(), pos.symbol(), pos.entryPrice(), pos.activeTrailingStop(), pos.highWaterMark());
+                    activityFeedService.record(
+                        "LIFECYCLE",
+                        "INFO",
+                        gateway.getExecutionMode().name(),
+                        activeTradeId,
+                        "Active Position Restored",
+                        "Restored active position for " + pos.symbol() + " (" + pos.quantity() + " shares) across server restart.",
+                        pos.symbol()
+                    );
+                }
+            }
+        } catch (Throwable t) {
+            log.warn("Could not check/rehydrate active position on startup: {}", t.getMessage());
+        }
     }
 
     private void initializeDefaultWatchlist() {
@@ -386,11 +418,13 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
 
         // Gated Checks: ONLY executed once a candidate actually breaks out above PDH with 2-tick confirmation
         if (!positionSizingEngine.canTradeToday()) {
+            lastRadarEvaluationTimeMs.put(symbol, nowMs + 30_000L); // 30s cooldown when daily limit reached
             return;
         }
 
         BrokerGateway gateway = brokerGatewayManager.getActiveGateway();
         if (gateway.getOpenPosition().isPresent()) {
+            lastRadarEvaluationTimeMs.put(symbol, nowMs + 10_000L); // 10s cooldown when a position is actively held
             return;
         }
 
@@ -599,7 +633,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                 // Position closed (stop-loss was hit or manually closed)
                 log.info("Position for {} is no longer open at broker. Trade completed.", symbol);
                 if (currentArmedStopPrice > 0 && ltp <= currentArmedStopPrice * 1.002) {
-                    positionSizingEngine.recordTradeLoss();
+                    positionSizingEngine.recordTradeLoss(gateway.getExecutionMode());
                 }
                 activityFeedService.record(
                     "LIFECYCLE",
@@ -791,7 +825,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                 activeEntryOrderId = buyOrder.orderId();
                 entryOrderTimestampMs = System.currentTimeMillis();
                 lifecycleState = TradeLifecycleState.PENDING_ENTRY;
-                positionSizingEngine.recordTradeDispatched();
+                positionSizingEngine.recordTradeDispatched(gateway.getExecutionMode());
                 orderDispatched = true;
             } catch (Throwable t) {
                 log.error("CRITICAL: Failed to dispatch entry order for {}: {}. Rolling back state to FLAT.", winner.symbol(), t.getMessage(), t);
@@ -1205,7 +1239,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
 
         TradeOrder buyOrder = gateway.placeOrder(symbol, "BUY", quantity, marketableBuyLimit, 0.0, "LIMIT");
         activeEntryOrderId = buyOrder.orderId();
-        positionSizingEngine.recordTradeDispatched();
+        positionSizingEngine.recordTradeDispatched(gateway.getExecutionMode());
         tradedSymbolsToday.add(symbol);
 
         activityFeedService.record(
