@@ -78,10 +78,14 @@ class BacktestEngineServiceTest {
         int qtyValid = PositionSizingEngine.calculateSizingQuantity(capital, entryPrice, validStop, 1.0, 1.0, 0.4, 2.0);
         assertEquals(10, qtyValid);
 
-        // 4. Quantity scales directly with user risk budget:
-        int qtyRisk100 = PositionSizingEngine.calculateSizingQuantity(capital, entryPrice, 995.0, 1.0, 1.0, 0.4, 2.0);
-        // Q_risk = 100 / 5 = 20 shares.
-        assertEquals(20, qtyRisk100, "Calculates 20 shares for ₹100 risk budget on ₹5 stop");
+        // 4. Quantity scales with risk budget but clamps to exposure:
+        // With 1.0x leverage: Q_risk = 100 / 5 = 20 shares, but clamped to 10 shares by 1.0x exposure
+        int qtyClamped = PositionSizingEngine.calculateSizingQuantity(capital, entryPrice, 995.0, 1.0, 1.0, 0.4, 2.0);
+        assertEquals(10, qtyClamped, "Clamped to 10 shares by 1.0x exposure cap");
+
+        // With 2.0x leverage: Q_exposure = 20,000 / 1000 = 20 shares -> allocates full 20 shares for ₹100 risk
+        int qtyRisk100 = PositionSizingEngine.calculateSizingQuantity(capital, entryPrice, 995.0, 1.0, 2.0, 0.4, 2.0);
+        assertEquals(20, qtyRisk100, "Calculates 20 shares for ₹100 risk budget on ₹5 stop with 2.0x leverage");
     }
 
     @Test
@@ -90,35 +94,36 @@ class BacktestEngineServiceTest {
         double entryPrice = 1000.0;
         double stopPrice = 995.0; // 0.5% stop distance (₹5)
 
-        // 1.0x leverage: risk budget = 10,000 * 1% = 100 -> 100 / 5 = 20 shares
+        // 1.0x leverage: equity risk budget = 10,000 * 1% = 100 -> Q_risk = 100 / 5 = 20 shares,
+        // but clamped by 1.0x exposure ceiling (10,000 / 1000 = 10 shares)
         int qty1x = PositionSizingEngine.calculateSizingQuantity(capital, entryPrice, stopPrice, 1.0, 1.0, 0.4, 2.0);
-        assertEquals(20, qty1x);
+        assertEquals(10, qty1x, "1.0x leverage must clamp 20 risk shares to 10 exposure shares");
 
-        // 2.0x leverage: risk budget = 20,000 * 1% = 200 -> 200 / 5 = 40 shares
+        // 2.0x leverage: Q_risk = 20 shares, Q_exposure = 20,000 / 1000 = 20 shares -> 20 shares
         int qty2x = PositionSizingEngine.calculateSizingQuantity(capital, entryPrice, stopPrice, 1.0, 2.0, 0.4, 2.0);
-        assertEquals(40, qty2x);
+        assertEquals(20, qty2x);
 
-        // 5.0x leverage with 1.0% risk: risk budget = 50,000 * 1% = 500 -> 500 / 5 = 100 shares
+        // 5.0x leverage with 1.0% risk: Q_risk = 20 shares, Q_exposure = 50,000 / 1000 = 50 shares -> 20 shares
         int qty5x = PositionSizingEngine.calculateSizingQuantity(capital, entryPrice, stopPrice, 1.0, 5.0, 0.4, 2.0);
-        assertEquals(100, qty5x);
+        assertEquals(20, qty5x, "1.0% risk budget on ₹10k equity limits risk to ₹100 (20 shares on ₹5 stop)");
 
-        // User's exact scenario: 5.0x leverage on 1.5% stop distance (₹15 stop on ₹1000 stock)
-        // Capital = 10,000, 5x leverage -> Capacity = 50,000
-        // At 2.0% risk: Risk Budget = 50,000 * 2.0% = ₹1,000 -> 1000 / 15 = 66 shares
+        // Corrected equity-based risk sizing on 1.5% stop distance (₹15 stop on ₹1000 stock):
+        // Capital = 10,000, 5x leverage -> Max Exposure = 50,000 (50 shares)
+        // At 2.0% risk: Risk Budget = 10,000 * 2.0% = ₹200 -> 200 / 15 = 13 shares
         int qty2Pct = PositionSizingEngine.calculateSizingQuantity(capital, entryPrice, 985.0, 2.0, 5.0, 0.4, 2.0);
-        assertEquals(66, qty2Pct, "2.0% risk must allocate 66 shares (₹1,000 max loss)");
+        assertEquals(13, qty2Pct, "2.0% risk must allocate 13 shares (₹195 max loss <= ₹200 equity budget)");
 
-        // At 2.8% risk: Risk Budget = 50,000 * 2.8% = ₹1,400 -> 1400 / 15 = 93 shares
+        // At 2.8% risk: Risk Budget = 10,000 * 2.8% = ₹280 -> 280 / 15 = 18 shares
         int qty28Pct = PositionSizingEngine.calculateSizingQuantity(capital, entryPrice, 985.0, 2.8, 5.0, 0.4, 2.0);
-        assertEquals(93, qty28Pct, "2.8% risk must allocate 93 shares (₹1,400 max loss)");
+        assertEquals(18, qty28Pct, "2.8% risk must allocate 18 shares (₹270 max loss <= ₹280 equity budget)");
 
-        // At 3.0% risk: Risk Budget = 50,000 * 3.0% = ₹1,500 -> 1500 / 15 = 100 shares
+        // At 3.0% risk: Risk Budget = 10,000 * 3.0% = ₹300 -> 300 / 15 = 20 shares
         int qty3Pct = PositionSizingEngine.calculateSizingQuantity(capital, entryPrice, 985.0, 3.0, 5.0, 0.4, 2.0);
-        assertEquals(100, qty3Pct, "3.0% risk must allocate 100 shares (₹1,500 max loss)");
+        assertEquals(20, qty3Pct, "3.0% risk must allocate 20 shares (₹300 max loss <= ₹300 equity budget)");
 
-        // At 5.0% risk: Risk Budget = 50,000 * 5.0% = ₹2,500 -> 2500 / 15 = 166 shares
+        // At 5.0% risk: Risk Budget = 10,000 * 5.0% = ₹500 -> 500 / 15 = 33 shares
         int qty5Pct = PositionSizingEngine.calculateSizingQuantity(capital, entryPrice, 985.0, 5.0, 5.0, 0.4, 2.0);
-        assertEquals(166, qty5Pct, "5.0% risk must allocate 166 shares (₹2,500 max loss)");
+        assertEquals(33, qty5Pct, "5.0% risk must allocate 33 shares (₹495 max loss <= ₹500 equity budget)");
 
         // BacktestRequest validation & clamping
         BacktestRequest clampedLow = new BacktestRequest(null, null, 10000.0, 1.0, 75, 2.0, 0.05, 0.5);

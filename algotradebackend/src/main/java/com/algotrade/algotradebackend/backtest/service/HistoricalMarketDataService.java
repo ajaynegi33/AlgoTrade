@@ -138,10 +138,18 @@ public class HistoricalMarketDataService {
     }
 
     /**
-     * Pre-loads historical series for the entire watchlist across the test interval.
+     * Pre-loads historical series for the specified watchlist across the test interval.
      */
+    public void preloadUniverse(List<String> symbols, LocalDate start, LocalDate end) {
+        List<String> targetSymbols = (symbols != null && !symbols.isEmpty()) ? symbols : getWatchlistSymbols();
+        targetSymbols.parallelStream().forEach(sym -> {
+            getDailyCandles(sym);
+            loadOrFetchIntradayBars(sym);
+        });
+    }
+
     public void preloadUniverse(LocalDate start, LocalDate end) {
-        NIFTY_UNIVERSE.parallelStream().forEach(this::getDailyCandles);
+        preloadUniverse(getWatchlistSymbols(), start, end);
     }
 
     /**
@@ -297,7 +305,7 @@ public class HistoricalMarketDataService {
     public List<CandidateMetrics> getOpeningCandidateMetrics(LocalDate date) {
         List<CandidateMetrics> candidates = new ArrayList<>();
 
-        for (String symbol : NIFTY_UNIVERSE) {
+        for (String symbol : getWatchlistSymbols()) {
             List<DailyCandle> candles = getDailyCandles(symbol);
             if (candles.isEmpty()) continue;
 

@@ -53,10 +53,14 @@ public class CandidateMetrics {
      * Dynamically updates reference figures fetched from the broker market data API.
      */
     public synchronized void setReferenceData(double prevClose, double previousDayHigh, double avgDailyVolume10Day, double atrPct) {
-        this.prevClose = prevClose;
-        this.previousDayHigh = previousDayHigh;
-        this.avgDailyVolume10Day = avgDailyVolume10Day;
-        this.atrPct = atrPct;
+        if (this.previousDayHigh > 0 && previousDayHigh > 0 && Math.abs(this.previousDayHigh - previousDayHigh) > 0.001) {
+            // Guard: Once established for the day, do not clobber true PDH with intraday ticks
+            return;
+        }
+        if (prevClose > 0) this.prevClose = prevClose;
+        if (previousDayHigh > 0) this.previousDayHigh = previousDayHigh;
+        if (avgDailyVolume10Day > 0) this.avgDailyVolume10Day = avgDailyVolume10Day;
+        if (atrPct > 0) this.atrPct = atrPct;
     }
 
     /**
@@ -84,6 +88,13 @@ public class CandidateMetrics {
      * Guards against double-counting if live tick stream is already actively accumulating this session.
      */
     public synchronized void aggregateCandle(double open, double high, double low, double close, long candleVolume) {
+        aggregateCandle(open, high, low, close, candleVolume, true);
+    }
+
+    /**
+     * Aggregates candle data with explicit observation window gating.
+     */
+    public synchronized void aggregateCandle(double open, double high, double low, double close, long candleVolume, boolean inObservationWindow) {
         if (sumVolume > 0 && accumulatedCandleVolume == 0) {
             // Tick stream is already active and authoritative; avoid double counting candle volume
             return;
@@ -92,8 +103,13 @@ public class CandidateMetrics {
             this.openPrice = open;
         }
         this.ltp = close;
-        this.low15 = Math.min(this.low15, low);
-        this.high15 = Math.max(this.high15, high);
+        if (inObservationWindow) {
+            this.low15 = Math.min(this.low15, low);
+            this.high15 = Math.max(this.high15, high);
+        } else if (this.low15 == Double.MAX_VALUE) {
+            this.low15 = low;
+            this.high15 = high;
+        }
         this.accumulatedCandleVolume += candleVolume;
 
         if (candleVolume > 0) {
@@ -141,7 +157,7 @@ public class CandidateMetrics {
     /**
      * Ingests a live tick update with official exchange-calculated VWAP (ATP) and observation window gating.
      * When inObservationWindow is false, only real-time LTP and order-book depth are updated;
-     * 15-minute range (low15, high15, window volume, VWAP) remain strictly locked to the 09:15–09:30 window.
+     * 15-minute range (low15, high15) remains strictly locked to the 09:15–09:30 window.
      */
     public synchronized void updateTick(double price, long volume, long buyQty, long sellQty, double tickExchangeVwap, boolean inObservationWindow) {
         this.ltp = price;
@@ -157,9 +173,14 @@ public class CandidateMetrics {
             this.openPrice = price;
         }
 
-        // Continuously track day's low and day's high
-        this.low15 = Math.min(this.low15, price);
-        this.high15 = Math.max(this.high15, price);
+        // Lock 15-minute range strictly to the 09:15–09:30 observation window
+        if (inObservationWindow) {
+            this.low15 = Math.min(this.low15, price);
+            this.high15 = Math.max(this.high15, price);
+        } else if (this.low15 == Double.MAX_VALUE) {
+            this.low15 = price;
+            this.high15 = price;
+        }
 
         if (this.initialVolume == -1) {
             // Baseline calibration: If reliable window boundary baseline is set, use it

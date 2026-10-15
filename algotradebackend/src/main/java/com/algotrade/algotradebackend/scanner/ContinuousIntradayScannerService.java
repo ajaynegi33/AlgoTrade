@@ -145,10 +145,6 @@ public class ContinuousIntradayScannerService {
             if (q == null) q = quotes.get(sym);
             if (q == null || q.ohlc == null || q.lastPrice <= 0) continue;
 
-            double prevClose = q.ohlc.close;
-            double pdh = q.ohlc.high > 0 ? q.ohlc.high : prevClose;
-            mbStrategy.updateReferenceData(sym, prevClose, pdh, 2_000_000.0, 2.0);
-
             long totalBuy = 0, totalSell = 0;
             if (q.depth != null) {
                 if (q.depth.buy != null) {
@@ -159,7 +155,9 @@ public class ContinuousIntradayScannerService {
                 }
             }
 
-            mbStrategy.onTick(sym, q.lastPrice, (long) q.volumeTradedToday, totalBuy, totalSell, q.averagePrice, true, now);
+            boolean inObsWindow = !now.isBefore(MarketCalendarService.MARKET_OPEN_TIME)
+                               && now.isBefore(MarketCalendarService.OBSERVATION_END_TIME);
+            mbStrategy.onTick(sym, q.lastPrice, (long) q.volumeTradedToday, totalBuy, totalSell, q.averagePrice, inObsWindow, now);
         }
 
         // Trigger quantitative evaluation cycle

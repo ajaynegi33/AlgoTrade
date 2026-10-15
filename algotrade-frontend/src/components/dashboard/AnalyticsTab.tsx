@@ -100,7 +100,7 @@ export function AnalyticsTab({ analytics, backendUrl }: AnalyticsTabProps) {
           </div>
           <div className="bg-slate-950/70 p-3 rounded-lg border border-slate-800 hover:border-slate-700/60 transition-all">
             <p className="text-slate-400 font-sans text-[11px]">NSE Exchange</p>
-            <p className="font-bold text-white mt-1">0.00297%</p>
+            <p className="font-bold text-white mt-1">0.00307%</p>
             <p className="text-[9px] text-slate-500">Turnover total</p>
           </div>
           <div className="bg-slate-950/70 p-3 rounded-lg border border-slate-800 hover:border-slate-700/60 transition-all">

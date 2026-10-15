@@ -66,7 +66,7 @@ public class BacktestEngineService {
         List<String> watchlist = dataService.getWatchlistSymbols();
 
         // Pre-warm data cache for all universe stocks across the requested date range
-        dataService.preloadUniverse(start, end);
+        dataService.preloadUniverse(watchlist, start, end);
 
         double initialCapital = req.initialCapital();
         double currentCapital = initialCapital;
@@ -122,6 +122,16 @@ public class BacktestEngineService {
             int activeScore = 0;
             Set<String> tradedSymbolsToday = new HashSet<>();
 
+            // Pre-index intraday bars into an O(1) timestamp lookup table before replaying the day
+            Map<String, Map<String, HistoricalMarketDataService.IntradayBar>> indexedBarsMap = new HashMap<>(barsMap.size());
+            for (Map.Entry<String, List<HistoricalMarketDataService.IntradayBar>> entry : barsMap.entrySet()) {
+                Map<String, HistoricalMarketDataService.IntradayBar> timeMap = new HashMap<>(entry.getValue().size());
+                for (HistoricalMarketDataService.IntradayBar bar : entry.getValue()) {
+                    timeMap.put(bar.time(), bar);
+                }
+                indexedBarsMap.put(entry.getKey(), timeMap);
+            }
+
             // Replay continuous 5-minute bars throughout the trading day (09:15 to 15:30)
             for (String timeStr : timeSlots) {
                 java.time.LocalTime barTime = java.time.LocalTime.parse(timeStr);
@@ -132,57 +142,38 @@ public class BacktestEngineService {
                     CandidateMetrics m = metricsMap.get(sym);
                     if (m == null) continue;
 
-                    HistoricalMarketDataService.IntradayBar bar = findBarAtTime(entry.getValue(), timeStr);
+                    Map<String, HistoricalMarketDataService.IntradayBar> timeMap = indexedBarsMap.get(sym);
+                    HistoricalMarketDataService.IntradayBar bar = (timeMap != null) ? timeMap.get(timeStr) : null;
                     if (bar == null) continue;
 
-                    m.aggregateCandle(bar.open(), bar.high(), bar.low(), bar.close(), bar.volume());
+                    boolean inObsWindow = !barTime.isBefore(java.time.LocalTime.of(9, 15)) 
+                                       && barTime.isBefore(java.time.LocalTime.of(9, 30));
+                    m.aggregateCandle(bar.open(), bar.high(), bar.low(), bar.close(), bar.volume(), inObsWindow);
                     double bodyImbalance = (bar.high() - bar.low() > 0)
                         ? ((bar.close() - bar.low()) - (bar.high() - bar.close())) / (bar.high() - bar.low())
                         : 0.0;
                     long buyVol = (long) (bar.volume() * (0.50 + bodyImbalance * 0.35));
                     long sellVol = Math.max(0, bar.volume() - buyVol);
-                    m.updateTick(bar.close(), m.getWindowVolume() + bar.volume(), buyVol, sellVol, bodyImbalance, true);
+                    m.updateTick(bar.close(), m.getWindowVolume() + bar.volume(), buyVol, sellVol, 0.0, inObsWindow);
                 }
 
                 // 2. Active Trade Management (Stop-loss, Breakeven Lock, Trailing Stop, 15:05 Exit)
                 if (inTrade) {
-                    HistoricalMarketDataService.IntradayBar bar = findBarAtTime(barsMap.get(activeSym), timeStr);
+                    Map<String, HistoricalMarketDataService.IntradayBar> activeTimeMap = indexedBarsMap.get(activeSym);
+                    HistoricalMarketDataService.IntradayBar bar = (activeTimeMap != null) ? activeTimeMap.get(timeStr) : null;
                     if (bar != null) {
                         double tickSize = 0.05;
-                        boolean isBullish = bar.close() >= bar.open();
                         boolean stoppedOut = false;
                         double exitPrice = 0.0;
                         String exitReason = null;
 
-                        if (isBullish) {
-                            // Bullish candle (O -> L -> H -> C): Low occurs before High
-                            if (bar.low() <= activeSl) {
-                                stoppedOut = true;
-                                exitPrice = round2(activeSl * (1.0 - req.slippagePct() / 100.0));
-                                exitReason = activeSl > initialSl ? "TRAILING_SL" : "INITIAL_SL";
-                            } else {
-                                highWaterMark = Math.max(highWaterMark, bar.high());
-                                // Stage 1: Breakeven lock (+1.0% gain)
-                                if (highWaterMark >= entryPrice * 1.010) {
-                                    var beOpt = ChargesBreakdown.calculateExactBreakevenPrice(activeQty, entryPrice, tickSize);
-                                    if (beOpt.isPresent() && beOpt.get() > activeSl) {
-                                        activeSl = beOpt.get();
-                                    }
-                                }
-                                // Stage 2: Progressive Trailing (Active ONLY once gain reaches >= 1.5%)
-                                if (highWaterMark >= entryPrice * 1.015) {
-                                    double trailTarget = com.algotrade.algotradebackend.core.util.TickMath.floorToTick(
-                                        highWaterMark * (1.0 - req.trailingSlPct() / 100.0), tickSize
-                                    );
-                                    // Price Inversion Guard: trailTarget must be strictly below current price
-                                    if (trailTarget >= activeSl + (3 * tickSize) && trailTarget < bar.close()) {
-                                        activeSl = trailTarget;
-                                    }
-                                }
-                            }
+                        if (bar.low() <= activeSl) {
+                            stoppedOut = true;
+                            exitPrice = round2(activeSl * (1.0 - req.slippagePct() / 100.0));
+                            exitReason = activeSl > initialSl ? "TRAILING_SL" : "INITIAL_SL";
                         } else {
-                            // Bearish candle (O -> H -> L -> C): High occurs before Low
                             highWaterMark = Math.max(highWaterMark, bar.high());
+                            // Stage 1: Breakeven lock (+1.0% gain)
                             if (highWaterMark >= entryPrice * 1.010) {
                                 var beOpt = ChargesBreakdown.calculateExactBreakevenPrice(activeQty, entryPrice, tickSize);
                                 if (beOpt.isPresent() && beOpt.get() > activeSl) {
@@ -198,11 +189,6 @@ public class BacktestEngineService {
                                 if (trailTarget >= activeSl + (3 * tickSize) && trailTarget < bar.close()) {
                                     activeSl = trailTarget;
                                 }
-                            }
-                            if (bar.low() <= activeSl) {
-                                stoppedOut = true;
-                                exitPrice = round2(activeSl * (1.0 - req.slippagePct() / 100.0));
-                                exitReason = activeSl > initialSl ? "TRAILING_SL" : "INITIAL_SL";
                             }
                         }
 
@@ -265,54 +251,56 @@ public class BacktestEngineService {
                         .toList();
 
                     List<ScoredCandidate> ranked = scoringEngine.rankCandidates(scoredList);
-                    Optional<ScoredCandidate> winnerOpt = ranked.stream()
-                        .filter(c -> c.isQualified() && c.totalScore() >= req.minScoreThreshold())
-                        .findFirst();
+                    for (ScoredCandidate candidate : ranked) {
+                        if (!candidate.isQualified() || candidate.totalScore() < req.minScoreThreshold()) {
+                            break; // Sorted list: subsequent candidates do not meet qualification threshold
+                        }
 
-                    if (winnerOpt.isPresent()) {
-                        ScoredCandidate winner = winnerOpt.get();
-                        CandidateMetrics winnerMetrics = metricsMap.get(winner.symbol());
-                        double rawEntry = winner.ltp();
+                        CandidateMetrics winnerMetrics = metricsMap.get(candidate.symbol());
+                        if (winnerMetrics == null) continue;
+                        double rawEntry = candidate.ltp();
                         double effLow = winnerMetrics.getLow15();
                         double tickSize = 0.05;
 
                         // Structural Support Filter: check support distance <= 1.5%
-                        if (effLow > 0 && effLow < rawEntry) {
-                            double supportDistPct = ((rawEntry - effLow) / rawEntry) * 100.0;
-                            if (supportDistPct <= 1.5) {
-                                double maxAllowedStop = com.algotrade.algotradebackend.core.util.TickMath.floorToTick(rawEntry * 0.992, tickSize);
-                                double calculatedStop = (supportDistPct < 0.25)
-                                    ? com.algotrade.algotradebackend.core.util.TickMath.floorToTick(rawEntry * 0.9965, tickSize)
-                                    : com.algotrade.algotradebackend.core.util.TickMath.floorToTick(effLow - tickSize, tickSize);
-                                double computedInitialSl = com.algotrade.algotradebackend.core.util.TickMath.floorToTick(Math.max(calculatedStop, maxAllowedStop), tickSize);
+                        if (effLow <= 0 || effLow >= rawEntry) continue;
 
-                                double slipEntry = round2(rawEntry * (1.0 + req.slippagePct() / 100.0));
-                                double stopDistance = slipEntry - computedInitialSl;
+                        double supportDistPct = ((rawEntry - effLow) / rawEntry) * 100.0;
+                        if (supportDistPct > 1.5) continue;
 
-                                if (stopDistance > 0) {
-                                    double stopDistancePct = (stopDistance / slipEntry) * 100.0;
-                                    if (stopDistancePct >= 0.4 && stopDistancePct <= 2.0) {
-                                        // 3-Constraint Sizing (Strict Leverage Ceiling Cap)
-                                        int qRisk = (int) Math.floor((currentCapital * req.leverageMultiplier() * (req.riskPerTradePct() / 100.0)) / stopDistance);
-                                        int qExposure = (int) Math.floor((currentCapital * req.leverageMultiplier()) / slipEntry);
-                                        int finalQty = Math.min(qRisk, qExposure);
+                        double maxAllowedStop = com.algotrade.algotradebackend.core.util.TickMath.floorToTick(rawEntry * 0.992, tickSize);
+                        double calculatedStop = (supportDistPct < 0.25)
+                            ? com.algotrade.algotradebackend.core.util.TickMath.floorToTick(rawEntry * 0.9965, tickSize)
+                            : com.algotrade.algotradebackend.core.util.TickMath.floorToTick(effLow - tickSize, tickSize);
+                        double computedInitialSl = com.algotrade.algotradebackend.core.util.TickMath.floorToTick(Math.max(calculatedStop, maxAllowedStop), tickSize);
 
-                                        if (finalQty >= 1) {
-                                            inTrade = true;
-                                            activeSym = winner.symbol();
-                                            activeQty = finalQty;
-                                            entryPrice = slipEntry;
-                                            initialSl = computedInitialSl;
-                                            activeSl = computedInitialSl;
-                                            highWaterMark = slipEntry;
-                                            entryTime = timeStr;
-                                            activeScore = winner.totalScore();
-                                            tradedSymbolsToday.add(winner.symbol());
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        double slipEntry = round2(rawEntry * (1.0 + req.slippagePct() / 100.0));
+                        double stopDistance = slipEntry - computedInitialSl;
+
+                        if (stopDistance <= 0) continue;
+
+                        double stopDistancePct = (stopDistance / slipEntry) * 100.0;
+                        if (stopDistancePct < 0.4 || stopDistancePct > 2.0) continue;
+
+                        // 3-Constraint Sizing (Equity-based risk budget and strict leverage ceiling cap)
+                        int qRisk = (int) Math.floor((currentCapital * (req.riskPerTradePct() / 100.0)) / stopDistance);
+                        int qExposure = (int) Math.floor((currentCapital * req.leverageMultiplier()) / slipEntry);
+                        int finalQty = Math.min(qRisk, qExposure);
+
+                        if (finalQty < 1) continue;
+
+                        // Candidate passed all structural and risk sizing gates!
+                        inTrade = true;
+                        activeSym = candidate.symbol();
+                        activeQty = finalQty;
+                        entryPrice = slipEntry;
+                        initialSl = computedInitialSl;
+                        activeSl = computedInitialSl;
+                        highWaterMark = slipEntry;
+                        entryTime = timeStr;
+                        activeScore = candidate.totalScore();
+                        tradedSymbolsToday.add(candidate.symbol());
+                        break; // Order taken; exit candidate evaluation loop
                     }
                 }
             }

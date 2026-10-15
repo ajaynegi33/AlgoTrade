@@ -24,6 +24,7 @@ import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.stream.Collectors;
+import jakarta.annotation.PreDestroy;
 
 /**
  * Institutional Pre-Market Auction Scanner Service.
@@ -83,6 +84,17 @@ public class PreMarketScannerService {
 
     private final List<PreMarketCandidateEntity> latestScanResults = new CopyOnWriteArrayList<>();
     private volatile Instant lastScanTimestamp;
+
+    private final ExecutorService quoteExecutor = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "quote-fetcher");
+        t.setDaemon(true);
+        return t;
+    });
+
+    @PreDestroy
+    public void cleanup() {
+        quoteExecutor.shutdownNow();
+    }
 
     public PreMarketScannerService(
         FnoUniverseService universeService,
@@ -344,18 +356,16 @@ public class PreMarketScannerService {
             .map(s -> "NSE:" + s)
             .toArray(String[]::new);
 
-        ExecutorService executor = Executors.newSingleThreadExecutor();
         long startTime = System.currentTimeMillis();
+        Future<Map<String, Quote>> future = quoteExecutor.submit(() -> {
+            try {
+                return client.getQuote(instruments);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        });
 
         try {
-            Callable<Map<String, Quote>> task = () -> {
-                try {
-                    return client.getQuote(instruments);
-                } catch (Throwable t) {
-                    throw new RuntimeException(t);
-                }
-            };
-            Future<Map<String, Quote>> future = executor.submit(task);
             Map<String, Quote> result = future.get(batchTimeoutMs, TimeUnit.MILLISECONDS);
             long latencyMs = System.currentTimeMillis() - startTime;
             if (latencyMs > 2000) {
@@ -365,13 +375,13 @@ public class PreMarketScannerService {
             }
             return result != null ? result : Collections.emptyMap();
         } catch (TimeoutException te) {
+            future.cancel(true);
             log.warn("Batch Kite getQuote() timed out after {} ms.", batchTimeoutMs);
             return Collections.emptyMap();
         } catch (Throwable t) {
+            future.cancel(true);
             log.error("Batch Kite getQuote() encountered error: {}", t.getMessage());
             return Collections.emptyMap();
-        } finally {
-            executor.shutdownNow();
         }
     }
 

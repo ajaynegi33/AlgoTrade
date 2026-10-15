@@ -71,6 +71,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
     private volatile String activeSymbol = null;
     private volatile String activeEntryOrderId = null;
     private volatile String activeSlOrderId = null;
+    private volatile String activeExitOrderId = null;
     private volatile String activeTradeId = null;
     private volatile double strategyHighWaterMark = 0.0;
     private volatile double plannedStopPrice = 0.0;
@@ -334,17 +335,13 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         if (lifecycleState != TradeLifecycleState.FLAT) {
             return;
         }
-        BrokerGateway gateway = brokerGatewayManager.getActiveGateway();
-        if (gateway.getOpenPosition().isPresent()) {
+
+        // Fast In-Memory Check: Symbol has not already been traded today
+        if (tradedSymbolsToday.contains(symbol)) {
             return;
         }
 
-        // Risk check: Can trade today and symbol has not already been traded
-        if (!positionSizingEngine.canTradeToday() || tradedSymbolsToday.contains(symbol)) {
-            return;
-        }
-
-        // Breakout Gate: LTP >= PDH (Previous Day High)
+        // Fast In-Memory Check: Breakout Gate: LTP >= PDH (Previous Day High)
         double pdh = metrics.getPreviousDayHigh();
         if (pdh <= 0 || ltp < pdh) {
             metrics.resetBreakoutTicks();
@@ -352,7 +349,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             return;
         }
 
-        // 2-Tick Confirmation Rule (prevents 1-tick stop-run fakeouts)
+        // Fast In-Memory Check: 2-Tick Confirmation Rule (prevents 1-tick stop-run fakeouts)
         int consecutiveTicks = metrics.incrementBreakoutTicks();
         if (consecutiveTicks < 2) {
             return;
@@ -370,6 +367,16 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             if ((nowMs - lastSymbolEval) < 30_000) {
                 return;
             }
+        }
+
+        // Gated Checks: ONLY executed once a candidate actually breaks out above PDH with 2-tick confirmation
+        if (!positionSizingEngine.canTradeToday()) {
+            return;
+        }
+
+        BrokerGateway gateway = brokerGatewayManager.getActiveGateway();
+        if (gateway.getOpenPosition().isPresent()) {
+            return;
         }
 
         // Global debounce: Prevent launching multiple 210-stock scoring cycles within 1000ms
@@ -541,11 +548,17 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             // Waiting for square-off exit to confirm flat
             if (optPos.isEmpty() || (optPos.get().quantity() == 0)) {
                 log.info("Square-off exit confirmed flat for {}.", symbol);
-                lifecycleState = TradeLifecycleState.FLAT;
-                activeSymbol = null;
-                activeSlOrderId = null;
-                activeTradeId = null;
-                strategyHighWaterMark = 0.0;
+                setFlatState();
+            } else if (now.isAfter(LocalTime.of(15, 6))) {
+                // Post-15:05 escalation: Position still open after 15:06, force emergency market square-off
+                Position pos = optPos.get();
+                log.warn("POST-15:05 ESCALATION: Retrying emergency market exit for {} ({} shares)", pos.symbol(), pos.quantity());
+                try {
+                    TradeOrder exitOrder = gateway.placeOrder(pos.symbol(), "SELL", pos.quantity(), 0.0, 0.0, "MARKET");
+                    activeExitOrderId = exitOrder.orderId();
+                } catch (Throwable t) {
+                    log.error("Emergency market exit failed: {}", t.getMessage());
+                }
             }
         }
     }
@@ -590,161 +603,160 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             return;
         }
 
-        // Step 3: Check qualification threshold (Score >= 75 and passes hard gates)
-        if (ranked.isEmpty() || !ranked.get(0).isQualified()) {
-            return;
-        }
+        // Step 3: Iterate candidates in rank order (Runner-Up Evaluation)
+        for (ScoredCandidate winner : ranked) {
+            if (!winner.isQualified() || winner.totalScore() < 75) {
+                break; // Candidates are sorted; none of the remaining meet qualification cutoff
+            }
+            if (tradedSymbolsToday.contains(winner.symbol())) {
+                continue;
+            }
 
-        ScoredCandidate winner = ranked.get(0);
-        CandidateMetrics winnerMetrics = metricsMap.get(winner.symbol());
+            CandidateMetrics winnerMetrics = metricsMap.get(winner.symbol());
+            if (winnerMetrics == null) continue;
 
-        activityFeedService.record(
-            "STRATEGY",
-            "SUCCESS",
-            "Breakout Candidate Qualified",
-            winner.symbol() + " passed qualification with score " + winner.totalScore() + "/100 >= 75.",
-            winner.symbol(),
-            Map.of(
-                "totalScore", winner.totalScore(),
-                "rvolScore", winner.rvolScore(),
-                "vwapScore", winner.vwapScore(),
-                "depthScore", winner.depthImbalanceScore(),
-                "pdhScore", winner.pdhScore(),
-                "ltp", winner.ltp()
-            )
-        );
+            double entryPrice = winner.ltp();
+            double effLow15 = winnerMetrics.getLow15();
+            double tickSize = winnerMetrics.getTickSize();
 
-        // Step 4: Calculate Structural Stop and Position Size
-        double entryPrice = winner.ltp();
-        double effLow15 = winnerMetrics.getLow15();
-        double tickSize = winnerMetrics.getTickSize();
+            // Structural Support Filter: Check that Day's Session Low is valid and within allowable distance
+            if (effLow15 <= 0 || effLow15 >= entryPrice) {
+                log.warn("Candidate {} skipped: Invalid structural support baseline (Low=₹{}, Entry=₹{})",
+                    winner.symbol(), effLow15, entryPrice);
+                continue;
+            }
 
-        // Structural Support Filter: Check that Day's Session Low is valid and within allowable distance
-        if (effLow15 <= 0 || effLow15 >= entryPrice) {
-            log.warn("Trade aborted for {}: Invalid structural support baseline (Low=₹{}, Entry=₹{})",
-                winner.symbol(), effLow15, entryPrice);
-            return;
-        }
+            double supportDistPct = ((entryPrice - effLow15) / entryPrice) * 100.0;
+            if (supportDistPct > maxSupportDistancePct) {
+                log.info("Candidate {} skipped: Support distance {:.2f}% > {:.2f}% cap. Evaluating runner-up.",
+                    winner.symbol(), supportDistPct, maxSupportDistancePct);
+                activityFeedService.record(
+                    "RISK",
+                    "INFO",
+                    "Breakout Overextended",
+                    "Skipped " + winner.symbol() + " (Rank " + winner.rank() + "): Structural support is " + String.format("%.2f", supportDistPct) + "% away (> " + maxSupportDistancePct + "% limit). Trying runner-up.",
+                    winner.symbol()
+                );
+                continue;
+            }
 
-        double supportDistPct = ((entryPrice - effLow15) / entryPrice) * 100.0;
-        if (supportDistPct > maxSupportDistancePct) {
-            log.info("Trade rejected for {}: Support distance {:.2f}% > {:.2f}% cap. Breakout overextended.",
-                winner.symbol(), supportDistPct, maxSupportDistancePct);
+            // Dynamic stop: Structural support 1 tick below session low, clamped to max allowed stop (0.8% distance) and noise floor
+            double maxAllowedStop = TickMath.floorToTick(entryPrice * 0.992, tickSize); // 0.8% planned stop boundary
+            double calculatedStop = (supportDistPct < 0.25)
+                ? TickMath.floorToTick(entryPrice * 0.9965, tickSize) // Noise floor clamp (0.35%)
+                : TickMath.floorToTick(effLow15 - tickSize, tickSize); // 1 tick below support
+
+            double initialStop = Math.max(calculatedStop, maxAllowedStop);
+            initialStop = TickMath.floorToTick(initialStop, tickSize);
+
+            if (initialStop <= 0 || initialStop >= entryPrice) {
+                log.warn("Candidate {} skipped: Invalid stop price ₹{} (Entry ~₹{})", winner.symbol(), initialStop, entryPrice);
+                continue;
+            }
+
+            int quantity = positionSizingEngine.calculateQuantity(winner.symbol(), entryPrice, initialStop, gateway);
+            if (quantity < 1) {
+                log.warn("Candidate {} skipped: Calculated quantity is 0 shares. Evaluating runner-up.", winner.symbol());
+                activityFeedService.record(
+                    "RISK",
+                    "WARN",
+                    "Candidate Skipped: 0 Shares",
+                    "Risk constraints or stop distance resulted in 0 shares calculated for " + winner.symbol() + ". Trying runner-up.",
+                    winner.symbol()
+                );
+                continue;
+            }
+
+            // Lock symbol so it cannot be traded again today
+            tradedSymbolsToday.add(winner.symbol());
+
+            activityFeedService.record(
+                "STRATEGY",
+                "SUCCESS",
+                "Breakout Candidate Qualified",
+                winner.symbol() + " (Rank " + winner.rank() + ") passed qualification with score " + winner.totalScore() + "/100 >= 75.",
+                winner.symbol(),
+                Map.of(
+                    "totalScore", winner.totalScore(),
+                    "rvolScore", winner.rvolScore(),
+                    "vwapScore", winner.vwapScore(),
+                    "depthScore", winner.depthImbalanceScore(),
+                    "pdhScore", winner.pdhScore(),
+                    "ltp", winner.ltp()
+                )
+            );
+
             activityFeedService.record(
                 "RISK",
                 "INFO",
-                "Breakout Overextended",
-                "Rejected " + winner.symbol() + ": Structural support is " + String.format("%.2f", supportDistPct) + "% away (> " + maxSupportDistancePct + "% limit).",
-                winner.symbol()
+                "Position Sizing Computed",
+                "Calculated size: " + quantity + " shares. Entry ~₹" + entryPrice + ", Initial Stop: ₹" + initialStop,
+                winner.symbol(),
+                Map.of("quantity", quantity, "entryPrice", entryPrice, "initialStop", initialStop)
             );
-            return;
-        }
 
-        // Dynamic stop: Structural support 1 tick below session low, clamped to max allowed stop (0.8% distance) and noise floor
-        double maxAllowedStop = TickMath.floorToTick(entryPrice * 0.992, tickSize); // 0.8% planned stop boundary
-        double calculatedStop = (supportDistPct < 0.25)
-            ? TickMath.floorToTick(entryPrice * 0.9965, tickSize) // Noise floor clamp (0.35%)
-            : TickMath.floorToTick(effLow15 - tickSize, tickSize); // 1 tick below support
+            // Step 5: Place Marketable Limit Buy Order
+            String tradeId = "AUTO-" + LocalDate.now(ZoneId.of("Asia/Kolkata")) + "-" + winner.symbol();
+            activeTradeId = tradeId;
+            activeSymbol = winner.symbol();
+            plannedStopPrice = initialStop;
+            plannedQuantity = quantity;
+            lifecycleState = TradeLifecycleState.PENDING_ENTRY;
 
-        double initialStop = Math.max(calculatedStop, maxAllowedStop);
-        initialStop = TickMath.floorToTick(initialStop, tickSize);
+            double marketableBuyLimit = TickMath.ceilToTick(entryPrice * 1.0005, tickSize); // LTP + 0.05% ceil to valid tick
+            log.info("DISPATCHING ENTRY ORDER: BUY {} x {} @ Marketable Limit ₹{}", quantity, winner.symbol(), marketableBuyLimit);
 
-        if (initialStop <= 0 || initialStop >= entryPrice) {
-            log.warn("Trade aborted for {}: Invalid stop price ₹{} (Entry ~₹{})", winner.symbol(), initialStop, entryPrice);
+            TradeOrder buyOrder = gateway.placeOrder(winner.symbol(), "BUY", quantity, marketableBuyLimit, 0.0, "LIMIT");
+            activeEntryOrderId = buyOrder.orderId();
+            positionSizingEngine.recordTradeDispatched();
             activityFeedService.record(
-                "RISK",
-                "WARN",
-                "Trade Aborted: Invalid Stop",
-                "Stop loss ₹" + initialStop + " is invalid relative to entry ₹" + entryPrice,
-                winner.symbol()
+                "ORDERS",
+                "SUCCESS",
+                gateway.getExecutionMode().name(),
+                activeTradeId,
+                "Entry Order Dispatched",
+                "BUY " + quantity + " x " + winner.symbol() + " @ Marketable Limit ₹" + marketableBuyLimit,
+                winner.symbol(),
+                Map.of("orderId", buyOrder.orderId(), "quantity", quantity, "limitPrice", marketableBuyLimit)
             );
-            return;
-        }
 
-        int quantity = positionSizingEngine.calculateQuantity(winner.symbol(), entryPrice, initialStop, gateway);
-        if (quantity < 1) {
-            log.warn("Trade aborted for {}: Calculated quantity is 0 shares.", winner.symbol());
-            activityFeedService.record(
-                "RISK",
-                "WARN",
-                "Trade Aborted: 0 Shares",
-                "Risk constraints or stop distance resulted in 0 shares calculated for " + winner.symbol(),
-                winner.symbol()
-            );
-            return;
-        }
-
-        // Lock symbol so it cannot be traded again today
-        tradedSymbolsToday.add(winner.symbol());
-
-        activityFeedService.record(
-            "RISK",
-            "INFO",
-            "Position Sizing Computed",
-            "Calculated size: " + quantity + " shares. Entry ~₹" + entryPrice + ", Initial Stop: ₹" + initialStop,
-            winner.symbol(),
-            Map.of("quantity", quantity, "entryPrice", entryPrice, "initialStop", initialStop)
-        );
-
-        // Step 5: Place Marketable Limit Buy Order
-        String tradeId = "AUTO-" + LocalDate.now(ZoneId.of("Asia/Kolkata")) + "-" + winner.symbol();
-        activeTradeId = tradeId;
-        activeSymbol = winner.symbol();
-        plannedStopPrice = initialStop;
-        plannedQuantity = quantity;
-        lifecycleState = TradeLifecycleState.PENDING_ENTRY;
-
-        double marketableBuyLimit = TickMath.ceilToTick(entryPrice * 1.0005, tickSize); // LTP + 0.05% ceil to valid tick
-        log.info("DISPATCHING ENTRY ORDER: BUY {} x {} @ Marketable Limit ₹{}", quantity, winner.symbol(), marketableBuyLimit);
-
-        TradeOrder buyOrder = gateway.placeOrder(winner.symbol(), "BUY", quantity, marketableBuyLimit, 0.0, "LIMIT");
-        activeEntryOrderId = buyOrder.orderId();
-        positionSizingEngine.recordTradeDispatched();
-        activityFeedService.record(
-            "ORDERS",
-            "SUCCESS",
-            gateway.getExecutionMode().name(),
-            activeTradeId,
-            "Entry Order Dispatched",
-            "BUY " + quantity + " x " + winner.symbol() + " @ Marketable Limit ₹" + marketableBuyLimit,
-            winner.symbol(),
-            Map.of("orderId", buyOrder.orderId(), "quantity", quantity, "limitPrice", marketableBuyLimit)
-        );
-
-        // Step 6: If gateway immediately confirmed filled position (e.g. Paper Trading), arm protective SL immediately
-        Optional<Position> immediatePos = gateway.getOpenPosition();
-        if (immediatePos.isPresent() && immediatePos.get().symbol().equals(winner.symbol())) {
-            Position pos = immediatePos.get();
-            strategyHighWaterMark = Math.max(entryPrice, pos.currentPrice());
-            double slLimitPrice = TickMath.floorToTick(initialStop * 0.9985, tickSize);
-            try {
-                TradeOrder slOrder = gateway.placeOrder(winner.symbol(), "SELL", pos.quantity(), slLimitPrice, initialStop, "SL");
-                activeSlOrderId = slOrder.orderId();
-                currentArmedStopPrice = initialStop;
-                lifecycleState = TradeLifecycleState.ACTIVE_POSITION;
-                log.info("PROTECTIVE SL ENGAGED: OrderId={}, Trigger=₹{}, Limit=₹{}", activeSlOrderId, initialStop, slLimitPrice);
-                activityFeedService.record(
-                    "ORDERS",
-                    "SUCCESS",
-                    gateway.getExecutionMode().name(),
-                    activeTradeId,
-                    "Protective Stop-Loss Armed",
-                    "Stop-Loss order engaged: Trigger=₹" + initialStop + ", Limit=₹" + slLimitPrice,
-                    winner.symbol(),
-                    Map.of("slOrderId", activeSlOrderId, "triggerPrice", initialStop, "limitPrice", slLimitPrice)
-                );
-            } catch (Throwable t) {
-                log.warn("Immediate SL placement failed: {}. Will retry on incoming tick stream.", t.getMessage());
+            // Step 6: If gateway immediately confirmed filled position (e.g. Paper Trading), arm protective SL immediately
+            Optional<Position> immediatePos = gateway.getOpenPosition();
+            if (immediatePos.isPresent() && immediatePos.get().symbol().equals(winner.symbol())) {
+                Position pos = immediatePos.get();
+                strategyHighWaterMark = Math.max(entryPrice, pos.currentPrice());
+                double slLimitPrice = TickMath.floorToTick(initialStop * 0.9985, tickSize);
+                try {
+                    TradeOrder slOrder = gateway.placeOrder(winner.symbol(), "SELL", pos.quantity(), slLimitPrice, initialStop, "SL");
+                    activeSlOrderId = slOrder.orderId();
+                    currentArmedStopPrice = initialStop;
+                    lifecycleState = TradeLifecycleState.ACTIVE_POSITION;
+                    log.info("PROTECTIVE SL ENGAGED: OrderId={}, Trigger=₹{}, Limit=₹{}", activeSlOrderId, initialStop, slLimitPrice);
+                    activityFeedService.record(
+                        "ORDERS",
+                        "SUCCESS",
+                        gateway.getExecutionMode().name(),
+                        activeTradeId,
+                        "Protective Stop-Loss Armed",
+                        "Stop-Loss order engaged: Trigger=₹" + initialStop + ", Limit=₹" + slLimitPrice,
+                        winner.symbol(),
+                        Map.of("slOrderId", activeSlOrderId, "triggerPrice", initialStop, "limitPrice", slLimitPrice)
+                    );
+                } catch (Throwable t) {
+                    log.warn("Immediate SL placement failed: {}. Will retry on incoming tick stream.", t.getMessage());
+                }
+            } else {
+                log.info("Entry order dispatched for {}. Waiting for fill confirmation before placing protective stop...", winner.symbol());
             }
-        } else {
-            log.info("Entry order dispatched. Waiting for fill confirmation before placing protective stop...");
+
+            break; // Order placed; stop evaluating further candidates
         }
     }
 
     @Override
     @Scheduled(cron = "0 5 15 * * MON-FRI", zone = "Asia/Kolkata")
     public synchronized void executeSquareOff() {
-        log.info("=== 15:05:00 MANDATORY INTRADAY SQUARE-OFF ENGAGED ===");
+        log.warn("=== 15:05:00 MANDATORY INTRADAY SQUARE-OFF ENGAGED ===");
         BrokerGateway gateway = brokerGatewayManager.getActiveGateway();
 
         // 1. Reconcile in-flight Entry Order: Cancel pending buy order to prevent late execution
@@ -796,27 +808,34 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
 
             lifecycleState = TradeLifecycleState.PENDING_EXIT;
 
-            // Aggressive limit sell: LTP - 0.10% (directionally floored)
-            double tickSize = getSymbolTickSize(pos.symbol());
-            double aggressiveSellPrice = TickMath.floorToTick(pos.currentPrice() * 0.9990, tickSize);
-            gateway.placeOrder(pos.symbol(), "SELL", pos.quantity(), aggressiveSellPrice, 0.0, "LIMIT");
+            // Direct Market Exit for 100% execution guarantee
+            try {
+                TradeOrder exitOrder = gateway.placeOrder(pos.symbol(), "SELL", pos.quantity(), 0.0, 0.0, "MARKET");
+                activeExitOrderId = exitOrder.orderId();
+            } catch (Throwable t) {
+                log.error("Market exit order failed for {}: {}. Retrying aggressive marketable limit.", pos.symbol(), t.getMessage());
+                double tickSize = getSymbolTickSize(pos.symbol());
+                double aggressiveSellPrice = TickMath.floorToTick(pos.currentPrice() * 0.9950, tickSize);
+                TradeOrder exitOrder = gateway.placeOrder(pos.symbol(), "SELL", pos.quantity(), aggressiveSellPrice, 0.0, "LIMIT");
+                activeExitOrderId = exitOrder.orderId();
+            }
 
-            // Check if immediately flat (e.g. Paper Trading)
-            Optional<Position> postExit = gateway.getOpenPosition();
-            if (postExit.isEmpty()) {
-                lifecycleState = TradeLifecycleState.FLAT;
-                activeSymbol = null;
-                activeTradeId = null;
-                strategyHighWaterMark = 0.0;
-                currentArmedStopPrice = 0.0;
+            // 4. Active Reconciliation Loop: Verify flat within 5 seconds
+            for (int attempt = 0; attempt < 5; attempt++) {
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException ignored) {}
+
+                Optional<Position> checkPos = gateway.getOpenPosition();
+                if (checkPos.isEmpty() || checkPos.get().quantity() <= 0) {
+                    setFlatState();
+                    log.info("15:05 Square-off confirmed flat on attempt {}.", attempt + 1);
+                    return;
+                }
             }
         } else {
             log.info("Square-off complete: No open position found.");
-            lifecycleState = TradeLifecycleState.FLAT;
-            activeSymbol = null;
-            activeTradeId = null;
-            strategyHighWaterMark = 0.0;
-            currentArmedStopPrice = 0.0;
+            setFlatState();
             activityFeedService.record(
                 "LIFECYCLE",
                 "INFO",
@@ -828,6 +847,17 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                 Map.of()
             );
         }
+    }
+
+    private void setFlatState() {
+        lifecycleState = TradeLifecycleState.FLAT;
+        activeSymbol = null;
+        activeTradeId = null;
+        activeSlOrderId = null;
+        activeEntryOrderId = null;
+        activeExitOrderId = null;
+        strategyHighWaterMark = 0.0;
+        currentArmedStopPrice = 0.0;
     }
 
     @Override
@@ -876,6 +906,10 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             throw new IllegalStateException("Cannot take manual entry: A trade position or order is already actively held!");
         }
 
+        if (!positionSizingEngine.canTradeToday()) {
+            throw new IllegalStateException("Cannot take manual entry: Daily trade limit or loss circuit breaker reached!");
+        }
+
         Map<String, Object> quote = gateway.getStockQuote(symbol);
         double entryPrice = (quote != null && quote.get("lastPrice") instanceof Number)
             ? ((Number) quote.get("lastPrice")).doubleValue()
@@ -914,6 +948,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         // Determine Quantity
         int quantity;
         if (customQuantity != null && customQuantity > 0) {
+            positionSizingEngine.validateManualOrder(symbol, customQuantity, entryPrice, initialStop, gateway);
             quantity = customQuantity;
         } else {
             quantity = positionSizingEngine.calculateQuantity(symbol, entryPrice, initialStop, gateway);

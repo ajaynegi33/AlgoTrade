@@ -59,6 +59,9 @@ public class KiteMarketDataService {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private com.algotrade.algotradebackend.websocket.LiveWebSocketBroadcastService broadcastService;
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.algotrade.algotradebackend.backtest.service.HistoricalMarketDataService historicalDataService;
+
     // Default static tokens for high-liquidity NSE constituents (fallback if quote API is offline)
     private static final Map<String, Long> DEFAULT_NSE_TOKENS = Map.of(
         "RELIANCE", 738561L,
@@ -400,14 +403,32 @@ public class KiteMarketDataService {
 
             for (String sym : symbols) {
                 OHLCQuote q = ohlcMap.get("NSE:" + sym);
-                if (q != null && q.ohlc != null) {
-                    double prevClose = q.ohlc.close;
-                    double pdh = q.ohlc.high;
-                    double avgVol = 2_000_000.0; // Baseline fallback
-                    double atrPct = 2.0;
+                double prevClose = (q != null && q.ohlc != null && q.ohlc.close > 0) ? q.ohlc.close : 0.0;
+                double pdh = 0.0;
+                double avgVol = 2_000_000.0; // Baseline fallback
+                double atrPct = 2.0;
 
+                if (historicalDataService != null) {
+                    try {
+                        var baseline = historicalDataService.getBaselineReference(sym, today);
+                        if (baseline != null) {
+                            if (prevClose <= 0) prevClose = baseline.prevClose();
+                            pdh = baseline.pdh();
+                            avgVol = baseline.avgDailyVol();
+                            atrPct = baseline.atrPct();
+                        }
+                    } catch (Throwable t) {
+                        log.warn("Historical baseline lookup failed for {}: {}", sym, t.getMessage());
+                    }
+                }
+
+                if (pdh <= 0 && q != null && q.ohlc != null) {
+                    pdh = q.ohlc.high > 0 ? q.ohlc.high : prevClose;
+                }
+
+                if (prevClose > 0 || pdh > 0) {
                     mbStrategy.updateReferenceData(sym, prevClose, pdh, avgVol, atrPct);
-                    log.info("Populated reference data for {}: PrevClose=₹{}, PDH=₹{}", sym, prevClose, pdh);
+                    log.info("Populated reference data for {}: PrevClose=₹{}, PDH=₹{}, ADV={}, ATR={}%", sym, prevClose, pdh, avgVol, atrPct);
                 }
             }
 

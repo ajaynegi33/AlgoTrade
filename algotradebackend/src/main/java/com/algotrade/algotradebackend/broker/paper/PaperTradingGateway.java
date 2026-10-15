@@ -72,10 +72,12 @@ public class PaperTradingGateway implements BrokerGateway {
     public synchronized TradeOrder placeOrder(String symbol, String transactionType, int quantity, double price, double triggerPrice, String orderType) {
         String orderId = "PAPER-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
 
-        if ("BUY".equalsIgnoreCase(transactionType) && "LIMIT".equalsIgnoreCase(orderType)) {
+        if ("BUY".equalsIgnoreCase(transactionType) && ("LIMIT".equalsIgnoreCase(orderType) || "MARKET".equalsIgnoreCase(orderType))) {
             // Simulate realistic entry slippage (0.05% adverse price impact)
-            double executedPrice = Math.round((price * 1.0005) * 100.0) / 100.0;
-            TradeOrder filledOrder = new TradeOrder(orderId, symbol, "BUY", quantity, executedPrice, 0.0, "LIMIT", "FILLED", ExecutionMode.PAPER, Instant.now());
+            Position existing = openPosition.get();
+            double basePrice = price > 0.0 ? price : (existing != null ? existing.currentPrice() : 0.0);
+            double executedPrice = Math.round((basePrice * 1.0005) * 100.0) / 100.0;
+            TradeOrder filledOrder = new TradeOrder(orderId, symbol, "BUY", quantity, executedPrice, 0.0, orderType.toUpperCase(), "FILLED", ExecutionMode.PAPER, Instant.now());
             orders.put(orderId, filledOrder);
 
             // Create initial position
@@ -102,10 +104,12 @@ public class PaperTradingGateway implements BrokerGateway {
             return slOrder;
         }
 
-        if ("SELL".equalsIgnoreCase(transactionType) && "LIMIT".equalsIgnoreCase(orderType)) {
-            // Direct aggressive exit
-            double executedPrice = Math.round((price * 0.9995) * 100.0) / 100.0;
-            TradeOrder exitOrder = new TradeOrder(orderId, symbol, "SELL", quantity, executedPrice, 0.0, "LIMIT", "FILLED", ExecutionMode.PAPER, Instant.now());
+        if ("SELL".equalsIgnoreCase(transactionType) && ("LIMIT".equalsIgnoreCase(orderType) || "MARKET".equalsIgnoreCase(orderType))) {
+            // Direct aggressive exit or market square-off
+            Position current = openPosition.get();
+            double basePrice = price > 0.0 ? price : (current != null ? current.currentPrice() : 0.0);
+            double executedPrice = Math.round((basePrice * 0.9995) * 100.0) / 100.0;
+            TradeOrder exitOrder = new TradeOrder(orderId, symbol, "SELL", quantity, executedPrice, 0.0, orderType.toUpperCase(), "FILLED", ExecutionMode.PAPER, Instant.now());
             orders.put(orderId, exitOrder);
             closePosition(symbol, executedPrice, "MANUAL_OR_TIME_EXIT");
             return exitOrder;

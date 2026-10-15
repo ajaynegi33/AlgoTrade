@@ -25,6 +25,9 @@ public class ChargesBreakdownTest {
         // STT: 20400 * 0.00025 = 5.10
         assertEquals(5.10, charges.stt());
 
+        // Exchange Transaction Charges: 40400 * 0.0000307 = 1.24
+        assertEquals(1.24, charges.exchangeCharges());
+
         // Gross Profit should be exactly ₹400.00
         assertEquals(400.00, charges.grossPnL());
 

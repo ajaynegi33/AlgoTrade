@@ -13,7 +13,7 @@ import com.algotrade.algotradebackend.core.util.TickMath;
  * <ul>
  *   <li><b>Brokerage:</b> ₹20 flat or 0.03% of order value (whichever is lower) per executed order.</li>
  *   <li><b>STT (Securities Transaction Tax):</b> 0.025% applied strictly to the Sell turnover.</li>
- *   <li><b>Exchange Transaction Charges (NSE):</b> 0.00297% of total turnover (Buy + Sell).</li>
+ *   <li><b>Exchange Transaction Charges (NSE):</b> 0.00307% of total turnover (Buy + Sell).</li>
  *   <li><b>SEBI Turnover Charges:</b> ₹10 per Crore (0.0001%) of total turnover.</li>
  *   <li><b>Stamp Duty:</b> 0.003% applied strictly to the Buy turnover.</li>
  *   <li><b>GST (Goods and Services Tax):</b> 18% applied on (Brokerage + Exchange Charges + SEBI Charges).</li>
@@ -55,8 +55,8 @@ public record ChargesBreakdown(
         // 2. STT: 0.025% on Sell Turnover only for intraday equity
         double stt = round(sellTurnover * 0.00025);
 
-        // 3. Exchange Transaction Charges (NSE Equity): 0.00297% on total turnover
-        double exchangeCharges = round(totalTurnover * 0.0000297);
+        // 3. Exchange Transaction Charges (NSE Equity): 0.00307% on total turnover
+        double exchangeCharges = round(totalTurnover * 0.0000307);
 
         // 4. SEBI Turnover Charges: ₹10 per crore (0.0001% of total turnover)
         double sebiCharges = round(totalTurnover * 0.000001);

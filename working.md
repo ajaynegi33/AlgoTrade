@@ -377,7 +377,7 @@ Accurately modeled in `ChargesBreakdown.java`:
 | :--- | :--- |
 | **Brokerage** | $\min(₹20.00,\, 0.03\% \times \text{Turnover})$ per executed leg (Buy and Sell). |
 | **STT (Securities Transaction Tax)** | **0.025%** applied strictly to the **Sell Turnover** for intraday equity. |
-| **Exchange Transaction Fee** | **0.00297%** on total combined turnover (Buy + Sell). |
+| **Exchange Transaction Fee** | **0.00307%** on total combined turnover (Buy + Sell). |
 | **SEBI Turnover Charges** | ₹10 per crore (**0.0001%**) on total combined turnover. |
 | **Stamp Duty** | **0.003%** applied strictly to the **Buy Turnover**. |
 | **GST (Goods & Services Tax)** | **18.0%** on `(Brokerage + Exchange Charges + SEBI Charges)`. |

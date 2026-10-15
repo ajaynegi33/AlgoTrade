@@ -142,14 +142,87 @@ public class PositionSizingEngine {
             return 0;
         }
 
-        // Total leveraged purchasing power: e.g. ₹10,000 capital * 5x leverage = ₹50,000 position value
-        double maxPositionValue = accountCapital * maxExposureMultiplier;
-
-        // Risk capacity applied to overall invested amount (capital + leverage): e.g. ₹50,000 * 2.8% = ₹1,400 risk budget
-        double plannedRiskBudget = maxPositionValue * (riskBudgetPct / 100.0);
+        // Risk budget applied strictly to actual account equity (e.g. ₹10,000 * 2.0% = ₹200 risk capacity)
+        double plannedRiskBudget = accountCapital * (riskBudgetPct / 100.0);
         int qRisk = (int) Math.floor(plannedRiskBudget / stopDistance);
 
-        return Math.max(0, qRisk);
+        // Maximum leveraged exposure ceiling (e.g. ₹10,000 * 5x = ₹50,000 max position value)
+        double maxPositionValue = accountCapital * maxExposureMultiplier;
+        int qExposure = (int) Math.floor(maxPositionValue / entryPrice);
+
+        return Math.max(0, Math.min(qRisk, qExposure));
+    }
+
+    /**
+     * Validates a manually submitted order against daily trade limits, available margin,
+     * maximum exposure ceiling, and maximum rupee risk.
+     *
+     * @param symbol Trading symbol (e.g. "RELIANCE")
+     * @param customQuantity User-specified quantity
+     * @param entryPrice Estimated or requested entry price
+     * @param stopPrice Intended stop-loss price
+     * @param gateway Active broker gateway
+     * @throws IllegalStateException if daily limits or loss circuit breakers are active
+     * @throws IllegalArgumentException if quantity, price, margin, or risk constraints are violated
+     */
+    public void validateManualOrder(
+        String symbol,
+        int customQuantity,
+        double entryPrice,
+        double stopPrice,
+        BrokerGateway gateway
+    ) {
+        if (!canTradeToday()) {
+            throw new IllegalStateException("Trading halted: Daily trade limit or loss circuit breaker reached.");
+        }
+        if (customQuantity <= 0) {
+            throw new IllegalArgumentException("Custom quantity must be strictly positive, got: " + customQuantity);
+        }
+        if (entryPrice <= 0 || stopPrice <= 0 || stopPrice >= entryPrice) {
+            throw new IllegalArgumentException("Invalid price parameters: Stop price must be strictly below entry price.");
+        }
+        double stopDistPct = ((entryPrice - stopPrice) / entryPrice) * 100.0;
+        if (stopDistPct < minStopDistancePct || stopDistPct > maxStopDistancePct) {
+            throw new IllegalArgumentException(String.format(
+                "Stop distance %.2f%% outside allowable range [%.2f%%, %.2f%%]",
+                stopDistPct, minStopDistancePct, maxStopDistancePct
+            ));
+        }
+        double activeCapital = (gateway != null) ? gateway.getTotalCapital() : getCapital();
+        double availableCash = (gateway != null) ? gateway.getAvailableCash() : activeCapital;
+        double marginPerShare = (gateway != null) ? gateway.calculateOrderMargin(symbol, 1, entryPrice) : (entryPrice / maxExposureMultiplier);
+        if (marginPerShare <= 0) {
+            marginPerShare = entryPrice / maxExposureMultiplier;
+        }
+
+        // 1. Margin cash capacity check
+        double totalRequiredMargin = customQuantity * marginPerShare;
+        if (totalRequiredMargin > availableCash) {
+            throw new IllegalArgumentException(String.format(
+                "Custom quantity %d requires ₹%.2f margin, exceeding available cash ₹%.2f",
+                customQuantity, totalRequiredMargin, availableCash
+            ));
+        }
+
+        // 2. Maximum leveraged exposure ceiling check (with 5% buffer for tick precision)
+        double maxAllowedExposure = activeCapital * maxExposureMultiplier;
+        double orderExposure = customQuantity * entryPrice;
+        if (orderExposure > maxAllowedExposure * 1.05) {
+            throw new IllegalArgumentException(String.format(
+                "Custom quantity %d creates exposure ₹%.2f, exceeding maximum permitted ₹%.2f (%.1fx leverage)",
+                customQuantity, orderExposure, maxAllowedExposure, maxExposureMultiplier
+            ));
+        }
+
+        // 3. Absolute equity risk ceiling check (1.5x risk tolerance for manual discretionary entries)
+        double rupeeRisk = customQuantity * (entryPrice - stopPrice);
+        double maxAllowedRisk = activeCapital * (riskBudgetPct / 100.0) * 1.50;
+        if (rupeeRisk > maxAllowedRisk) {
+            throw new IllegalArgumentException(String.format(
+                "Custom quantity %d risks ₹%.2f, exceeding risk budget cap ₹%.2f",
+                customQuantity, rupeeRisk, maxAllowedRisk
+            ));
+        }
     }
 
     /**
@@ -178,18 +251,14 @@ public class PositionSizingEngine {
             return 0;
         }
 
-        // Constraint 2: Available Margin Quantity (Q_margin) & Institutional 5x Leverage Gate
-        double availableCash = gateway.getAvailableCash();
-        double marginPerShare = gateway.calculateOrderMargin(symbol, 1, entryPrice);
-
-        // Reject candidate if broker does not permit full 5x MIS leverage (margin > entryPrice / 4.0)
-        if (marginPerShare > (entryPrice / 4.0)) {
-            log.warn("REJECTED {}: Broker requires higher margin (₹{}/share on entry ₹{}). Full 5x leverage not supported.",
-                symbol, marginPerShare, entryPrice);
-            return 0;
+        // Constraint 2: Available Margin Quantity (Q_margin)
+        double availableCash = gateway != null ? gateway.getAvailableCash() : activeCapital;
+        double marginPerShare = gateway != null ? gateway.calculateOrderMargin(symbol, 1, entryPrice) : (entryPrice / maxExposureMultiplier);
+        if (marginPerShare <= 0) {
+            marginPerShare = entryPrice / maxExposureMultiplier;
         }
 
-        int qMargin = marginPerShare > 0 ? (int) Math.floor(availableCash / marginPerShare) : 0;
+        int qMargin = (int) Math.floor(availableCash / marginPerShare);
 
         // Constraint 3: Target Exposure Ceiling (Q_exposure = activeCapital * maxExposureMultiplier / entryPrice)
         double maxExposure = activeCapital * maxExposureMultiplier;
