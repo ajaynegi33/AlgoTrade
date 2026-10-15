@@ -397,13 +397,6 @@ export default function MarketDepthWidget({ quote }: MarketDepthWidgetProps) {
               ({microPrice >= (bestBid + bestAsk) / 2 ? "▲ Ask-Tilted" : "▼ Bid-Tilted"})
             </span>
           </div>
-
-          <div className="flex items-center gap-3">
-            <span className="flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-              <span className="text-emerald-400">Live 0ms WebSocket Order Flow</span>
-            </span>
-          </div>
         </div>
       )}
     </div>

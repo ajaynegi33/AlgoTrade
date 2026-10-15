@@ -83,4 +83,12 @@ public interface TradingStrategy {
     default java.util.Map<String, Object> executeManualEntry(String symbol, Integer quantity, Double customStopPrice, Double entryPrice) {
         throw new UnsupportedOperationException("Manual entry is not supported by " + getStrategyId());
     }
+
+    /**
+     * Executes an immediate discretionary market exit / sell on the active position,
+     * cancels resting stop-loss orders, settles trade PnL, and resets lifecycle state to FLAT.
+     */
+    default java.util.Map<String, Object> executeManualExit(String symbol, String reason) {
+        throw new UnsupportedOperationException("Manual exit is not supported by " + getStrategyId());
+    }
 }

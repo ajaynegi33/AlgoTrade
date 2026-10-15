@@ -821,6 +821,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                 Optional<Position> checkPos = gateway.getOpenPosition();
                 if (checkPos.isEmpty() || checkPos.get().quantity() <= 0) {
                     setFlatState();
+                    broadcastOverviewIfAvailable();
                     log.info("15:05 Square-off confirmed flat on attempt {}.", attempt + 1);
                     return;
                 }
@@ -828,6 +829,7 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         } else {
             log.info("Square-off complete: No open position found.");
             setFlatState();
+            broadcastOverviewIfAvailable();
             activityFeedService.record(
                 "LIFECYCLE",
                 "INFO",
@@ -850,6 +852,123 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         activeExitOrderId = null;
         strategyHighWaterMark = 0.0;
         currentArmedStopPrice = 0.0;
+    }
+
+    private void broadcastOverviewIfAvailable() {
+        if (broadcastServiceProvider != null && broadcastServiceProvider.getIfAvailable() != null) {
+            try {
+                broadcastServiceProvider.getIfAvailable().broadcastOverview();
+            } catch (Throwable t) {
+                log.warn("Failed to broadcast overview update: {}", t.getMessage());
+            }
+        }
+    }
+
+    private void cancelRestingOrders(BrokerGateway gateway) {
+        if (activeEntryOrderId != null) {
+            try {
+                gateway.cancelOrder(activeEntryOrderId);
+            } catch (Throwable t) {
+                log.warn("Failed to cancel resting entry order {}: {}", activeEntryOrderId, t.getMessage());
+            }
+            activeEntryOrderId = null;
+        }
+        if (activeSlOrderId != null) {
+            try {
+                gateway.cancelOrder(activeSlOrderId);
+            } catch (Throwable t) {
+                log.warn("Failed to cancel resting SL order {}: {}", activeSlOrderId, t.getMessage());
+            }
+            activeSlOrderId = null;
+        }
+    }
+
+    @Override
+    public synchronized Map<String, Object> executeManualExit(String expectedSymbol, String reason) {
+        BrokerGateway gateway = brokerGatewayManager.getActiveGateway();
+        Optional<Position> optPos = gateway.getOpenPosition();
+
+        if (optPos.isEmpty() || optPos.get().quantity() <= 0) {
+            cancelRestingOrders(gateway);
+            setFlatState();
+            broadcastOverviewIfAvailable();
+            Map<String, Object> res = new LinkedHashMap<>();
+            res.put("success", true);
+            res.put("message", "No active position open to liquidate. Engine is flat.");
+            res.put("status", "FLAT");
+            return res;
+        }
+
+        Position pos = optPos.get();
+        if (expectedSymbol != null && !expectedSymbol.isBlank() && !pos.symbol().equalsIgnoreCase(expectedSymbol)) {
+            log.warn("Manual exit symbol mismatch: requested {}, open position is {}", expectedSymbol, pos.symbol());
+        }
+
+        String exitReason = (reason != null && !reason.isBlank()) ? reason : "MANUAL_OPERATOR_SELL";
+        log.info("DISPATCHING MANUAL MARKET EXIT for {} x {} (Reason: {})", pos.quantity(), pos.symbol(), exitReason);
+
+        // 1. Immediately cancel resting SL and entry orders to eliminate ghost fill risks
+        cancelRestingOrders(gateway);
+
+        // 2. Place immediate Market Sell Order to active broker gateway
+        lifecycleState = TradeLifecycleState.PENDING_EXIT;
+        double executedPrice = pos.currentPrice();
+
+        try {
+            TradeOrder exitOrder = gateway.placeOrder(pos.symbol(), "SELL", pos.quantity(), 0.0, 0.0, "MARKET");
+            activeExitOrderId = exitOrder.orderId();
+            if (exitOrder.price() > 0) {
+                executedPrice = exitOrder.price();
+            }
+        } catch (Throwable t) {
+            log.error("Direct market exit failed for {}: {}. Retrying aggressive marketable limit.", pos.symbol(), t.getMessage());
+            double tickSize = getSymbolTickSize(pos.symbol());
+            double aggressiveSellPrice = TickMath.floorToTick(pos.currentPrice() * 0.9950, tickSize);
+            TradeOrder exitOrder = gateway.placeOrder(pos.symbol(), "SELL", pos.quantity(), aggressiveSellPrice, 0.0, "LIMIT");
+            activeExitOrderId = exitOrder.orderId();
+            if (exitOrder.price() > 0) {
+                executedPrice = exitOrder.price();
+            }
+        }
+
+        // 3. Update lifecycle state to FLAT
+        setFlatState();
+
+        // 4. Audit in Activity Feed
+        double grossPnL = Math.round(((executedPrice - pos.entryPrice()) * pos.quantity()) * 100.0) / 100.0;
+        double grossPnLPct = pos.entryPrice() > 0 ? Math.round(((executedPrice - pos.entryPrice()) / pos.entryPrice() * 100.0) * 100.0) / 100.0 : 0.0;
+        activityFeedService.record(
+            "ORDERS",
+            "SUCCESS",
+            gateway.getExecutionMode().name(),
+            activeTradeId != null ? activeTradeId : "MANUAL-" + pos.symbol(),
+            "Manual Market Exit Executed",
+            "Sold " + pos.quantity() + "x " + pos.symbol() + " @ ₹" + executedPrice + " (P&L: " + (grossPnL >= 0 ? "+" : "") + "₹" + grossPnL + " / " + (grossPnLPct >= 0 ? "+" : "") + grossPnLPct + "%). Position closed.",
+            pos.symbol(),
+            Map.of(
+                "symbol", pos.symbol(),
+                "quantity", pos.quantity(),
+                "entryPrice", pos.entryPrice(),
+                "exitPrice", executedPrice,
+                "grossPnL", grossPnL,
+                "reason", exitReason
+            )
+        );
+
+        // 5. Broadcast immediate real-time update to all WebSocket connected UI clients
+        broadcastOverviewIfAvailable();
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("success", true);
+        result.put("message", "Market exit executed successfully for " + pos.symbol());
+        result.put("symbol", pos.symbol());
+        result.put("quantity", pos.quantity());
+        result.put("entryPrice", pos.entryPrice());
+        result.put("exitPrice", executedPrice);
+        result.put("grossPnL", grossPnL);
+        result.put("grossPnLPct", grossPnLPct);
+        result.put("status", "FLAT");
+        return result;
     }
 
     @Override

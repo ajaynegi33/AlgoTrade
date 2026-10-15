@@ -137,4 +137,17 @@ public class StrategyManager {
         }
         return result;
     }
+
+    public java.util.Map<String, Object> executeManualExit(String symbol, String reason) {
+        TradingStrategy strategy = getActiveStrategy();
+        if (strategy == null) {
+            throw new IllegalStateException("No active trading strategy is currently configured.");
+        }
+        var result = strategy.executeManualExit(symbol, reason);
+        var broadcast = getBroadcastService();
+        if (broadcast != null) {
+            broadcast.broadcastOverview();
+        }
+        return result;
+    }
 }

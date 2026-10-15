@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { OverviewData } from "../types";
 import { TickUpdate } from "@/hooks/useEngineWebSocket";
 import { SkeletonOverview } from "../common/Skeleton";
@@ -12,6 +13,9 @@ interface OverviewTabProps {
 }
 
 export default function OverviewTab({ overview, backendUrl = "http://localhost:8080", latestTick }: OverviewTabProps) {
+  const [isSelling, setIsSelling] = useState<boolean>(false);
+  const [sellError, setSellError] = useState<string | null>(null);
+
   if (!overview) {
     return <SkeletonOverview />;
   }
@@ -26,6 +30,33 @@ export default function OverviewTab({ overview, backendUrl = "http://localhost:8
   const rawPnLPct = pos && entryPrice > 0 ? ((currentLtp - entryPrice) / entryPrice) * 100 : 0;
   const unrealizedPnLPct = Math.round(rawPnLPct * 100) / 100;
   const highWaterMark = pos ? Math.max(pos.highWaterMark, currentLtp) : 0;
+
+  const handleInstantSell = async () => {
+    if (isSelling || !overview?.activePosition) return;
+
+    setIsSelling(true);
+    setSellError(null);
+
+    try {
+      const res = await fetch(`${backendUrl}/api/dashboard/manual-exit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: overview.activePosition.symbol,
+          reason: "MANUAL_OPERATOR_SELL",
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "Failed to execute market exit");
+      }
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : "Failed to exit position";
+      setSellError(errorMessage);
+      setIsSelling(false);
+    }
+  };
 
   return (
     <div className="flex flex-col gap-6 animate-fadeIn">
@@ -88,9 +119,6 @@ export default function OverviewTab({ overview, backendUrl = "http://localhost:8
                   <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
                   <span>Live Active Position</span>
                 </span>
-                <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-400 text-[10px] font-mono">
-                  ⚡ 0ms Live Ticker Stream
-                </span>
               </div>
               <h2 className="text-2xl sm:text-3xl font-black text-white mt-1">
                 {overview.activePosition.symbol}
@@ -100,22 +128,75 @@ export default function OverviewTab({ overview, backendUrl = "http://localhost:8
                 {new Date(overview.activePosition.entryTime).toLocaleTimeString()}
               </p>
             </div>
-            <div className="text-left sm:text-right">
-              <p className="text-xs text-slate-400 uppercase tracking-wider">Unrealized P&amp;L</p>
-              <p
-                className={`text-2xl sm:text-4xl font-mono font-black ${
-                  unrealizedPnL >= 0 ? "text-emerald-400" : "text-rose-400"
+            {/* Right side cluster: Immediate Sell Button on the left, Unrealized P&L on the right */}
+            <div className="flex items-center gap-3 sm:gap-5 w-full sm:w-auto justify-between sm:justify-end">
+              {/* Immediate 1-Click Market Sell Button */}
+              <button
+                type="button"
+                onClick={handleInstantSell}
+                disabled={isSelling}
+                title="Immediately liquidate active position at market price and book profit/loss"
+                className={`group relative px-4 sm:px-5 py-2 sm:py-2 rounded-md font-bold flex items-center gap-2.5 transition-all duration-150 cursor-pointer shadow-lg select-none ${
+                  isSelling
+                    ? "bg-rose-950/80 border border-rose-800/60 text-rose-300 opacity-80 cursor-wait"
+                    : "bg-gradient-to-r from-rose-600 via-rose-600 to-rose-700 hover:from-rose-500 hover:to-rose-600 active:scale-[0.98] text-white border border-rose-400/50 shadow-rose-950/50 hover:shadow-rose-900/60"
                 }`}
               >
-                {unrealizedPnL >= 0 ? "+" : ""}₹
-                {unrealizedPnL.toFixed(2)}
-                <span className="text-sm sm:text-lg font-normal ml-2 opacity-80">
-                  ({unrealizedPnLPct >= 0 ? "+" : ""}
-                  {unrealizedPnLPct.toFixed(2)}%)
-                </span>
-              </p>
+                {isSelling ? (
+                  <>
+                    <svg className="animate-spin h-4 w-4 text-rose-200" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+                    </svg>
+                    <span className="text-xs sm:text-sm tracking-wider font-mono">SELLING...</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="flex flex-col items-start text-left leading-tight">
+                      <span className="flex items-center gap-1.5 text-xs sm:text-sm font-black tracking-wider uppercase">
+                      
+                        <span>Sell</span>
+                      </span>
+      
+                    </span>
+                  </>
+                )}
+              </button>
+
+              {/* Unrealized P&L */}
+              <div className="text-right">
+                <p className="text-xs text-slate-400 uppercase tracking-wider">Unrealized P&amp;L</p>
+                <p
+                  className={`text-2xl sm:text-4xl font-mono font-black ${
+                    unrealizedPnL >= 0 ? "text-emerald-400" : "text-rose-400"
+                  }`}
+                >
+                  {unrealizedPnL >= 0 ? "+" : ""}₹
+                  {unrealizedPnL.toFixed(2)}
+                  <span className="text-sm sm:text-lg font-normal ml-2 opacity-80">
+                    ({unrealizedPnLPct >= 0 ? "+" : ""}
+                    {unrealizedPnLPct.toFixed(2)}%)
+                  </span>
+                </p>
+              </div>
             </div>
           </div>
+
+          {sellError && (
+            <div className="mt-3 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center justify-between animate-fadeIn">
+              <span className="flex items-center gap-2">
+                <span>⚠️</span>
+                <span>{sellError}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setSellError(null)}
+                className="text-rose-400 hover:text-white text-xs font-bold px-2 py-0.5 rounded bg-rose-950/40 hover:bg-rose-900/60 cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-5">
             <div className="bg-slate-950/50 rounded-xl p-3 border border-slate-800/80">

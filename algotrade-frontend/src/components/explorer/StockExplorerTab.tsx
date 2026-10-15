@@ -395,11 +395,11 @@ export default function StockExplorerTab({
               }`}
             >
               <span
-                className={`w-2 h-2 rounded-full ${
+                className={`w-2 h-2 rounded-lg ${
                   isLiveStreaming ? "bg-emerald-400 animate-pulse" : "bg-slate-500"
                 }`}
               />
-              {isLiveStreaming ? "⚡ Live Stream (0ms)" : "Paused"}
+              {isLiveStreaming ? "Live Stream" : "Paused"}
             </button>
 
             {lastRefreshed && (
@@ -421,13 +421,13 @@ export default function StockExplorerTab({
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
               placeholder="Search symbol (e.g. NTPC, INFY, TCS, RELIANCE)..."
-              className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-xl pl-14 pr-4 py-3 text-sm font-mono text-white placeholder-slate-500 outline-none transition"
+              className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-lg pl-14 pr-4 py-3 text-sm font-mono text-white placeholder-slate-500 outline-none transition"
             />
           </div>
           <button
             type="submit"
             disabled={loading || !searchInput.trim()}
-            className="px-6 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold text-sm tracking-wide transition flex items-center gap-2 cursor-pointer disabled:cursor-not-allowed shadow-md shadow-emerald-950/40"
+            className="px-6 py-3 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold text-sm tracking-wide transition flex items-center gap-2 cursor-pointer disabled:cursor-not-allowed shadow-md shadow-emerald-950/40"
           >
             Search
           </button>

@@ -39,6 +39,8 @@ import java.util.*;
 @CrossOrigin(origins = "*")
 public class TradingDashboardController {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(TradingDashboardController.class);
+
     private final BrokerGatewayManager brokerGatewayManager;
     private final StrategyManager strategyManager;
     private final PositionSizingEngine positionSizingEngine;
@@ -255,6 +257,28 @@ public class TradingDashboardController {
         );
         strategyManager.executeSquareOff();
         return ResponseEntity.ok(Map.of("success", true, "message", "Emergency square-off executed"));
+    }
+
+    /**
+     * Immediate Manual Position Exit / Sell:
+     * Liquidates open position at market, cancels resting stop-loss orders,
+     * settles PnL, and immediately resets state to FLAT without delays.
+     */
+    @PostMapping("/manual-exit")
+    public ResponseEntity<Map<String, Object>> manualExit(@RequestBody(required = false) Map<String, String> payload) {
+        String requestedSymbol = payload != null ? payload.get("symbol") : null;
+        String reason = payload != null ? payload.getOrDefault("reason", "MANUAL_OPERATOR_SELL") : "MANUAL_OPERATOR_SELL";
+
+        try {
+            var exitResult = strategyManager.executeManualExit(requestedSymbol, reason);
+            return ResponseEntity.ok(exitResult);
+        } catch (Throwable t) {
+            log.error("Manual market exit failed: {}", t.getMessage(), t);
+            return ResponseEntity.badRequest().body(Map.of(
+                "success", false,
+                "error", t.getMessage()
+            ));
+        }
     }
 
     /**
