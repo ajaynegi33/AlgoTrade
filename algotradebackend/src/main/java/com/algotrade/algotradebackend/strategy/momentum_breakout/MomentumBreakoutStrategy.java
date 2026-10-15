@@ -247,6 +247,18 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         m.setReferenceData(prevClose, pdh, avgVol, atrPct);
     }
 
+    public void updateReferenceData(String symbol, double prevClose, double pdh, double avgVol, double atrPct, double openPrice) {
+        CandidateMetrics m = metricsMap.computeIfAbsent(symbol, CandidateMetrics::new);
+        m.setReferenceData(prevClose, pdh, avgVol, atrPct, openPrice);
+    }
+
+    public void setOfficialOpenPrice(String symbol, double openPrice) {
+        if (symbol != null && openPrice > 0) {
+            CandidateMetrics m = metricsMap.computeIfAbsent(symbol, CandidateMetrics::new);
+            m.setOfficialOpenPrice(openPrice);
+        }
+    }
+
     /**
      * Sets the official 09:15:00 window-boundary volume baseline to prevent excluding opening volume.
      */

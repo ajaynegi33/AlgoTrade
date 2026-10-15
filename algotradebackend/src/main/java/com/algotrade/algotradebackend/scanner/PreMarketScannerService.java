@@ -324,7 +324,8 @@ public class PreMarketScannerService {
                         double pdh = q.ohlc.high > 0 ? q.ohlc.high : prevClose;
                         double avgVol = 2_000_000.0;
                         double atrPct = 2.0;
-                        mbStrategy.updateReferenceData(sym, prevClose, pdh, avgVol, atrPct);
+                        double openPrice = q.ohlc.open > 0 ? q.ohlc.open : 0.0;
+                        mbStrategy.updateReferenceData(sym, prevClose, pdh, avgVol, atrPct, openPrice);
                     }
                 }
                 log.info("Configured MomentumBreakoutStrategy dynamic watchlist: {}", shortlistedSymbols);

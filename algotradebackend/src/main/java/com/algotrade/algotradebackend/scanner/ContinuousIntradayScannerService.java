@@ -65,6 +65,11 @@ public class ContinuousIntradayScannerService {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private org.springframework.beans.factory.ObjectProvider<com.algotrade.algotradebackend.broker.zerodha.KiteMarketDataService> kiteMarketDataProvider;
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.algotrade.algotradebackend.backtest.service.HistoricalMarketDataService historicalMarketDataService;
+
+    private final java.util.concurrent.ConcurrentHashMap<String, com.algotrade.algotradebackend.backtest.service.HistoricalMarketDataService.BaselineReference> baselineCache = new java.util.concurrent.ConcurrentHashMap<>();
+
     /**
      * Watchdog Timer (Every 5 seconds):
      * Detects silent WebSocket disconnections or stalled tick streams during active market hours.
@@ -139,11 +144,45 @@ public class ContinuousIntradayScannerService {
         Map<String, Quote> quotes = preMarketScannerService.fetchQuotesWithTimeout(symbols);
         if (quotes == null || quotes.isEmpty()) return;
 
+        java.time.LocalDate today = java.time.LocalDate.now(IST_ZONE);
+
         // Update real-time metrics across the 210 F&O universe
         for (String sym : symbols) {
             Quote q = quotes.get("NSE:" + sym);
             if (q == null) q = quotes.get(sym);
             if (q == null || q.ohlc == null || q.lastPrice <= 0) continue;
+
+            // Ensure baseline reference data is populated for continuous scan candidates
+            var existingMetrics = mbStrategy.getMetricsMap().get(sym);
+            if (existingMetrics == null || existingMetrics.getPreviousDayHigh() <= 0 || existingMetrics.getPrevClose() <= 0) {
+                double prevClose = (q.ohlc.close > 0) ? q.ohlc.close : 0.0;
+                double pdh = 0.0;
+                double avgVol = 2_000_000.0;
+                double atrPct = 2.0;
+
+                if (historicalMarketDataService != null) {
+                    var ref = baselineCache.computeIfAbsent(sym, s -> historicalMarketDataService.getBaselineReference(s, today));
+                    if (ref != null) {
+                        if (prevClose <= 0) prevClose = ref.prevClose();
+                        pdh = ref.pdh();
+                        avgVol = ref.avgDailyVol();
+                        atrPct = ref.atrPct();
+                    }
+                }
+                if (pdh <= 0) {
+                    if (now.isBefore(MarketCalendarService.MARKET_OPEN_TIME) && q.ohlc.high > 0) {
+                        pdh = q.ohlc.high;
+                    } else if (prevClose > 0) {
+                        pdh = prevClose * 1.01;
+                    }
+                }
+
+                double openPrice = (q.ohlc.open > 0) ? q.ohlc.open : 0.0;
+                mbStrategy.updateReferenceData(sym, prevClose, pdh, avgVol, atrPct, openPrice);
+                mbStrategy.setOpeningVolumeBaseline(sym, 0);
+            } else if (q.ohlc.open > 0 && (existingMetrics.getOpenPrice() <= 0 || existingMetrics.getLow15() == Double.MAX_VALUE)) {
+                existingMetrics.setOfficialOpenPrice(q.ohlc.open);
+            }
 
             long totalBuy = 0, totalSell = 0;
             if (q.depth != null) {

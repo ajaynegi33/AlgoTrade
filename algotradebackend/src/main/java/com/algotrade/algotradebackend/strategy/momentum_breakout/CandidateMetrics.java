@@ -49,9 +49,23 @@ public class CandidateMetrics {
         this.atrPct = atrPct;
     }
 
-    /**
-     * Dynamically updates reference figures fetched from the broker market data API.
-     */
+    public synchronized void setOfficialOpenPrice(double open) {
+        if (open > 0) {
+            this.openPrice = open;
+            if (this.low15 == Double.MAX_VALUE) {
+                this.low15 = open;
+                this.high15 = open;
+            }
+        }
+    }
+
+    public synchronized void setReferenceData(double prevClose, double previousDayHigh, double avgDailyVolume10Day, double atrPct, double openPrice) {
+        setReferenceData(prevClose, previousDayHigh, avgDailyVolume10Day, atrPct);
+        if (openPrice > 0) {
+            setOfficialOpenPrice(openPrice);
+        }
+    }
+
     public synchronized void setReferenceData(double prevClose, double previousDayHigh, double avgDailyVolume10Day, double atrPct) {
         if (this.previousDayHigh > 0 && previousDayHigh > 0 && Math.abs(this.previousDayHigh - previousDayHigh) > 0.001) {
             // Guard: Once established for the day, do not clobber true PDH with intraday ticks

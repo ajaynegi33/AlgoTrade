@@ -233,16 +233,26 @@ export default function LeaderboardTab({
                           )}
                         </div>
                       </td>
-                      <td className={`py-3.5 px-4 ${item.gapPct >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                        <div className="flex items-center gap-1">
-                          <span>{item.gapPct >= 0 ? `+${item.gapPct.toFixed(2)}%` : `${item.gapPct.toFixed(2)}%`}</span>
-                          {liveTick && liveTick.changePct !== undefined && (
-                            <span className="text-[10px] text-slate-500 font-sans" title="Live Day Change %">
-                              ({liveTick.changePct >= 0 ? `+${liveTick.changePct.toFixed(2)}%` : `${liveTick.changePct.toFixed(2)}%`})
-                            </span>
-                          )}
-                        </div>
-                      </td>
+                      {(() => {
+                        const isZeroGap = Math.abs(item.gapPct) < 0.005;
+                        const gapColor = isZeroGap ? "text-slate-400" : item.gapPct > 0 ? "text-emerald-400" : "text-rose-400";
+                        const gapText = isZeroGap ? "0.00%" : item.gapPct > 0 ? `+${item.gapPct.toFixed(2)}%` : `${item.gapPct.toFixed(2)}%`;
+                        return (
+                          <td className={`py-3.5 px-4 ${gapColor}`} title="Pre-Open Gap % (Open vs Previous Day Close)">
+                            <div className="flex items-center gap-1">
+                              <span>{gapText}</span>
+                              {liveTick && liveTick.changePct !== undefined && (
+                                <span
+                                  className={`text-[10px] font-sans ${liveTick.changePct >= 0 ? "text-emerald-500/80" : "text-rose-500/80"}`}
+                                  title="Live Day Change % (LTP vs Previous Day Close)"
+                                >
+                                  ({liveTick.changePct >= 0 ? `+${liveTick.changePct.toFixed(2)}%` : `${liveTick.changePct.toFixed(2)}%`})
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                        );
+                      })()}
                       <td className="py-3.5 px-4 text-slate-300">{item.rvolScore}</td>
                       <td className="py-3.5 px-4 text-slate-300">{item.vwapScore}</td>
                       <td className="py-3.5 px-4 text-slate-300">{item.depthImbalanceScore}</td>
