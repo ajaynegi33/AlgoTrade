@@ -34,6 +34,7 @@ export default function BacktestTab({ backendUrl }: BacktestTabProps) {
   const [leverageMultiplier, setLeverageMultiplier] = useState<number>(5.0);
 
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [tradeFilter, setTradeFilter] = useState<"ALL" | "WINS" | "LOSSES">("ALL");
   const [activeChartTab, setActiveChartTab] = useState<"equity" | "drawdown">("equity");
@@ -70,6 +71,7 @@ export default function BacktestTab({ backendUrl }: BacktestTabProps) {
   const handleRunBacktest = async () => {
     if (!startDate || !endDate) return;
     setLoading(true);
+    setError(null);
 
     try {
       const payload: BacktestRequest = {
@@ -91,9 +93,23 @@ export default function BacktestTab({ backendUrl }: BacktestTabProps) {
       if (res.ok) {
         const data: BacktestResult = await res.json();
         setResult(data);
+      } else {
+        let errorMsg = `Backtest execution failed (${res.status} ${res.statusText})`;
+        try {
+          const errData = await res.json();
+          if (errData?.message) {
+            errorMsg = errData.message;
+          } else if (errData?.error) {
+            errorMsg = errData.error;
+          }
+        } catch {
+          // Response body was not JSON
+        }
+        setError(errorMsg);
       }
     } catch (err) {
       console.error("Backtest execution failed:", err);
+      setError(err instanceof Error ? err.message : "Failed to connect to backend server.");
     } finally {
       setLoading(false);
     }
@@ -155,7 +171,7 @@ export default function BacktestTab({ backendUrl }: BacktestTabProps) {
               </span>
             </div>
             <p className="text-xs sm:text-sm text-slate-400 mt-1">
-              Test historical performance across the Nifty 100 universe with 100-point scoring, trailing stops, slippage &amp; Indian taxes.
+              Test historical performance across the NSE F&O universe (210 constituents) with 100-point scoring, trailing stops, slippage &amp; Indian taxes.
             </p>
           </div>
 
@@ -180,6 +196,22 @@ export default function BacktestTab({ backendUrl }: BacktestTabProps) {
             ))}
           </div>
         </div>
+
+        {/* Error Alert Banner */}
+        {error && (
+          <div className="mt-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-between text-xs text-rose-300">
+            <div className="flex items-center gap-2">
+              <span className="text-base">⚠️</span>
+              <span>{error}</span>
+            </div>
+            <button
+              onClick={() => setError(null)}
+              className="text-slate-400 hover:text-white px-2 py-0.5 rounded cursor-pointer transition font-mono"
+            >
+              ✕
+            </button>
+          </div>
+        )}
 
         {/* Parameter Inputs Grid */}
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 sm:gap-4 mt-5">
@@ -281,8 +313,8 @@ export default function BacktestTab({ backendUrl }: BacktestTabProps) {
               <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
                 Risk: {riskPerTradePct.toFixed(1)}%
               </label>
-              <span className="text-[10px] font-mono font-medium text-emerald-400" title="Calculated from total position capacity (Capital × Leverage)">
-                ₹{Math.round(initialCapital * leverageMultiplier * (riskPerTradePct / 100)).toLocaleString("en-IN")} max loss
+              <span className="text-[10px] font-mono font-medium text-emerald-400" title="Fixed 2% capital risk budget per trade">
+                ₹{Math.round(initialCapital * (riskPerTradePct / 100)).toLocaleString("en-IN")} risk budget
               </span>
             </div>
             <input
@@ -362,7 +394,7 @@ export default function BacktestTab({ backendUrl }: BacktestTabProps) {
         {/* Run Action Button */}
         <div className="flex items-center justify-between mt-6 pt-4 border-t border-slate-800">
           <div className="text-xs text-slate-400 hidden sm:block font-mono">
-            Simulates Nifty 100 constituents • Up to 5x SEBI MIS leverage • Models 0.05% slippage • 15:05 mandatory exit
+            Simulates NSE F&O universe (210 constituents) • Up to 5x SEBI MIS leverage • Models 0.05% slippage • 15:05 mandatory exit
           </div>
           <button
             onClick={handleRunBacktest}

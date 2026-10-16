@@ -145,7 +145,12 @@ public class HistoricalMarketDataService {
         List<String> targetSymbols = (symbols != null && !symbols.isEmpty()) ? symbols : getWatchlistSymbols();
         targetSymbols.parallelStream().forEach(sym -> {
             getDailyCandles(sym);
-            loadOrFetchIntradayBars(sym);
+            intradayBarsCache.compute(sym, (k, existing) -> {
+                if (existing != null && hasDateCoverage(existing, start, end)) {
+                    return existing;
+                }
+                return loadOrFetchIntradayBars(sym, start, end);
+            });
         });
     }
 
@@ -483,7 +488,7 @@ public class HistoricalMarketDataService {
 
     public List<IntradayBar> getIntradayBars(String symbol, LocalDate date, LocalDate requestedStart, LocalDate requestedEnd) {
         Map<LocalDate, List<IntradayBar>> symbolMap = intradayBarsCache.compute(symbol, (k, existing) -> {
-            if (existing != null && (date == null || existing.containsKey(date))) {
+            if (existing != null && (date == null || existing.containsKey(date) || hasDateCoverage(existing, requestedStart, requestedEnd))) {
                 return existing;
             }
             return loadOrFetchIntradayBars(symbol, requestedStart, requestedEnd);
@@ -493,6 +498,15 @@ public class HistoricalMarketDataService {
             return bars;
         }
         return Collections.emptyList();
+    }
+
+    private boolean hasDateCoverage(Map<LocalDate, List<IntradayBar>> map, LocalDate start, LocalDate end) {
+        if (map == null || map.isEmpty()) return false;
+        if (start == null && end == null) return true;
+        LocalDate minDate = map.keySet().stream().min(Comparator.naturalOrder()).orElse(null);
+        LocalDate maxDate = map.keySet().stream().max(Comparator.naturalOrder()).orElse(null);
+        if (minDate == null || maxDate == null) return false;
+        return (start == null || !minDate.isAfter(start)) && (end == null || !maxDate.isBefore(end));
     }
 
     private Map<LocalDate, List<IntradayBar>> loadOrFetchIntradayBars(String symbol) {
@@ -522,8 +536,7 @@ public class HistoricalMarketDataService {
                 }
                 result.values().forEach(list -> list.sort(Comparator.comparing(IntradayBar::time)));
                 // If requestedStart and requestedEnd are covered by the disk cache, return directly
-                if (requestedStart != null && requestedEnd != null 
-                    && result.containsKey(requestedStart) && result.containsKey(requestedEnd)) {
+                if (hasDateCoverage(result, requestedStart, requestedEnd)) {
                     return result;
                 }
             } catch (Exception e) {

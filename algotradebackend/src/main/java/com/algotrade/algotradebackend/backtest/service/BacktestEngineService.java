@@ -94,6 +94,7 @@ public class BacktestEngineService {
 
             int dailyTrades = 0;
             int dailyLosses = 0;
+            double dailyRupeeLoss = 0.0;
             double dayStartCapital = currentCapital;
 
             // Initialize CandidateMetrics & preload 5m bars for all constituents on this date
@@ -154,10 +155,15 @@ public class BacktestEngineService {
                     boolean inObsWindow = !barTime.isBefore(java.time.LocalTime.of(9, 15)) 
                                        && barTime.isBefore(java.time.LocalTime.of(9, 30));
                     m.aggregateCandle(bar.open(), bar.high(), bar.low(), bar.close(), bar.volume(), inObsWindow);
-                    m.updateTick(bar.close(), m.getWindowVolume() + bar.volume(), 0, 0, 0.0, inObsWindow);
                 }
 
                 // 2. Next-Bar Open Execution: If a breakout was confirmed on the previous candle close
+                double rupeeLimit = (req.maxDailyLossRupees() != null && req.maxDailyLossRupees() > 0)
+                    ? req.maxDailyLossRupees() : 400.0;
+                if (dailyRupeeLoss >= rupeeLimit || dailyLosses >= 2 || dailyTrades >= 3) {
+                    pendingSignal = null;
+                }
+
                 if (pendingSignal != null && !inTrade) {
                     Map<String, HistoricalMarketDataService.IntradayBar> timeMap = indexedBarsMap.get(pendingSignal.symbol());
                     HistoricalMarketDataService.IntradayBar currentBar = (timeMap != null) ? timeMap.get(timeStr) : null;
@@ -218,14 +224,44 @@ public class BacktestEngineService {
                         double exitPrice = 0.0;
                         String exitReason = null;
 
-                        boolean isBullish = bar.close() >= bar.open();
-                        if (isBullish) {
-                            // Bullish Path: Open -> Low -> High -> Close
-                            if (bar.low() <= activeSl) {
-                                stoppedOut = true;
-                                exitPrice = round2(activeSl * (1.0 - req.slippagePct() / 100.0));
-                                exitReason = activeSl > initialSl ? "TRAILING_SL" : "INITIAL_SL";
+                        // Mandatory 15:05 Square-Off (Executed at 15:05:00 bar open with slippage)
+                        if (barTime.compareTo(java.time.LocalTime.of(15, 5)) >= 0) {
+                            stoppedOut = true;
+                            double rawExit = bar.open() > 0 ? bar.open() : bar.close();
+                            exitPrice = round2(rawExit * (1.0 - req.slippagePct() / 100.0));
+                            exitReason = "MARKET_CLOSE_1505";
+                        } else {
+                            boolean isBullish = bar.close() >= bar.open();
+                            if (isBullish) {
+                                // Bullish Path: Open -> Low -> High -> Close
+                                if (bar.low() <= activeSl) {
+                                    stoppedOut = true;
+                                    exitPrice = round2(activeSl * (1.0 - req.slippagePct() / 100.0));
+                                    exitReason = activeSl > initialSl ? "TRAILING_SL" : "INITIAL_SL";
+                                } else {
+                                    highWaterMark = Math.max(highWaterMark, bar.high());
+                                    if (highWaterMark >= entryPrice * 1.010) {
+                                        var beOpt = ChargesBreakdown.calculateExactBreakevenPrice(activeQty, entryPrice, tickSize);
+                                        if (beOpt.isPresent() && beOpt.get() > activeSl) {
+                                            activeSl = beOpt.get();
+                                        }
+                                    }
+                                    if (highWaterMark >= entryPrice * 1.015) {
+                                        double trailTarget = com.algotrade.algotradebackend.core.util.TickMath.floorToTick(
+                                            highWaterMark * (1.0 - req.trailingSlPct() / 100.0), tickSize
+                                        );
+                                        if (trailTarget >= activeSl + (3 * tickSize) && trailTarget < bar.close()) {
+                                            activeSl = trailTarget;
+                                        }
+                                    }
+                                    if (bar.close() < activeSl) {
+                                        stoppedOut = true;
+                                        exitPrice = round2(activeSl * (1.0 - req.slippagePct() / 100.0));
+                                        exitReason = "TRAILING_SL";
+                                    }
+                                }
                             } else {
+                                // Bearish Path: Open -> High -> Low -> Close
                                 highWaterMark = Math.max(highWaterMark, bar.high());
                                 if (highWaterMark >= entryPrice * 1.010) {
                                     var beOpt = ChargesBreakdown.calculateExactBreakevenPrice(activeQty, entryPrice, tickSize);
@@ -237,45 +273,16 @@ public class BacktestEngineService {
                                     double trailTarget = com.algotrade.algotradebackend.core.util.TickMath.floorToTick(
                                         highWaterMark * (1.0 - req.trailingSlPct() / 100.0), tickSize
                                     );
-                                    if (trailTarget >= activeSl + (3 * tickSize) && trailTarget < bar.close()) {
+                                    if (trailTarget >= activeSl + (3 * tickSize)) {
                                         activeSl = trailTarget;
                                     }
                                 }
-                                if (bar.close() < activeSl) {
+                                if (bar.low() <= activeSl) {
                                     stoppedOut = true;
                                     exitPrice = round2(activeSl * (1.0 - req.slippagePct() / 100.0));
-                                    exitReason = "TRAILING_SL";
+                                    exitReason = activeSl > initialSl ? "TRAILING_SL" : "INITIAL_SL";
                                 }
                             }
-                        } else {
-                            // Bearish Path: Open -> High -> Low -> Close
-                            highWaterMark = Math.max(highWaterMark, bar.high());
-                            if (highWaterMark >= entryPrice * 1.010) {
-                                var beOpt = ChargesBreakdown.calculateExactBreakevenPrice(activeQty, entryPrice, tickSize);
-                                if (beOpt.isPresent() && beOpt.get() > activeSl) {
-                                    activeSl = beOpt.get();
-                                }
-                            }
-                            if (highWaterMark >= entryPrice * 1.015) {
-                                double trailTarget = com.algotrade.algotradebackend.core.util.TickMath.floorToTick(
-                                    highWaterMark * (1.0 - req.trailingSlPct() / 100.0), tickSize
-                                );
-                                if (trailTarget >= activeSl + (3 * tickSize)) {
-                                    activeSl = trailTarget;
-                                }
-                            }
-                            if (bar.low() <= activeSl) {
-                                stoppedOut = true;
-                                exitPrice = round2(activeSl * (1.0 - req.slippagePct() / 100.0));
-                                exitReason = activeSl > initialSl ? "TRAILING_SL" : "INITIAL_SL";
-                            }
-                        }
-
-                        // Mandatory 15:05 Exit
-                        if (!stoppedOut && barTime.compareTo(java.time.LocalTime.of(15, 5)) >= 0) {
-                            stoppedOut = true;
-                            exitPrice = round2(bar.close());
-                            exitReason = "MARKET_CLOSE_1505";
                         }
 
                         if (stoppedOut) {
@@ -306,6 +313,7 @@ public class BacktestEngineService {
 
                             if (netPnL < 0) {
                                 dailyLosses++;
+                                dailyRupeeLoss = round2(dailyRupeeLoss + Math.abs(netPnL));
                                 currentConsecutiveLosses++;
                                 maxConsecutiveLosses = Math.max(maxConsecutiveLosses, currentConsecutiveLosses);
                             } else {
@@ -320,7 +328,7 @@ public class BacktestEngineService {
                 }
 
                 // 4. Continuous Wave Scanning (09:20 AM to 14:45 PM IST)
-                if (!inTrade && pendingSignal == null && dailyTrades < 3 && dailyLosses < 2
+                if (!inTrade && pendingSignal == null && dailyTrades < 3 && dailyLosses < 2 && dailyRupeeLoss < rupeeLimit
                     && barTime.compareTo(java.time.LocalTime.of(9, 20)) >= 0
                     && barTime.compareTo(java.time.LocalTime.of(14, 45)) <= 0) {
 
@@ -329,9 +337,10 @@ public class BacktestEngineService {
                         .map(m -> scoringEngine.evaluate(m, barTime, true))
                         .toList();
 
+                    int effectiveMinScore = Math.max(req.minScoreThreshold(), 80);
                     List<ScoredCandidate> ranked = scoringEngine.rankCandidates(scoredList);
                     for (ScoredCandidate candidate : ranked) {
-                        if (!candidate.isQualified() || candidate.totalScore() < req.minScoreThreshold()) {
+                        if (!candidate.isQualified() || candidate.totalScore() < effectiveMinScore) {
                             break; // Sorted list: subsequent candidates do not meet qualification threshold
                         }
 

@@ -45,13 +45,29 @@ public class JwtTokenService {
     private final ConcurrentHashMap<String, RefreshSession> refreshSessions = new ConcurrentHashMap<>();
 
     public JwtTokenService() {
-        this(null);
+        this(null, null);
     }
 
-    public JwtTokenService(@Value("${algotrade.jwt.secret:}") String configuredSecret) {
-        if (configuredSecret != null && configuredSecret.trim().length() >= 32) {
-            this.secretKeyBytes = configuredSecret.trim().getBytes(StandardCharsets.UTF_8);
+    public JwtTokenService(String configuredSecret) {
+        this(configuredSecret, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public JwtTokenService(
+        @Value("${algotrade.jwt.secret:${algotrade.auth.secret:${ALGOTRADE_JWT_SECRET:}}}") String configuredSecret,
+        @org.springframework.beans.factory.annotation.Autowired(required = false) org.springframework.core.env.Environment env
+    ) {
+        boolean isProd = env != null && env.acceptsProfiles(org.springframework.core.env.Profiles.of("prod", "production"));
+        String secret = (configuredSecret != null) ? configuredSecret.trim() : "";
+
+        if (secret.length() >= 32) {
+            this.secretKeyBytes = secret.getBytes(StandardCharsets.UTF_8);
             log.info("Initialized JwtTokenService with environment configured HMAC-SHA256 key.");
+        } else if (isProd) {
+            throw new IllegalStateException(
+                "FATAL SECURITY CONFIGURATION ERROR: 'algotrade.jwt.secret' (or ALGOTRADE_JWT_SECRET) must be configured " +
+                "with at least 32 characters (256-bit) in production profile. Startup aborted."
+            );
         } else {
             byte[] generated = new byte[32];
             new SecureRandom().nextBytes(generated);

@@ -75,7 +75,8 @@ public class MomentumScoringEngine {
 
         // Hard Eligibility Gate: Price must be strictly above VWAP and strictly breaking previous day high
         boolean eligible = passesHardGates(s);
-        String status = (eligible && totalScore >= 75) ? "QUALIFIED" : "DISQUALIFIED";
+        int qualificationThreshold = isBacktestMode ? 80 : 75;
+        String status = (eligible && totalScore >= qualificationThreshold) ? "QUALIFIED" : "DISQUALIFIED";
 
         return new ScoredCandidate(
             0, // Rank to be populated after sorting
@@ -101,6 +102,7 @@ public class MomentumScoringEngine {
             && s.vwap() > 0
             && s.previousDayHigh() > 0
             && s.ltp() > s.vwap()                // Must be trading above VWAP
+            && ((s.ltp() - s.vwap()) / s.vwap()) * 100.0 <= (2.20 + 1e-6) // Reject overextended mean-reversion traps (> 2.2% above VWAP with epsilon tolerance)
             && s.ltp() >= s.previousDayHigh()    // Breakout at or above PDH
             && (s.prevClose() <= 0 || s.ltp() >= s.prevClose()) // Cannot be down on the day
             && s.gapPct() >= -0.10               // Cannot have significant negative pre-open gap

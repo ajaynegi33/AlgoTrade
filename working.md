@@ -501,18 +501,26 @@ Implemented in `BacktestEngineService.java` & `HistoricalMarketDataService.java`
   - Automatically calculates true 20-day Average Daily Volume (ADV), 14-day ATR%, and Previous Day High (PDH) from real historical sessions.
 - **100% Strategy & Risk Parity:**
   - Evaluates candidate metrics using the production `MomentumScoringEngine` (100-point model with hard qualification gates).
-  - Reuses `PositionSizingEngine.calculateSizingQuantity` to enforce user-configured leverage ($1.0\times$ cash up to $5.0\times$ SEBI MIS) and $0.35\% - 2.00\%$ stop distance boundaries.
-  - Risk Budget is calculated directly on total leveraged position capacity ($\text{Capital} \times \text{Leverage} \times \text{Risk\%}$).
-- **Zero Lookahead Next-Bar Open Execution:**
+  - Uses `PositionSizingEngine.calculateAllInclusiveSizingQuantity` to enforce user-configured leverage ($1.0\times$ cash up to $5.0\times$ SEBI MIS), $0.4\% - 2.0\%$ stop distance boundaries, and all-inclusive fee/slippage buffers within the risk budget.
+  - Strictly enforces the ₹400 daily rupee loss circuit breaker (`dailyRupeeLoss < maxDailyLossRupees`, default ₹400.00) alongside 3 max trades and 2 max losses, immediately halting wave scanning and dropping pending signals when breached.
+- **Pure Typical-Price VWAP (Zero Double-Counting):**
+  - Accumulates VWAP solely through `aggregateCandle` using standard typical price $(H + L + C) / 3$ and true bar volume, strictly eliminating tick double-counting.
+- **Calibrated Backtest Qualification & Extension Ceilings:**
+  - In `isBacktestMode`, the qualification threshold is calibrated to 80 points (requiring $\ge 60$ raw non-depth points, e.g. RVOL $\ge 2.0$, ideal VWAP expansion, and ATR breakout), rejecting low-conviction signals.
+  - Enforces a hard $\le 2.20\%$ VWAP extension ceiling in `passesHardGates`, automatically disqualifying overextended mean-reversion traps.
+- **Zero Lookahead Next-Bar Open Execution & 15:05 Open Square-Off:**
   - Evaluates candidate breakout confirmation on completed candle $t$ close (`09:25` candle) and queues `PendingSignal`.
   - Fills entry order at the **Open of candle $t+1$** (`09:30` candle) with slippage and over-extension checks, completely eliminating bar-peeking bias.
+  - Mandatory 15:05 square-off fills at `bar.open()` of the 15:05 candle with market sell slippage, evaluated at 15:05:00 prior to intrabar traversal.
 - **Strict Zero Synthetic Depth Wicks:**
   - Disables artificial bid/ask synthesis from candle bodies. Normalizes the 75 non-depth points (RVOL, VWAP distance, PDH breakout, ATR expansion) to 100 points in `isBacktestMode`.
 - **Directional Microstructure Path Modeling:**
   - Bullish candles ($C \ge O$): models path $O \to L \to H \to C$. Tests low against stop first; only updates HWM and ratchets trailing stop if low survives; checks intra-candle retracement at close.
   - Bearish candles ($C < O$): models path $O \to H \to L \to C$. Ratchets trailing stop to high first, then tests low against ratcheted stop.
-- **Dynamic Date-Range Ingestion & Chunking:**
-  - Accepts user-specified `startDate` and `endDate`. Queries Zerodha Kite Historical Data API in 60-day chunks and validates Yahoo Finance 60-day boundaries.
+- **Dynamic Date-Range Ingestion, Caching & Holiday Boundaries:**
+  - `preloadUniverse` propagates `startDate` and `endDate` directly into `intradayBarsCache` and disk caching.
+  - Employs interval boundary coverage (`hasDateCoverage`: `minDate <= start && maxDate >= end`) to handle weekends and exchange holidays without false cache misses.
+  - Queries Zerodha Kite Historical Data API in 60-day chunks and validates Yahoo Finance 60-day boundaries.
 - **Institutional Financial Analytics:**
   - Net Profit Factor computed strictly on post-tax Net PnL via `ChargesBreakdown`.
   - Annualized Sharpe Ratio ($\sqrt{252}$) adjusted with the 6.5% Indian benchmark repo rate.

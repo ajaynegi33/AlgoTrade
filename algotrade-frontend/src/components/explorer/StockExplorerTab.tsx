@@ -673,7 +673,7 @@ export default function StockExplorerTab({
               </p>
               <ul className="space-y-1.5 text-[11px] text-slate-400 pl-4 list-disc">
                 <li>
-                  <strong className="text-emerald-400">Stage 1 Breakeven Lock:</strong> Moves stop loss to entry + 0.15% once profit hits +1.0%, guaranteeing zero loss and covering all statutory taxes.
+                  <strong className="text-emerald-400">Stage 1 Breakeven Lock:</strong> Moves stop loss to entry + 0.15% once profit hits +1.0%, protecting capital against adverse reversals (subject to market liquidity and stop-limit execution) and covering all statutory taxes.
                 </li>
                 <li>
                   <strong className="text-emerald-400">Stage 2 Trailing Stop:</strong> Trails at 0.8% behind subsequent high-water mark.

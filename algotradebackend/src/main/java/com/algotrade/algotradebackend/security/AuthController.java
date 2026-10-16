@@ -133,10 +133,13 @@ public class AuthController {
             authService.logout(token);
         }
 
+        boolean isHttps = httpRequest.isSecure() || "https".equalsIgnoreCase(httpRequest.getHeader("X-Forwarded-Proto"));
         ResponseCookie clearCookie = ResponseCookie.from(REFRESH_COOKIE_NAME, "")
             .httpOnly(true)
+            .secure(isHttps)
             .path("/api/auth")
             .maxAge(0)
+            .sameSite("Strict")
             .build();
         httpResponse.addHeader(HttpHeaders.SET_COOKIE, clearCookie.toString());
 

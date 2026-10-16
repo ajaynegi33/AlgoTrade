@@ -82,7 +82,7 @@ export default function OverviewTab({ overview, backendUrl = "http://localhost:8
             {overview ? `₹${overview.capital.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "--"}
           </p>
           <p className="text-[10px] text-slate-500 mt-1">
-            Base: ₹{(overview?.baseCapital ?? 10000).toLocaleString("en-IN")} • 5x MIS Leverage
+            Base: ₹{(overview?.baseCapital ?? 10000).toLocaleString("en-IN")} • 2x–5x MIS Leverage (margin-dependent)
           </p>
         </div>
         <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
@@ -99,7 +99,7 @@ export default function OverviewTab({ overview, backendUrl = "http://localhost:8
           <p className="text-lg sm:text-2xl font-bold font-mono text-sky-400 mt-1">
             {overview ? (overview.canTradeToday ? "Active" : "Max Reached") : "--"}
           </p>
-          <p className="text-[10px] text-slate-500 mt-1">Max 3 trades / 2 losses lock</p>
+          <p className="text-[10px] text-slate-500 mt-1">Max 3 trades / 2 losses / ₹400 loss breaker</p>
         </div>
         <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
           <p className="text-xs text-slate-400">Active Strategy</p>
@@ -231,7 +231,7 @@ export default function OverviewTab({ overview, backendUrl = "http://localhost:8
               <p className="text-base sm:text-lg font-mono font-bold text-sky-400 mt-0.5">
                 ₹{highWaterMark.toFixed(2)}
               </p>
-              <p className="text-[10px] text-slate-500">Trail buffer: 2.0%</p>
+              <p className="text-[10px] text-slate-500">Trail buffer: 0.8%</p>
             </div>
           </div>
         </div>
