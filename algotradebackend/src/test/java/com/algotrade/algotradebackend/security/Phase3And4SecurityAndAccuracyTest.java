@@ -89,7 +89,7 @@ class Phase3And4SecurityAndAccuracyTest {
         assertEquals(HttpStatus.OK, response.getStatusCode());
         String cookieHeader = httpResponse.getHeader(HttpHeaders.SET_COOKIE);
         assertNotNull(cookieHeader, "Set-Cookie header must be present on logout");
-        assertTrue(cookieHeader.contains("jwt="), "Cookie name must be 'jwt'");
+        assertTrue(cookieHeader.contains("algotrade_refresh_token="), "Cookie name must be 'algotrade_refresh_token'");
         assertTrue(cookieHeader.contains("Max-Age=0"), "Cookie must be expired immediately");
         assertTrue(cookieHeader.contains("Path=/api/auth"), "Cookie path must match '/api/auth'");
         assertTrue(cookieHeader.contains("HttpOnly"), "Cookie must be HttpOnly");
