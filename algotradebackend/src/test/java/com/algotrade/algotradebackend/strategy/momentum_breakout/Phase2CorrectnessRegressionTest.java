@@ -170,7 +170,8 @@ public class Phase2CorrectnessRegressionTest {
         when(mockGateway.calculateOrderMargin("VOLATILE_STOCK", 1, 1000.0)).thenReturn(280.0);
         int scaledQty = positionSizingEngine.calculateQuantity("VOLATILE_STOCK", 1000.0, 990.0, mockGateway);
         assertTrue(scaledQty > 0, "Stock requiring 28% margin must not be rejected; it should size down");
-        assertEquals(20, scaledQty, "Should size to 20 shares (₹200 risk budget on ₹10 stop)");
+        assertTrue(scaledQty <= 20, "Should size within raw 20 shares cap");
+        assertEquals(15, scaledQty, "Should size to 15 shares to keep all-inclusive loss (stop distance + slippage + statutory charges) within ₹200 risk budget");
     }
 
     @Test

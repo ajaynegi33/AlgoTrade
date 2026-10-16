@@ -179,14 +179,15 @@ public class BacktestEngineService {
                             double stopDistancePct = (stopDistance / slipEntry) * 100.0;
 
                             if (stopDistance > 0 && stopDistancePct >= 0.4 && stopDistancePct <= 2.0) {
-                                int finalQty = PositionSizingEngine.calculateSizingQuantity(
+                                int finalQty = PositionSizingEngine.calculateAllInclusiveSizingQuantity(
                                     currentCapital,
                                     slipEntry,
                                     computedInitialSl,
                                     req.riskPerTradePct(),
                                     req.leverageMultiplier(),
                                     0.4,
-                                    2.0
+                                    2.0,
+                                    req.slippagePct()
                                 );
 
                                 if (finalQty >= 1) {

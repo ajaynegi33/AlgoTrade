@@ -319,13 +319,18 @@ When the top-ranked candidate is disqualified due to excessive support distance 
 
 Governed by `PositionSizingEngine.java`:
 
-### 1. Three-Constraint Formula
-$$Q_{\text{final}} = \min\left(Q_{\text{risk}},\, Q_{\text{margin}},\, Q_{\text{exposure}}\right)$$
+### 1. Institutional All-Inclusive Sizing Formula
+$$Q_{\text{final}} = \min\left(Q_{\text{all\_inclusive}},\, Q_{\text{margin}},\, Q_{\text{exposure}}\right)$$
 
 Where:
-- **Risk-Based Sizing ($Q_{\text{risk}}$):** Caps potential loss at exactly $2.0\%$ of capital:
-  $$Q_{\text{risk}} = \left\lfloor \frac{\text{Capital} \times 0.020}{\text{Entry Price} - \text{Initial Stop Price}} \right\rfloor$$
-- **Available Margin Sizing ($Q_{\text{margin}}$):** Based on broker's intraday requirement (20% margin / $5\times$ leverage):
+- **All-Inclusive Risk Capacity ($Q_{\text{all\_inclusive}}$):**
+  Iterative fail-closed calculation in `PositionSizingEngine.calculateAllInclusiveSizingQuantity()` that factors in:
+  1. Technical price distance: $\text{Entry Price} - \text{Stop Price}$
+  2. Adverse exit slippage buffer: $0.15\%$ below trigger price
+  3. Indian equity statutory transaction costs: STT (0.025% sell), Brokerage (₹20/leg cap), Exchange Turnover (0.00307%), SEBI (₹10/crore), Stamp Duty (0.003% buy), and GST (18%)
+  $$\text{Total Realized Loss}(Q) \le \text{Capital} \times 0.020 \quad (\le ₹200.00 \text{ on } ₹10,000 \text{ capital})$$
+- **Available Margin Sizing ($Q_{\text{margin}}$):**
+  Dynamically checks gateway margin requirement via `gateway.calculateOrderMargin(symbol, 1, entryPrice)`. For Zerodha, utilizes live scrip-specific margin requirements (20% to 50%):
   $$Q_{\text{margin}} = \left\lfloor \frac{\text{Available Cash}}{\text{Margin Per Share}} \right\rfloor$$
 - **Exposure Cap ($Q_{\text{exposure}}$):** Caps maximum total notional value at $5.0\times$ capital (full SEBI MIS leverage):
   $$Q_{\text{exposure}} = \left\lfloor \frac{\text{Capital} \times 5.0}{\text{Entry Price}} \right\rfloor$$
@@ -335,11 +340,14 @@ $$\text{Stop Distance \%} = \frac{\text{Entry Price} - \text{Initial Stop Price}
 - **Minimum Stop Distance:** $0.35\%$. Trades below $0.35\%$ are rejected as vulnerable to market noise.
 - **Maximum Stop Distance:** $2.00\%$. Trades above $2.00\%$ are rejected as over-extended.
 
-### 3. Session Limits & Dual Circuit Breaker
+### 3. Session Limits & Dual Circuit Breaker Persistence
 - **Daily Trade Limit:** Maximum **3 trades per day** (`max-daily-trades: 3`).
 - **Daily Loss Circuit Breaker:** Trading is halted immediately if **2 losses** occur today (`max-daily-losses: 2`) OR if **cumulative daily net drawdown exceeds ₹400** (`max-daily-loss-rupees: 400.00`).
 - **Realized P&L Accounting:** Losses are tracked strictly against realized post-tax Net PnL calculated via `ChargesBreakdown.calculate()`. Trailed stops executing in net profit do not count as losses.
-- **Mode Isolation:** Paper trading executions and losses are tracked in SQLite `paper_trades`; Live trading executions and losses are tracked via live broker counters. Paper tests never lock real-money Live trading.
+- **Dual SQLite Persistence:**
+  - **Paper Mode:** Tracked in SQLite table `paper_trades` via `PaperTradeRepository`.
+  - **Live Mode:** Tracked in SQLite table `live_trades` via `LiveTradeRepository` (`LiveTradeEntity`).
+  - **Crash Resilience:** Upon application restart or crash, `canTradeToday()` queries the database and restores today's trade count, loss count, and cumulative rupee loss, preventing circuit breaker state wipe.
 - **High-Frequency In-Memory Caching (2s TTL):** `canTradeToday()` results are cached in memory for 2 seconds to eliminate database queries on KiteTicker's high-frequency tick thread.
 - **Debounced Logging:** Warning messages are logged strictly upon state transitions (and at most once every 5 minutes if persistent), completely silencing log flooding.
 - **Manual Reset Endpoint:** Administrative endpoint `POST /api/dashboard/risk/reset` clears daily limits on demand for continuous testing.
@@ -369,14 +377,21 @@ stateDiagram-v2
 
 ### State Behavior Details
 - `FLAT`: No active position held. Real-time Breakout Radar evaluates candidate ticks.
-- `PENDING_ENTRY`: Marketable limit buy order resting (`LTP * 1.0005`). Has a **30-second TTL**. If unfilled after 30 seconds, the order is cancelled and state returns to `FLAT`. Once filled, the engine arms the protective stop-loss (`trigger = floorToTick(plannedStopPrice)`, `limit = floorToTick(trigger * 0.9985)`). **State remains `PENDING_ENTRY` until the stop order is acknowledged by the broker.**
+- `PENDING_ENTRY`: Marketable limit buy order resting (`LTP * 1.0005`). Has a **30-second TTL**.
+  - **Cancel-Fill Race Reconciliation:** At 30s timeout, the engine dispatches `gateway.cancelOrder(activeEntryOrderId)` and queries `gateway.getOrderStatus(activeEntryOrderId)`.
+  - If the broker confirms the order was already `COMPLETE` or an open position is detected, the engine **does not reset to FLAT**. It transitions directly to `ACTIVE_POSITION` and arms the protective stop-loss for the confirmed filled shares.
+  - State only returns to `FLAT` once the broker confirms cancellation (`CANCELLED` or `REJECTED`).
+  - **State remains `PENDING_ENTRY` until the stop order is acknowledged by the broker.**
 - `ACTIVE_POSITION`: Fully hedged active position.
   - **Partial Fill Protection:** Automatically resizes resting stop-loss if filled position quantity expands.
   - **Stage 1 (Breakeven Lock):** Triggered when price gains $\ge +1.0\%$. Stop is raised to the exact breakeven price covering all statutory taxes, STT, exchange fees, and brokerage, plus a guaranteed $+₹10.00$ net profit buffer.
   - **Stage 2 (Progressive Trailing Stop):** Triggered when gain reaches $\ge +1.5\%$. Trailing stop ratchets upward maintaining a **0.8% buffer** below peak High-Water Mark:
     $$\text{Trail Target} = \lfloor \text{High-Water Mark} \times (1.0 - 0.008) \rfloor_{\text{tick}}$$
     Stop modifies only when the new target exceeds both current armed stop and planned stop, with a strict Price Inversion Guard ($\text{Target} < \text{LTP}$).
-- `PENDING_EXIT`: Square-off limit order dispatched. If unfilled during 15:05 square-off, falls back to market liquidation.
+  - **Authoritative Fill Settlement:** When stopped out, exit price is resolved from `getOrderStatus(activeSlOrderId).averagePrice()` rather than naked tick LTP.
+- `PENDING_EXIT`: Square-off limit order dispatched.
+  - **Sequential 15:05 Square-Off Protocol:** Stop-loss is cancelled first and checked for `COMPLETE` status. If already executed, market exit is aborted to prevent duplicate sell orders.
+  - If cancelled, executes market exit, polls for fill status to capture `averagePrice`, and routes execution through `handleTradeCompleted()` to persist the trade and update circuit breakers.
 
 ---
 
@@ -389,13 +404,22 @@ Orders route through `BrokerGatewayManager.java`:
 - Configured for NSE Cash Intraday MIS (`Constants.PRODUCT_MIS`).
 - Entry order type: `LIMIT` at marketable price ($\lceil \text{LTP} \times 1.0005 \rceil_{\text{tick}}$).
 - Stop-loss order type: `SL` with limit protection buffer ($0.15\%$) to prevent execution spikes.
-- Live position synchronization with 2.5s TTL cache.
+- Live position synchronization with 2.5s TTL cache and **Single-Flight Concurrency Guard** (`syncInProgress.compareAndSet`) to prevent virtual thread stampedes and HTTP 429 rate limit errors.
+- Exposes `averagePrice` from `latest.averagePrice` for exact executed trade fill accounting.
 
 ### 2. `PaperTradingGateway.java` (Simulation Route)
 - Applies **0.05% adverse slippage** on market and stop fills.
 - **Active Position Persistence:** Open paper positions are persisted to SQLite table `paper_active_positions`. On server restarts, the active trade, trailing stop, and peak high-water mark are re-hydrated seamlessly.
 - Evaluates stop triggers on every incoming tick via `onTick(symbol, ltp)`.
 - Calculates Indian statutory charges upon trade close and logs completed trades to `algotradepaper.db` (`paper_trades` table).
+
+### 3. `BrokerGatewayManager.java` (Mode Switching & Execution Guards)
+- Switches between `PAPER` and `LIVE` dynamically.
+- **Four Strict Switching Guards:** Rejects mode changes if:
+  1. Strategy lifecycle state is not strictly `FLAT` (`PENDING_ENTRY`, `ACTIVE_POSITION`, `PENDING_EXIT`).
+  2. Active gateway holds an open position.
+  3. Any resting/open orders exist on either gateway.
+  4. Zerodha session is disconnected or in an unverified state when switching away from LIVE.
 
 ### 3. `KiteAutoLoginService.java` (Headless 2FA Login)
 Automates daily morning 08:45 AM authentication:

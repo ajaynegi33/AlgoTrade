@@ -27,6 +27,9 @@ public class BrokerGatewayManager {
     private final ZerodhaLiveGateway zerodhaLiveGateway;
     private final AtomicReference<ExecutionMode> activeMode;
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private org.springframework.beans.factory.ObjectProvider<com.algotrade.algotradebackend.strategy.momentum_breakout.MomentumBreakoutStrategy> strategyProvider;
+
     public BrokerGatewayManager(
         PaperTradingGateway paperTradingGateway,
         ZerodhaLiveGateway zerodhaLiveGateway,
@@ -54,18 +57,40 @@ public class BrokerGatewayManager {
 
     /**
      * Atomically switches execution mode between PAPER and LIVE.
-     * Prevents switching mid-trade if an open position exists.
+     * Prevents switching mid-trade if an open position, resting orders,
+     * or active strategy state exists.
      * 
      * @param newMode Target execution mode
-     * @throws IllegalStateException if a position is currently open
+     * @throws IllegalStateException if a position, resting order, or active state exists
      */
     public synchronized void setExecutionMode(ExecutionMode newMode) {
         if (activeMode.get() == newMode) {
             return;
         }
 
+        // Guard 1: Verify strategy lifecycle is strictly FLAT
+        if (strategyProvider != null) {
+            var strategy = strategyProvider.getIfAvailable();
+            if (strategy != null && strategy.getLifecycleState() != com.algotrade.algotradebackend.strategy.momentum_breakout.TradeLifecycleState.FLAT) {
+                throw new IllegalStateException("Cannot switch mode while strategy is actively in state: " + strategy.getLifecycleState());
+            }
+        }
+
+        // Guard 2: Verify active gateway has no open positions
         if (getActiveGateway().getOpenPosition().isPresent()) {
             throw new IllegalStateException("Cannot switch trading mode while an open position is actively held!");
+        }
+
+        // Guard 3: Verify neither gateway has resting active orders
+        if (paperTradingGateway.hasActiveOrders() || zerodhaLiveGateway.hasActiveOrders()) {
+            throw new IllegalStateException("Cannot switch trading mode while resting broker orders are open!");
+        }
+
+        // Guard 4: If switching away from LIVE, verify Zerodha session is alive and authoritative
+        if (activeMode.get() == ExecutionMode.LIVE) {
+            if (!zerodhaLiveGateway.isSessionReady()) {
+                throw new IllegalStateException("Cannot switch from LIVE to PAPER while Zerodha broker session is unverified or disconnected!");
+            }
         }
 
         activeMode.set(newMode);

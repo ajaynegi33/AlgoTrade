@@ -433,4 +433,12 @@ public class PaperTradingGateway implements BrokerGateway {
     public TradeOrder getOrderStatus(String orderId) {
         return orders.get(orderId);
     }
+
+    @Override
+    public boolean hasActiveOrders() {
+        return orders.values().stream()
+            .anyMatch(o -> "SUBMITTED".equalsIgnoreCase(o.status()) 
+                        || "PENDING".equalsIgnoreCase(o.status()) 
+                        || "TRIGGER PENDING".equalsIgnoreCase(o.status()));
+    }
 }

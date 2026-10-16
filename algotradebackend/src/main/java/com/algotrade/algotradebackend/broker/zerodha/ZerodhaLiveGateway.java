@@ -90,6 +90,7 @@ public class ZerodhaLiveGateway implements BrokerGateway {
     private final java.util.concurrent.atomic.AtomicReference<com.zerodhatech.models.Margin> cachedMargin = new java.util.concurrent.atomic.AtomicReference<>(null);
     private final java.util.concurrent.atomic.AtomicLong lastMarginFetchTimeMs = new java.util.concurrent.atomic.AtomicLong(0);
     private final java.util.concurrent.atomic.AtomicReference<Double> cumulativeLivePnL = new java.util.concurrent.atomic.AtomicReference<>(0.0);
+    private final java.util.concurrent.atomic.AtomicBoolean syncInProgress = new java.util.concurrent.atomic.AtomicBoolean(false);
 
     @PostConstruct
     public void init() {
@@ -464,7 +465,39 @@ public class ZerodhaLiveGateway implements BrokerGateway {
 
     public void triggerAsyncPositionSync() {
         if (!sessionActive) return;
-        Thread.ofVirtual().name("zerodha-pos-sync").start(this::syncPositionsFromBroker);
+        if (syncInProgress.compareAndSet(false, true)) {
+            Thread.ofVirtual().name("zerodha-pos-sync").start(() -> {
+                try {
+                    syncPositionsFromBroker();
+                } finally {
+                    syncInProgress.set(false);
+                }
+            });
+        }
+    }
+
+    @Override
+    public boolean isSessionReady() {
+        return sessionActive && kiteConnect != null;
+    }
+
+    @Override
+    public boolean hasActiveOrders() {
+        if (!sessionActive || kiteConnect == null) {
+            return false;
+        }
+        try {
+            java.util.List<com.zerodhatech.models.Order> orders = kiteConnect.getOrders();
+            if (orders != null) {
+                return orders.stream().anyMatch(o -> 
+                    "OPEN".equalsIgnoreCase(o.status) 
+                    || "TRIGGER PENDING".equalsIgnoreCase(o.status) 
+                    || "MODIFY PENDING".equalsIgnoreCase(o.status));
+            }
+        } catch (Throwable t) {
+            log.warn("Could not check active Zerodha orders: {}", t.getMessage());
+        }
+        return false;
     }
 
     @Override
@@ -478,6 +511,9 @@ public class ZerodhaLiveGateway implements BrokerGateway {
                 com.zerodhatech.models.Order latest = history.get(history.size() - 1);
                 double p = latest.price != null ? Double.parseDouble(latest.price) : 0.0;
                 double tp = latest.triggerPrice != null ? Double.parseDouble(latest.triggerPrice) : 0.0;
+                double avgPrice = (latest.averagePrice != null && !latest.averagePrice.isBlank()) 
+                    ? Double.parseDouble(latest.averagePrice) 
+                    : p;
                 int q = latest.quantity != null ? Integer.parseInt(latest.quantity) : 0;
                 return new TradeOrder(
                     orderId,
@@ -486,6 +522,7 @@ public class ZerodhaLiveGateway implements BrokerGateway {
                     q,
                     p,
                     tp,
+                    avgPrice,
                     latest.orderType,
                     latest.status,
                     ExecutionMode.LIVE,

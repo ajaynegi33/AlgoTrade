@@ -73,6 +73,20 @@ public interface BrokerGateway {
     }
 
     /**
+     * Checks whether any resting or pending orders are currently active at the broker.
+     */
+    default boolean hasActiveOrders() {
+        return false;
+    }
+
+    /**
+     * Indicates whether the broker session is authenticated, connected, and authoritative.
+     */
+    default boolean isSessionReady() {
+        return true;
+    }
+
+    /**
      * Retrieves the currently held open position, if any.
      */
     Optional<Position> getOpenPosition();

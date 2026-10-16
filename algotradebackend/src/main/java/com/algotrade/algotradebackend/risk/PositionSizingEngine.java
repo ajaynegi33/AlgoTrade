@@ -4,6 +4,7 @@ import com.algotrade.algotradebackend.broker.BrokerGateway;
 import com.algotrade.algotradebackend.core.model.ChargesBreakdown;
 import com.algotrade.algotradebackend.core.model.ExecutionMode;
 import com.algotrade.algotradebackend.persistence.repository.PaperTradeRepository;
+import com.algotrade.algotradebackend.persistence.repository.LiveTradeRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -56,6 +57,9 @@ public class PositionSizingEngine {
     private final PaperTradeRepository paperTradeRepository;
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private LiveTradeRepository liveTradeRepository;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
     private org.springframework.beans.factory.ObjectProvider<com.algotrade.algotradebackend.broker.BrokerGatewayManager> brokerGatewayManagerProvider;
 
     private final java.util.concurrent.atomic.AtomicInteger liveTradesToday = new java.util.concurrent.atomic.AtomicInteger(0);
@@ -73,7 +77,13 @@ public class PositionSizingEngine {
     private volatile Instant paperCircuitResetInstant = null;
 
     public PositionSizingEngine(PaperTradeRepository paperTradeRepository) {
+        this(paperTradeRepository, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public PositionSizingEngine(PaperTradeRepository paperTradeRepository, @org.springframework.beans.factory.annotation.Autowired(required = false) LiveTradeRepository liveTradeRepository) {
         this.paperTradeRepository = paperTradeRepository;
+        this.liveTradeRepository = liveTradeRepository;
     }
 
     private ExecutionMode getActiveExecutionMode() {
@@ -187,9 +197,36 @@ public class PositionSizingEngine {
             : 0.0;
 
         ExecutionMode activeMode = getActiveExecutionMode();
-        long effectiveTrades = (activeMode == ExecutionMode.LIVE) ? liveTradesToday.get() : paperTrades;
-        long effectiveLosses = (activeMode == ExecutionMode.LIVE) ? liveLossesToday.get() : paperLosses;
-        double effectiveRupeeLoss = (activeMode == ExecutionMode.LIVE) ? liveRupeeLossToday.get() : paperRupeeLoss;
+        long effectiveTrades;
+        long effectiveLosses;
+        double effectiveRupeeLoss;
+
+        if (activeMode == ExecutionMode.LIVE) {
+            if (liveTradeRepository != null) {
+                var todayLiveTrades = liveTradeRepository.findByEntryTimeBetween(queryStart, endOfDay);
+                long dbLiveTrades = (todayLiveTrades != null) ? todayLiveTrades.size() : 0;
+                long dbLiveLosses = (todayLiveTrades != null)
+                    ? todayLiveTrades.stream().filter(t -> t.getNetPnL() != null && t.getNetPnL() < 0).count()
+                    : 0;
+                double dbLiveRupeeLoss = (todayLiveTrades != null)
+                    ? todayLiveTrades.stream()
+                        .filter(t -> t.getNetPnL() != null && t.getNetPnL() < 0)
+                        .mapToDouble(t -> Math.abs(t.getNetPnL()))
+                        .sum()
+                    : 0.0;
+                effectiveTrades = Math.max(liveTradesToday.get(), dbLiveTrades);
+                effectiveLosses = Math.max(liveLossesToday.get(), dbLiveLosses);
+                effectiveRupeeLoss = Math.max(liveRupeeLossToday.get(), dbLiveRupeeLoss);
+            } else {
+                effectiveTrades = liveTradesToday.get();
+                effectiveLosses = liveLossesToday.get();
+                effectiveRupeeLoss = liveRupeeLossToday.get();
+            }
+        } else {
+            effectiveTrades = paperTrades;
+            effectiveLosses = paperLosses;
+            effectiveRupeeLoss = paperRupeeLoss;
+        }
 
         if (effectiveTrades >= maxDailyTrades) {
             if (!dailyLimitLogged.getAndSet(true) || (now - lastWarningLogMs > 300_000L)) {
@@ -389,7 +426,16 @@ public class PositionSizingEngine {
         }
 
         double activeCapital = (gateway != null) ? gateway.getTotalCapital() : getCapital();
-        int baseQty = calculateSizingQuantity(activeCapital, entryPrice, stopPrice, riskBudgetPct, maxExposureMultiplier, minStopDistancePct, maxStopDistancePct);
+        int baseQty = calculateAllInclusiveSizingQuantity(
+            activeCapital,
+            entryPrice,
+            stopPrice,
+            riskBudgetPct,
+            maxExposureMultiplier,
+            minStopDistancePct,
+            maxStopDistancePct,
+            0.15
+        );
         if (baseQty <= 0) {
             double stopDistance = entryPrice - stopPrice;
             if (stopDistance <= 0) {

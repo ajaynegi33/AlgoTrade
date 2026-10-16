@@ -18,6 +18,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneId;
@@ -109,6 +110,9 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private com.algotrade.algotradebackend.persistence.repository.MarketUniverseRepository universeRepository;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.algotrade.algotradebackend.persistence.repository.LiveTradeRepository liveTradeRepository;
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private org.springframework.beans.factory.ObjectProvider<com.algotrade.algotradebackend.websocket.LiveWebSocketBroadcastService> broadcastServiceProvider;
@@ -483,17 +487,61 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                         log.error("Failed to cancel timed-out entry order {}: {}", activeEntryOrderId, t.getMessage());
                     }
                 }
-                activityFeedService.record(
-                    "ORDERS",
-                    "WARN",
-                    gateway.getExecutionMode().name(),
-                    activeTradeId,
-                    "Entry Order Timed Out (30s TTL)",
-                    "Cancelled unfilled limit buy order for " + symbol + " after 30 seconds. Engine returned to FLAT.",
-                    symbol
-                );
-                setFlatState();
-                lastRadarEvaluationTimeMs.put(symbol, System.currentTimeMillis() + 15_000); // 15s debounce
+
+                // Authoritative terminal reconciliation: Verify whether broker actually cancelled or if fill raced with cancel
+                TradeOrder terminalStatus = (activeEntryOrderId != null) ? gateway.getOrderStatus(activeEntryOrderId) : null;
+                Optional<Position> checkPos = gateway.getOpenPosition();
+
+                boolean wasFilled = (terminalStatus != null && "COMPLETE".equalsIgnoreCase(terminalStatus.status()))
+                    || (checkPos.isPresent() && checkPos.get().symbol().equals(symbol) && checkPos.get().quantity() > 0);
+
+                if (wasFilled) {
+                    int filledQty = checkPos.map(Position::quantity).orElse(plannedQuantity);
+                    double filledPrice = (terminalStatus != null && terminalStatus.averagePrice() > 0)
+                        ? terminalStatus.averagePrice()
+                        : checkPos.map(Position::entryPrice).orElse(confirmedEntryPrice);
+
+                    log.warn("ENTRY TIMEOUT RACE DETECTED: Order {} was FILLED at broker ({} shares @ ₹{}). Arming protective stop-loss!",
+                        activeEntryOrderId, filledQty, filledPrice);
+
+                    double tickSize = getSymbolTickSize(symbol);
+                    double triggerPrice = TickMath.floorToTick(plannedStopPrice, tickSize);
+                    double slLimitPrice = TickMath.floorToTick(triggerPrice * 0.9985, tickSize);
+                    try {
+                        TradeOrder slOrder = gateway.placeOrder(symbol, "SELL", filledQty, slLimitPrice, triggerPrice, "SL");
+                        activeSlOrderId = slOrder.orderId();
+                        currentArmedStopPrice = triggerPrice;
+                        currentProtectedQuantity = filledQty;
+                        confirmedEntryPrice = filledPrice;
+                        lifecycleState = TradeLifecycleState.ACTIVE_POSITION;
+                        strategyHighWaterMark = Math.max(filledPrice, ltp);
+                        log.info("PROTECTIVE SL ARMED AFTER RACE: OrderId={}, Qty={}, Trigger=₹{}, Limit=₹{}",
+                            activeSlOrderId, filledQty, triggerPrice, slLimitPrice);
+                    } catch (Throwable t) {
+                        log.error("CRITICAL: Failed to arm SL after entry timeout race: {}", t.getMessage());
+                    }
+                    return;
+                }
+
+                boolean isCancelled = (terminalStatus != null && ("CANCELLED".equalsIgnoreCase(terminalStatus.status()) || "REJECTED".equalsIgnoreCase(terminalStatus.status())))
+                    || (checkPos.isEmpty() || checkPos.get().quantity() <= 0);
+
+                if (isCancelled) {
+                    activityFeedService.record(
+                        "ORDERS",
+                        "WARN",
+                        gateway.getExecutionMode().name(),
+                        activeTradeId,
+                        "Entry Order Timed Out (30s TTL)",
+                        "Cancelled unfilled limit buy order for " + symbol + " after 30 seconds. Engine returned to FLAT.",
+                        symbol
+                    );
+                    setFlatState();
+                    lastRadarEvaluationTimeMs.put(symbol, System.currentTimeMillis() + 15_000); // 15s debounce
+                    return;
+                }
+
+                log.warn("Entry order {} cancel status ambiguous. Retrying reconciliation next tick.", activeEntryOrderId);
                 return;
             }
 
@@ -650,7 +698,11 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             } else {
                 // Position closed (stop-loss was hit or closed at broker)
                 log.info("Position for {} is no longer open at broker. Trade completed.", symbol);
-                handleTradeCompleted(gateway, symbol, currentProtectedQuantity > 0 ? currentProtectedQuantity : plannedQuantity, confirmedEntryPrice, ltp, "STOP_LOSS_HIT");
+                TradeOrder slStatus = (activeSlOrderId != null) ? gateway.getOrderStatus(activeSlOrderId) : null;
+                double executedPrice = (slStatus != null && slStatus.averagePrice() > 0)
+                    ? slStatus.averagePrice()
+                    : (currentArmedStopPrice > 0 ? currentArmedStopPrice : ltp);
+                handleTradeCompleted(gateway, symbol, currentProtectedQuantity > 0 ? currentProtectedQuantity : plannedQuantity, confirmedEntryPrice, executedPrice, "STOP_LOSS_HIT");
             }
             return;
         }
@@ -659,7 +711,11 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             // Waiting for square-off exit or manual exit to confirm flat
             if (optPos.isEmpty() || (optPos.get().quantity() <= 0)) {
                 log.info("Exit confirmed flat at broker for {}.", symbol);
-                handleTradeCompleted(gateway, symbol, currentProtectedQuantity > 0 ? currentProtectedQuantity : plannedQuantity, confirmedEntryPrice, ltp, "EXIT_CONFIRMED");
+                TradeOrder exitStatus = (activeExitOrderId != null) ? gateway.getOrderStatus(activeExitOrderId) : null;
+                double executedPrice = (exitStatus != null && exitStatus.averagePrice() > 0)
+                    ? exitStatus.averagePrice()
+                    : ltp;
+                handleTradeCompleted(gateway, symbol, currentProtectedQuantity > 0 ? currentProtectedQuantity : plannedQuantity, confirmedEntryPrice, executedPrice, "EXIT_CONFIRMED");
             } else if (now.isAfter(LocalTime.of(15, 6))) {
                 long nowMs = System.currentTimeMillis();
                 if (exitOrderInFlight.get()) {
@@ -916,12 +972,20 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             activeEntryOrderId = null;
         }
 
-        // 2. Cancel resting stop-loss order if present
+        // 2. Cancel resting stop-loss order first and verify
         if (activeSlOrderId != null) {
             try {
                 gateway.cancelOrder(activeSlOrderId);
             } catch (Throwable t) {
                 log.warn("Failed to cancel resting SL order {}: {}", activeSlOrderId, t.getMessage());
+            }
+
+            TradeOrder slStatus = gateway.getOrderStatus(activeSlOrderId);
+            if (slStatus != null && "COMPLETE".equalsIgnoreCase(slStatus.status())) {
+                log.info("Protective SL order {} was FILLED before 15:05 square-off. Settling via SL fill.", activeSlOrderId);
+                double fillPrice = slStatus.averagePrice() > 0 ? slStatus.averagePrice() : (currentArmedStopPrice > 0 ? currentArmedStopPrice : (confirmedEntryPrice > 0 ? confirmedEntryPrice : 0.0));
+                handleTradeCompleted(gateway, activeSymbol != null ? activeSymbol : "", currentProtectedQuantity, confirmedEntryPrice, fillPrice, "STOP_LOSS_HIT_AT_EOD");
+                return;
             }
             activeSlOrderId = null;
         }
@@ -956,20 +1020,32 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                 activeExitOrderId = exitOrder.orderId();
             }
 
-            // 4. Active Reconciliation Loop: Verify flat within 5 seconds
-            for (int attempt = 0; attempt < 5; attempt++) {
+            // 4. Active Reconciliation Loop: Verify flat within 5 seconds and retrieve fill price
+            double executedPrice = 0.0;
+            for (int attempt = 0; attempt < 10; attempt++) {
                 try {
                     Thread.sleep(500);
                 } catch (InterruptedException ignored) {}
 
+                TradeOrder exitStatus = (activeExitOrderId != null) ? gateway.getOrderStatus(activeExitOrderId) : null;
+                if (exitStatus != null && exitStatus.averagePrice() > 0) {
+                    executedPrice = exitStatus.averagePrice();
+                }
+
                 Optional<Position> checkPos = gateway.getOpenPosition();
                 if (checkPos.isEmpty() || checkPos.get().quantity() <= 0) {
-                    setFlatState();
-                    broadcastOverviewIfAvailable();
-                    log.info("15:05 Square-off confirmed flat on attempt {}.", attempt + 1);
+                    if (executedPrice <= 0) {
+                        executedPrice = (exitStatus != null && exitStatus.price() > 0) ? exitStatus.price() : pos.currentPrice();
+                    }
+                    handleTradeCompleted(gateway, pos.symbol(), pos.quantity(), pos.entryPrice(), executedPrice, "MANDATORY_SQUARE_OFF_1505");
+                    log.info("15:05 Square-off confirmed flat and settled on attempt {}.", attempt + 1);
                     return;
                 }
             }
+
+            // Fallback timeout exit settlement
+            if (executedPrice <= 0) executedPrice = pos.currentPrice();
+            handleTradeCompleted(gateway, pos.symbol(), pos.quantity(), pos.entryPrice(), executedPrice, "MANDATORY_SQUARE_OFF_TIMEOUT");
         } else {
             log.info("Square-off complete: No open position found.");
             setFlatState();
@@ -1036,6 +1112,32 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                 "exitReason", exitReason
             )
         );
+
+        if (gateway.getExecutionMode() == ExecutionMode.LIVE && liveTradeRepository != null) {
+            try {
+                liveTradeRepository.save(new com.algotrade.algotradebackend.persistence.entity.LiveTradeEntity(
+                    symbol,
+                    finalQty,
+                    finalEntry,
+                    finalExit,
+                    Instant.now().minusSeconds(60),
+                    Instant.now(),
+                    exitReason,
+                    grossPnL,
+                    netPnL,
+                    charges.totalCharges(),
+                    charges.brokerage(),
+                    charges.stt(),
+                    charges.exchangeCharges(),
+                    charges.sebiCharges(),
+                    charges.stampDuty(),
+                    charges.gst(),
+                    activeTradeId
+                ));
+            } catch (Throwable t) {
+                log.error("Failed to persist LiveTradeEntity: {}", t.getMessage());
+            }
+        }
 
         setFlatState();
         broadcastOverviewIfAvailable();
