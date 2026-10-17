@@ -41,6 +41,11 @@ public class PaperTradingGateway implements BrokerGateway {
     private final ConcurrentHashMap<String, TradeOrder> orders = new ConcurrentHashMap<>();
     private final AtomicReference<Double> virtualCash;
     private final double baseCapital;
+    private final java.util.concurrent.atomic.AtomicInteger simulatedPartialFillQty = new java.util.concurrent.atomic.AtomicInteger(0);
+
+    public void setSimulatedPartialFillQty(int qty) {
+        this.simulatedPartialFillQty.set(qty);
+    }
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private org.springframework.beans.factory.ObjectProvider<com.algotrade.algotradebackend.broker.zerodha.ZerodhaLiveGateway> zerodhaLiveGatewayProvider;
@@ -131,6 +136,11 @@ public class PaperTradingGateway implements BrokerGateway {
 
     @Override
     public synchronized TradeOrder placeOrder(String symbol, String transactionType, int quantity, double price, double triggerPrice, String orderType) {
+        return placeOrder(symbol, transactionType, quantity, price, triggerPrice, orderType, null);
+    }
+
+    @Override
+    public synchronized TradeOrder placeOrder(String symbol, String transactionType, int quantity, double price, double triggerPrice, String orderType, String tag) {
         String orderId = "PAPER-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
 
         if ("BUY".equalsIgnoreCase(transactionType) && ("LIMIT".equalsIgnoreCase(orderType) || "MARKET".equalsIgnoreCase(orderType))) {
@@ -143,7 +153,11 @@ public class PaperTradingGateway implements BrokerGateway {
                 double basePrice = price > 0.0 ? price : (existing != null ? existing.currentPrice() : 0.0);
                 executedPrice = Math.round((basePrice * 1.0005) * 100.0) / 100.0;
             }
-            TradeOrder filledOrder = new TradeOrder(orderId, symbol, "BUY", quantity, executedPrice, 0.0, orderType.toUpperCase(), "FILLED", ExecutionMode.PAPER, Instant.now());
+            TradeOrder filledOrder = new TradeOrder(
+                orderId, symbol, "BUY", quantity, executedPrice, 0.0, executedPrice,
+                orderType.toUpperCase(), "FILLED", ExecutionMode.PAPER, Instant.now(),
+                tag, quantity, 0, null
+            );
             orders.put(orderId, filledOrder);
 
             // Create initial position
@@ -159,13 +173,17 @@ public class PaperTradingGateway implements BrokerGateway {
                     log.warn("Failed to persist open paper position: {}", t.getMessage());
                 }
             }
-            log.info("PAPER TRADE FILLED: BUY {} x {} @ ₹{}", quantity, symbol, executedPrice);
+            log.info("PAPER TRADE FILLED: BUY {} x {} @ ₹{} (Tag={})", quantity, symbol, executedPrice, tag);
             return filledOrder;
         }
 
         if ("SELL".equalsIgnoreCase(transactionType) && "SL".equalsIgnoreCase(orderType)) {
             // Resting Stop-Loss order
-            TradeOrder slOrder = new TradeOrder(orderId, symbol, "SELL", quantity, price, triggerPrice, "SL", "TRIGGER PENDING", ExecutionMode.PAPER, Instant.now());
+            TradeOrder slOrder = new TradeOrder(
+                orderId, symbol, "SELL", quantity, price, triggerPrice, price,
+                "SL", "TRIGGER PENDING", ExecutionMode.PAPER, Instant.now(),
+                tag, 0, quantity, null
+            );
             orders.put(orderId, slOrder);
 
             // Update position with initial stop-loss
@@ -190,7 +208,7 @@ public class PaperTradingGateway implements BrokerGateway {
                     }
                 }
             }
-            log.info("PAPER SL PLACED: {} Trigger @ ₹{}, Limit @ ₹{}", symbol, triggerPrice, price);
+            log.info("PAPER SL PLACED: {} Trigger @ ₹{}, Limit @ ₹{} (Tag={})", symbol, triggerPrice, price, tag);
             return slOrder;
         }
 
@@ -199,13 +217,21 @@ public class PaperTradingGateway implements BrokerGateway {
             Position current = openPosition.get();
             double basePrice = price > 0.0 ? price : (current != null ? current.currentPrice() : 0.0);
             double executedPrice = Math.round((basePrice * 0.9995) * 100.0) / 100.0;
-            TradeOrder exitOrder = new TradeOrder(orderId, symbol, "SELL", quantity, executedPrice, 0.0, orderType.toUpperCase(), "FILLED", ExecutionMode.PAPER, Instant.now());
+            TradeOrder exitOrder = new TradeOrder(
+                orderId, symbol, "SELL", quantity, executedPrice, 0.0, executedPrice,
+                orderType.toUpperCase(), "FILLED", ExecutionMode.PAPER, Instant.now(),
+                tag, quantity, 0, null
+            );
             orders.put(orderId, exitOrder);
             closePosition(symbol, executedPrice, "MANUAL_OR_TIME_EXIT");
             return exitOrder;
         }
 
-        TradeOrder pendingOrder = new TradeOrder(orderId, symbol, transactionType, quantity, price, triggerPrice, orderType, "PENDING", ExecutionMode.PAPER, Instant.now());
+        TradeOrder pendingOrder = new TradeOrder(
+            orderId, symbol, transactionType, quantity, price, triggerPrice, price,
+            orderType, "PENDING", ExecutionMode.PAPER, Instant.now(),
+            tag, 0, quantity, null
+        );
         orders.put(orderId, pendingOrder);
         return pendingOrder;
     }
@@ -223,15 +249,26 @@ public class PaperTradingGateway implements BrokerGateway {
         }
 
         int finalQty = newQuantity > 0 ? newQuantity : existing.quantity();
+        Position current = openPosition.get();
+
+        // If order was in OPEN (triggered) state and the new aggressive exit limit price is <= currentPrice or best bid:
+        if ("OPEN".equalsIgnoreCase(existing.status()) && current != null && newPrice <= current.currentPrice()) {
+            double exitPrice = Math.min(newPrice, current.currentPrice());
+            executeSlFill(existing, exitPrice, "AGGRESSIVE_EXIT_LIMIT_FILLED");
+            TradeOrder filled = orders.get(orderId);
+            return filled != null ? filled : existing.withExecution("FILLED", exitPrice);
+        }
+
+        String confirmedStatus = "OPEN".equalsIgnoreCase(existing.status()) ? "OPEN" : "TRIGGER PENDING";
         TradeOrder modified = new TradeOrder(
             existing.orderId(), existing.symbol(), existing.transactionType(),
-            finalQty, newPrice, newTriggerPrice, existing.orderType(),
-            existing.status(), ExecutionMode.PAPER, existing.createdAt()
+            finalQty, newPrice, newTriggerPrice, existing.averagePrice(), existing.orderType(),
+            confirmedStatus, ExecutionMode.PAPER, existing.createdAt(), existing.tag(),
+            existing.filledQuantity(), finalQty - existing.filledQuantity(), existing.statusMessage()
         );
         orders.put(orderId, modified);
 
         // Update position's trailing stop and quantity if expanded
-        Position current = openPosition.get();
         if (current != null && current.symbol().equals(existing.symbol())) {
             int posQty = newQuantity > 0 ? Math.max(current.quantity(), newQuantity) : current.quantity();
             openPosition.set(new Position(
@@ -253,7 +290,8 @@ public class PaperTradingGateway implements BrokerGateway {
             }
         }
 
-        log.info("PAPER SL MODIFIED: {} Qty={}, New Trigger @ ₹{}", existing.symbol(), finalQty, newTriggerPrice);
+        log.info("PAPER SL MODIFIED: {} Qty={}, New Price={}, Trigger @ ₹{} ({})",
+            existing.symbol(), finalQty, newPrice, newTriggerPrice, confirmedStatus);
         return modified;
     }
 
@@ -298,12 +336,80 @@ public class PaperTradingGateway implements BrokerGateway {
             } catch (Throwable ignored) {}
         }
 
-        // Check if Stop-Loss trigger was breached (0.15% slippage to match live SL-Limit offset)
-        if (current.activeTrailingStop() > 0 && ltp <= current.activeTrailingStop()) {
+        // Evaluate resting Stop-Loss orders for this symbol
+        boolean stopOrderEvaluated = false;
+        for (TradeOrder order : orders.values()) {
+            if (!order.symbol().equalsIgnoreCase(symbol)) continue;
+            if (!"SELL".equalsIgnoreCase(order.transactionType())) continue;
+            if (!("SL".equalsIgnoreCase(order.orderType()) || order.triggerPrice() > 0)) continue;
+
+            stopOrderEvaluated = true;
+            if ("TRIGGER PENDING".equalsIgnoreCase(order.status())) {
+                if (ltp <= order.triggerPrice()) {
+                    // Trigger breached!
+                    if (ltp < order.price()) {
+                        // Gap-down below limit price: order triggers but rests UNFILLED as OPEN limit order
+                        TradeOrder openOrder = new TradeOrder(
+                            order.orderId(), order.symbol(), order.transactionType(), order.quantity(),
+                            order.price(), order.triggerPrice(), order.averagePrice(), order.orderType(),
+                            "OPEN", ExecutionMode.PAPER, order.createdAt(), order.tag(),
+                            0, order.quantity(), "TRIGGERED_UNFILLED_GAP_DOWN"
+                        );
+                        orders.put(order.orderId(), openOrder);
+                        log.warn("PAPER SL TRIGGERED WITH GAP: {} Trigger ₹{} hit, but LTP ₹{} < Limit ₹{}. Order now resting OPEN unfilled.",
+                            symbol, order.triggerPrice(), ltp, order.price());
+                    } else {
+                        // Regular fill inside trigger-limit window
+                        executeSlFill(order, order.price(), "STOP_LOSS_HIT");
+                    }
+                }
+            } else if ("OPEN".equalsIgnoreCase(order.status())) {
+                if (ltp >= order.price()) {
+                    executeSlFill(order, order.price(), "GAP_RECOVERY_FILL");
+                }
+            }
+        }
+
+        // Backward-compatible fallback if position had activeTrailingStop but no explicit SL order in map
+        if (!stopOrderEvaluated && current.activeTrailingStop() > 0 && ltp <= current.activeTrailingStop()) {
             double exitPrice = Math.round((current.activeTrailingStop() * 0.9985) * 100.0) / 100.0;
             log.warn("PAPER STOP HIT: {} Triggered @ ₹{}, Exited @ ₹{}", symbol, current.activeTrailingStop(), exitPrice);
             closePosition(symbol, exitPrice, "STOP_LOSS_HIT");
         }
+    }
+
+    private void executeSlFill(TradeOrder order, double exitPrice, String exitReason) {
+        Position pos = openPosition.get();
+        if (pos == null) return;
+
+        int simPartial = simulatedPartialFillQty.getAndSet(0);
+        if (simPartial > 0 && simPartial < order.quantity()) {
+            int remaining = order.quantity() - simPartial;
+            TradeOrder partialOrder = new TradeOrder(
+                order.orderId(), order.symbol(), order.transactionType(), order.quantity(),
+                order.price(), order.triggerPrice(), exitPrice, order.orderType(),
+                "OPEN", ExecutionMode.PAPER, order.createdAt(), order.tag(),
+                simPartial, remaining, "PARTIALLY_FILLED"
+            );
+            orders.put(order.orderId(), partialOrder);
+            openPosition.set(new Position(
+                pos.symbol(), remaining, pos.entryPrice(), pos.currentPrice(),
+                pos.initialStopLoss(), pos.activeTrailingStop(), pos.highWaterMark(), pos.entryTime(), ExecutionMode.PAPER
+            ));
+            log.info("PAPER SL PARTIAL FILL: Filled {} x {} @ ₹{}, Remaining {} shares OPEN",
+                simPartial, pos.symbol(), exitPrice, remaining);
+            return;
+        }
+
+        TradeOrder completed = new TradeOrder(
+            order.orderId(), order.symbol(), order.transactionType(), order.quantity(),
+            order.price(), order.triggerPrice(), exitPrice, order.orderType(),
+            "COMPLETE", ExecutionMode.PAPER, order.createdAt(), order.tag(),
+            order.quantity(), 0, "FILLED"
+        );
+        orders.put(order.orderId(), completed);
+        log.warn("PAPER STOP EXECUTED: {} Triggered/Filled @ ₹{}", order.symbol(), exitPrice);
+        closePosition(order.symbol(), exitPrice, exitReason);
     }
 
     /**
@@ -423,10 +529,37 @@ public class PaperTradingGateway implements BrokerGateway {
         java.util.Map<String, Object> result = new java.util.LinkedHashMap<>();
         result.put("symbol", cleanSymbol);
         result.put("instrument", "NSE:" + cleanSymbol);
+        Position current = openPosition.get();
+        double currentPrice = (current != null && current.symbol().equalsIgnoreCase(cleanSymbol)) ? current.currentPrice() : 0.0;
+        if (currentPrice > 0.0) {
+            result.put("lastPrice", currentPrice);
+            result.put("lowerCircuitLimit", Math.round(currentPrice * 0.90 * 100.0) / 100.0);
+            java.util.Map<String, Object> depth = new java.util.HashMap<>();
+            java.util.List<java.util.Map<String, Object>> buyList = new java.util.ArrayList<>();
+            java.util.Map<String, Object> topBid = new java.util.HashMap<>();
+            topBid.put("price", Math.round(currentPrice * 0.9995 * 100.0) / 100.0);
+            topBid.put("quantity", 1000);
+            buyList.add(topBid);
+            depth.put("buy", buyList);
+            result.put("depth", depth);
+            result.put("authenticated", true);
+            return result;
+        }
         result.put("authenticated", false);
         result.put("error", "ZERODHA_SESSION_REQUIRED");
         result.put("message", "Zerodha Kite session is not active. Please authenticate your Zerodha account to stream live quotes from NSE.");
         return result;
+    }
+
+    @Override
+    public Optional<TradeOrder> getActiveStopOrder(String symbol, String tag) {
+        String cleanSymbol = symbol != null ? symbol.replace("NSE:", "").trim() : "";
+        return orders.values().stream()
+            .filter(o -> o.symbol().equalsIgnoreCase(cleanSymbol))
+            .filter(o -> "SELL".equalsIgnoreCase(o.transactionType()))
+            .filter(o -> "TRIGGER PENDING".equalsIgnoreCase(o.status()) || "OPEN".equalsIgnoreCase(o.status()))
+            .filter(o -> tag == null || tag.isBlank() || (o.tag() != null && o.tag().equalsIgnoreCase(tag)))
+            .reduce((first, second) -> second);
     }
 
     @Override
@@ -439,6 +572,7 @@ public class PaperTradingGateway implements BrokerGateway {
         return orders.values().stream()
             .anyMatch(o -> "SUBMITTED".equalsIgnoreCase(o.status()) 
                         || "PENDING".equalsIgnoreCase(o.status()) 
-                        || "TRIGGER PENDING".equalsIgnoreCase(o.status()));
+                        || "TRIGGER PENDING".equalsIgnoreCase(o.status())
+                        || "OPEN".equalsIgnoreCase(o.status()));
     }
 }

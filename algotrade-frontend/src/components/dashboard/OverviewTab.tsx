@@ -115,11 +115,37 @@ export default function OverviewTab({ overview, backendUrl = "http://localhost:8
         <div className="bg-gradient-to-br from-slate-900 to-slate-900/90 border-2 border-emerald-500/50 rounded-2xl p-5 sm:p-6 shadow-xl shadow-emerald-950/20">
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-4 border-b border-slate-800 gap-3">
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-xs font-mono font-semibold uppercase tracking-wider flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
                   <span>Live Active Position</span>
                 </span>
+                {overview.activePosition.logicalStage !== undefined && (
+                  <span
+                    className={`px-2 py-0.5 rounded text-xs font-mono font-bold border ${
+                      overview.activePosition.logicalStage === 3
+                        ? "bg-purple-500/20 text-purple-300 border-purple-500/40"
+                        : overview.activePosition.logicalStage === 2
+                        ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                        : overview.activePosition.logicalStage === 1
+                        ? "bg-blue-500/20 text-blue-300 border-blue-500/40"
+                        : "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                    }`}
+                  >
+                    {overview.activePosition.logicalStage === 3
+                      ? "Stage 3 · Runner Profit Lock"
+                      : overview.activePosition.logicalStage === 2
+                      ? "Stage 2 · Cost Floor (+₹11 Net)"
+                      : overview.activePosition.logicalStage === 1
+                      ? "Stage 1 · Soft De-Risk (−0.35R)"
+                      : "Stage 0 · Initial Structural SL"}
+                  </span>
+                )}
+                {overview.activePosition.activeExitPolicy && (
+                  <span className="px-2 py-0.5 rounded text-xs font-mono font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse">
+                    Exit: {overview.activePosition.activeExitPolicy}
+                  </span>
+                )}
               </div>
               <h2 className="text-2xl sm:text-3xl font-black text-white mt-1">
                 {overview.activePosition.symbol}
@@ -127,6 +153,9 @@ export default function OverviewTab({ overview, backendUrl = "http://localhost:8
               <p className="text-xs text-slate-400 font-mono">
                 Quantity: {overview.activePosition.quantity} shares | Entered:{" "}
                 {new Date(overview.activePosition.entryTime).toLocaleTimeString()}
+                {overview.activePosition.slModificationCount !== undefined && overview.activePosition.slModificationCount > 0 && (
+                  <span> | SL Mods: {overview.activePosition.slModificationCount}</span>
+                )}
               </p>
             </div>
             {/* Right side cluster: Immediate Sell Button on the left, Unrealized P&L on the right */}
@@ -218,12 +247,12 @@ export default function OverviewTab({ overview, backendUrl = "http://localhost:8
               </p>
             </div>
             <div className="bg-slate-950/50 rounded-xl p-3 border border-slate-800/80">
-              <p className="text-[11px] text-slate-400">Active Trailing Stop</p>
+              <p className="text-[11px] text-slate-400">Protective Stop-Limit</p>
               <p className="text-base sm:text-lg font-mono font-bold text-amber-400 mt-0.5">
-                ₹{overview.activePosition.activeTrailingStop.toFixed(2)}
+                ₹{(overview.activePosition.armedTrigger ?? overview.activePosition.activeTrailingStop).toFixed(2)}
               </p>
               <p className="text-[10px] text-slate-500">
-                Initial: ₹{overview.activePosition.initialStopLoss.toFixed(2)}
+                Limit: ₹{(overview.activePosition.armedLimit ?? overview.activePosition.activeTrailingStop).toFixed(2)} | S0: ₹{overview.activePosition.initialStopLoss.toFixed(2)}
               </p>
             </div>
             <div className="bg-slate-950/50 rounded-xl p-3 border border-slate-800/80">
@@ -231,7 +260,15 @@ export default function OverviewTab({ overview, backendUrl = "http://localhost:8
               <p className="text-base sm:text-lg font-mono font-bold text-sky-400 mt-0.5">
                 ₹{highWaterMark.toFixed(2)}
               </p>
-              <p className="text-[10px] text-slate-500">Trail buffer: 0.8%</p>
+              <p className="text-[10px] text-slate-500">
+                {overview.activePosition.logicalStage === 3
+                  ? "Dynamic Retention Active"
+                  : overview.activePosition.logicalStage === 2
+                  ? "Locked Above Cost Floor"
+                  : overview.activePosition.logicalStage === 1
+                  ? "De-risked (−0.35R)"
+                  : "Incubation (Initial SL)"}
+              </p>
             </div>
           </div>
         </div>

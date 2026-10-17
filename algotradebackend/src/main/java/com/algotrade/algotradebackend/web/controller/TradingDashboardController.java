@@ -53,6 +53,9 @@ public class TradingDashboardController {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private org.springframework.beans.factory.ObjectProvider<com.algotrade.algotradebackend.scanner.ContinuousIntradayScannerService> continuousScannerProvider;
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.algotrade.algotradebackend.websocket.LiveEngineWebSocketHandler webSocketHandler;
+
     public TradingDashboardController(
         BrokerGatewayManager brokerGatewayManager,
         StrategyManager strategyManager,
@@ -74,6 +77,9 @@ public class TradingDashboardController {
      */
     @GetMapping("/overview")
     public ResponseEntity<Map<String, Object>> getOverview() {
+        if (webSocketHandler != null) {
+            return ResponseEntity.ok(webSocketHandler.buildOverviewData());
+        }
         Map<String, Object> response = new LinkedHashMap<>();
 
         ExecutionMode mode = brokerGatewayManager.getActiveMode();
@@ -111,6 +117,13 @@ public class TradingDashboardController {
             posData.put("unrealizedPnL", pos.getUnrealizedPnL());
             posData.put("unrealizedPnLPct", pos.getUnrealizedPnLPct());
             posData.put("entryTime", pos.entryTime().toString());
+            if (strategyManager.getActiveStrategy() instanceof com.algotrade.algotradebackend.strategy.momentum_breakout.MomentumBreakoutStrategy mbs) {
+                posData.put("logicalStage", mbs.getLogicalStage());
+                posData.put("armedLimit", mbs.getArmedPair() != null ? mbs.getArmedPair().limitPrice() : null);
+                posData.put("armedTrigger", mbs.getArmedPair() != null ? mbs.getArmedPair().triggerPrice() : null);
+                posData.put("activeExitPolicy", mbs.getActiveExitPolicy());
+                posData.put("slModificationCount", mbs.getSlModificationCount());
+            }
             response.put("activePosition", posData);
         } else if (!marketCalendarService.isMarketOpen()) {
             // (i) During off-market hours, stop observation

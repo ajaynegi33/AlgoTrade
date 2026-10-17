@@ -332,6 +332,11 @@ public class ZerodhaLiveGateway implements BrokerGateway {
 
     @Override
     public TradeOrder placeOrder(String symbol, String transactionType, int quantity, double price, double triggerPrice, String orderType) {
+        return placeOrder(symbol, transactionType, quantity, price, triggerPrice, orderType, null);
+    }
+
+    @Override
+    public TradeOrder placeOrder(String symbol, String transactionType, int quantity, double price, double triggerPrice, String orderType, String tag) {
         if (!sessionActive) {
             throw new IllegalStateException("Zerodha live session is not authenticated. Please log in first via /api/zerodha/login");
         }
@@ -345,6 +350,9 @@ public class ZerodhaLiveGateway implements BrokerGateway {
             params.product = Constants.PRODUCT_MIS; // Intraday MIS
             params.orderType = orderType.toUpperCase();
             params.validity = Constants.VALIDITY_DAY;
+            if (tag != null && !tag.isBlank()) {
+                params.tag = tag.length() <= 20 ? tag : tag.substring(0, 20);
+            }
 
             if ("LIMIT".equalsIgnoreCase(orderType)) {
                 params.price = price;
@@ -354,10 +362,14 @@ public class ZerodhaLiveGateway implements BrokerGateway {
             }
 
             OrderResponse resp = kiteConnect.placeOrder(params, Constants.VARIETY_REGULAR);
-            log.info("ZERODHA LIVE ORDER PLACED: ID={}, {} {} x {} @ {}", resp.orderId, transactionType, quantity, symbol, price);
+            log.info("ZERODHA LIVE ORDER PLACED: ID={}, Tag={}, {} {} x {} @ {}", resp.orderId, params.tag, transactionType, quantity, symbol, price);
             triggerAsyncPositionSync();
 
-            return new TradeOrder(resp.orderId, symbol, transactionType, quantity, price, triggerPrice, orderType, "SUBMITTED", ExecutionMode.LIVE, Instant.now());
+            return new TradeOrder(
+                resp.orderId, symbol, transactionType, quantity, price, triggerPrice, price,
+                orderType, "SUBMITTED", ExecutionMode.LIVE, Instant.now(),
+                params.tag, 0, quantity, null
+            );
         } catch (Throwable e) {
             log.error("Failed to place Zerodha live order for {}: {}", symbol, e.getMessage(), e);
             throw new RuntimeException("Zerodha order placement failed: " + e.getMessage(), e);
@@ -389,7 +401,17 @@ public class ZerodhaLiveGateway implements BrokerGateway {
             log.info("ZERODHA LIVE ORDER MODIFIED: ID={}, New Qty={}, New Price={}, Trigger={}", resp.orderId, newQuantity, newPrice, newTriggerPrice);
             triggerAsyncPositionSync();
 
-            return new TradeOrder(orderId, "", "", newQuantity, newPrice, newTriggerPrice, "SL", "MODIFIED", ExecutionMode.LIVE, Instant.now());
+            // Authoritative broker confirmation from order history
+            TradeOrder confirmed = getOrderStatus(orderId);
+            if (confirmed != null) {
+                return confirmed;
+            }
+
+            return new TradeOrder(
+                orderId, "", "", newQuantity, newPrice, newTriggerPrice, newPrice,
+                "SL", "TRIGGER PENDING", ExecutionMode.LIVE, Instant.now(),
+                null, 0, newQuantity, "MODIFIED_UNCONFIRMED"
+            );
         } catch (Throwable e) {
             log.error("Failed to modify Zerodha live order {}: {}", orderId, e.getMessage(), e);
             throw new RuntimeException("Zerodha order modification failed: " + e.getMessage(), e);
@@ -441,13 +463,20 @@ public class ZerodhaLiveGateway implements BrokerGateway {
             if (netPositions != null) {
                 for (com.zerodhatech.models.Position p : netPositions) {
                     if (p.netQuantity > 0 && Constants.PRODUCT_MIS.equalsIgnoreCase(p.product)) {
+                        double stopPrice = 0.0;
+                        try {
+                            Optional<TradeOrder> activeStop = getActiveStopOrder(p.tradingSymbol, null);
+                            if (activeStop.isPresent()) {
+                                stopPrice = activeStop.get().triggerPrice();
+                            }
+                        } catch (Throwable ignored) {}
                         detected = Optional.of(new Position(
                             p.tradingSymbol,
                             p.netQuantity,
                             p.averagePrice,
                             p.lastPrice,
-                            0.0,
-                            0.0,
+                            stopPrice,
+                            stopPrice,
                             p.lastPrice,
                             Instant.now(),
                             ExecutionMode.LIVE
@@ -509,30 +538,66 @@ public class ZerodhaLiveGateway implements BrokerGateway {
             java.util.List<com.zerodhatech.models.Order> history = kiteConnect.getOrderHistory(orderId);
             if (history != null && !history.isEmpty()) {
                 com.zerodhatech.models.Order latest = history.get(history.size() - 1);
-                double p = latest.price != null ? Double.parseDouble(latest.price) : 0.0;
-                double tp = latest.triggerPrice != null ? Double.parseDouble(latest.triggerPrice) : 0.0;
-                double avgPrice = (latest.averagePrice != null && !latest.averagePrice.isBlank()) 
-                    ? Double.parseDouble(latest.averagePrice) 
-                    : p;
-                int q = latest.quantity != null ? Integer.parseInt(latest.quantity) : 0;
-                return new TradeOrder(
-                    orderId,
-                    latest.tradingSymbol,
-                    latest.transactionType,
-                    q,
-                    p,
-                    tp,
-                    avgPrice,
-                    latest.orderType,
-                    latest.status,
-                    ExecutionMode.LIVE,
-                    Instant.now()
-                );
+                return toTradeOrder(latest);
             }
         } catch (Throwable t) {
             log.warn("Could not query Zerodha order status for {}: {}", orderId, t.getMessage());
         }
         return null;
+    }
+
+    @Override
+    public Optional<TradeOrder> getActiveStopOrder(String symbol, String tag) {
+        if (!sessionActive || kiteConnect == null) {
+            return Optional.empty();
+        }
+        try {
+            java.util.List<com.zerodhatech.models.Order> allOrders = kiteConnect.getOrders();
+            if (allOrders == null || allOrders.isEmpty()) return Optional.empty();
+
+            for (com.zerodhatech.models.Order o : allOrders) {
+                if (symbol != null && !symbol.isBlank() && !symbol.equalsIgnoreCase(o.tradingSymbol)) continue;
+                if (tag != null && !tag.isBlank() && !tag.equalsIgnoreCase(o.tag)) continue;
+
+                String status = o.status;
+                if (Constants.ORDER_TRIGGER_PENDING.equalsIgnoreCase(status) || Constants.ORDER_OPEN.equalsIgnoreCase(status)) {
+                    double tp = (o.triggerPrice != null && !o.triggerPrice.isBlank()) ? Double.parseDouble(o.triggerPrice) : 0.0;
+                    if ("SL".equalsIgnoreCase(o.orderType) || "SL-M".equalsIgnoreCase(o.orderType) || tp > 0.0) {
+                        return Optional.of(toTradeOrder(o));
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            log.warn("Failed to query active stop orders from Zerodha for symbol={}, tag={}: {}", symbol, tag, t.getMessage());
+        }
+        return Optional.empty();
+    }
+
+    private TradeOrder toTradeOrder(com.zerodhatech.models.Order o) {
+        double p = (o.price != null && !o.price.isBlank()) ? Double.parseDouble(o.price) : 0.0;
+        double tp = (o.triggerPrice != null && !o.triggerPrice.isBlank()) ? Double.parseDouble(o.triggerPrice) : 0.0;
+        double avgPrice = (o.averagePrice != null && !o.averagePrice.isBlank()) ? Double.parseDouble(o.averagePrice) : p;
+        int q = (o.quantity != null && !o.quantity.isBlank()) ? Integer.parseInt(o.quantity) : 0;
+        int filledQ = (o.filledQuantity != null && !o.filledQuantity.isBlank()) ? Integer.parseInt(o.filledQuantity) : 0;
+        int pendingQ = (o.pendingQuantity != null && !o.pendingQuantity.isBlank()) ? Integer.parseInt(o.pendingQuantity) : Math.max(0, q - filledQ);
+
+        return new TradeOrder(
+            o.orderId,
+            o.tradingSymbol,
+            o.transactionType,
+            q,
+            p,
+            tp,
+            avgPrice,
+            o.orderType,
+            o.status,
+            ExecutionMode.LIVE,
+            Instant.now(),
+            o.tag,
+            filledQ,
+            pendingQ,
+            o.statusMessage
+        );
     }
 
     private Margin getCachedMargin() {

@@ -12,6 +12,7 @@ import com.algotrade.algotradebackend.risk.PositionSizingEngine;
 import com.algotrade.algotradebackend.strategy.TradingStrategy;
 import com.algotrade.algotradebackend.core.service.MarketCalendarService;
 import com.algotrade.algotradebackend.core.service.EngineActivityFeedService;
+import com.algotrade.algotradebackend.persistence.entity.PaperActivePositionEntity;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -64,6 +65,64 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
     @Value("${algotrade.strategy.max-support-distance-pct:1.5}")
     private double maxSupportDistancePct = 1.5;
 
+    // Multi-Stage Stop Ladder Parameters
+    @Value("${algotrade.strategy.ladder.enabled:true}")
+    private boolean ladderEnabled = true;
+
+    @Value("${algotrade.strategy.ladder.buffer-pct:0.15}")
+    private double ladderBufferPct = 0.15;
+
+    @Value("${algotrade.strategy.ladder.profit-buffer-pct:0.20}")
+    private double ladderProfitBufferPct = 0.20;
+
+    @Value("${algotrade.strategy.ladder.inversion-gap-ticks:5}")
+    private int ladderInversionGapTicks = 5;
+
+    @Value("${algotrade.strategy.ladder.inversion-gap-pct:0.20}")
+    private double ladderInversionGapPct = 0.20;
+
+    @Value("${algotrade.strategy.ladder.incubation-minutes:3}")
+    private long ladderIncubationMinutes = 3;
+
+    @Value("${algotrade.strategy.ladder.stage1-trigger-r:0.60}")
+    private double ladderStage1TriggerR = 0.60;
+
+    @Value("${algotrade.strategy.ladder.stage1-risk-r:0.35}")
+    private double ladderStage1RiskR = 0.35;
+
+    @Value("${algotrade.strategy.ladder.stage2-trigger-r:1.20}")
+    private double ladderStage2TriggerR = 1.20;
+
+    @Value("${algotrade.strategy.ladder.stage2-target-net-profit:11.00}")
+    private double ladderStage2TargetNetProfit = 11.00;
+
+    @Value("${algotrade.strategy.ladder.stage3-trigger-r:1.50}")
+    private double ladderStage3TriggerR = 1.50;
+
+    @Value("${algotrade.strategy.ladder.stagnation-minutes:25}")
+    private long ladderStagnationMinutes = 25;
+
+    @Value("${algotrade.strategy.ladder.stagnation-progress-r:0.25}")
+    private double ladderStagnationProgressR = 0.25;
+
+    @Value("${algotrade.strategy.ladder.max-duration-minutes:45}")
+    private long ladderMaxDurationMinutes = 45;
+
+    @Value("${algotrade.strategy.ladder.throttle-seconds:5}")
+    private long ladderThrottleSeconds = 5;
+
+    @Value("${algotrade.strategy.ladder.min-step-ticks:3}")
+    private int ladderMinStepTicks = 3;
+
+    @Value("${algotrade.strategy.ladder.mod-budget-tier1:15}")
+    private int ladderModBudgetTier1 = 15;
+
+    @Value("${algotrade.strategy.ladder.mod-budget-tier2:20}")
+    private int ladderModBudgetTier2 = 20;
+
+    @Value("${algotrade.strategy.ladder.mod-budget-reserve:3}")
+    private int ladderModBudgetReserve = 3;
+
     private final ConcurrentHashMap<String, CandidateMetrics> metricsMap = new ConcurrentHashMap<>();
     private final CopyOnWriteArrayList<ScoredCandidate> latestTopCandidates = new CopyOnWriteArrayList<>();
     private final java.util.Set<String> tradedSymbolsToday = java.util.concurrent.ConcurrentHashMap.newKeySet();
@@ -86,6 +145,34 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
     private final java.util.concurrent.atomic.AtomicLong lastExitOrderDispatchMs = new java.util.concurrent.atomic.AtomicLong(0);
     private volatile LocalDate lastSessionDate = null;
     private volatile LocalTime lastTickTime = null;
+
+    // Multi-Stage Stop Ladder State (§C4, §C5, §C7, §C9, §C11)
+    private volatile int logicalStage = 0;
+    private volatile StopLadder.StopOrderPair armedPair = new StopLadder.StopOrderPair(0.0, 0.0);
+    private volatile double initialStructuralStop = 0.0; // S0
+    private volatile double initialStructuralLimit = 0.0;
+    private volatile double unitRisk = 0.0; // 1R = E - S0
+    private volatile Instant entryFillTimeUtc = null;
+    private volatile Instant hwmTimestampUtc = null;
+    private volatile double hwm15MinAgo = 0.0;
+    private volatile Instant lastHwmStepTsUtc = null;
+    private volatile long lastStopModifyTimeMs = 0L;
+    private volatile int slModificationCount = 0;
+    private volatile String currentOrderTag = null;
+
+    // Latches (§C7)
+    private volatile boolean peak06Latched = false;
+    private volatile boolean incubDoneLatched = false;
+    private volatile boolean stagDoneLatched = false;
+    private volatile boolean t45DoneLatched = false;
+    private volatile boolean eodDoneLatched = false;
+
+    // Exit Controller State (§C9)
+    private volatile String activeExitPolicy = "NONE"; // NONE, PROTECTED, EMERGENCY
+    private volatile int emergencyStep = 0;
+    private volatile long lastEmergencyStepTimeMs = 0L;
+    private volatile long protectedGraceStartTimeMs = 0L;
+    private volatile long emergencyUnfilledStartTimeMs = 0L;
 
     public void setTrailingParameters(double breakevenTriggerPct, double breakevenCostBufferPct, double trailingBufferPct) {
         this.breakevenTriggerPct = breakevenTriggerPct;
@@ -115,6 +202,9 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
     private com.algotrade.algotradebackend.persistence.repository.LiveTradeRepository liveTradeRepository;
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.algotrade.algotradebackend.persistence.repository.PaperActivePositionRepository paperActivePositionRepository;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
     private org.springframework.beans.factory.ObjectProvider<com.algotrade.algotradebackend.websocket.LiveWebSocketBroadcastService> broadcastServiceProvider;
 
     private final java.util.concurrent.atomic.AtomicBoolean evaluatingTrigger = new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -140,38 +230,179 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                 log.warn("Could not pre-populate full universe into metricsMap: {}", t.getMessage());
             }
         }
+        log.info("Stop Ladder Engine Initialized: enabled={}, bufferPct={}%, profitBufferPct={}%, gap={}t/{}%, incubation={}m, S1(trig=+{}R, soft=-{}R), S2(trig=+{}R, net=₹{}), S3(trig=+{}R), stag={}m, maxDur={}m",
+            ladderEnabled, ladderBufferPct, ladderProfitBufferPct, ladderInversionGapTicks, ladderInversionGapPct,
+            ladderIncubationMinutes, ladderStage1TriggerR, ladderStage1RiskR, ladderStage2TriggerR, ladderStage2TargetNetProfit,
+            ladderStage3TriggerR, ladderStagnationMinutes, ladderMaxDurationMinutes);
         rehydrateActivePositionIfPresent();
     }
 
     public synchronized void rehydrateActivePositionIfPresent() {
         try {
             BrokerGateway gateway = brokerGatewayManager.getActiveGateway();
-            if (gateway != null) {
-                var optPos = gateway.getOpenPosition();
-                if (optPos.isPresent()) {
-                    Position pos = optPos.get();
-                    this.activeSymbol = pos.symbol();
+            if (gateway == null) return;
+
+            Optional<Position> optPos;
+            try {
+                optPos = gateway.getOpenPosition();
+            } catch (Throwable t) {
+                log.error("RECONCILE_PENDING: Broker query failed during startup rehydration. Setting RECONCILE_PENDING; no orders sent. Reason: {}", t.getMessage());
+                activityFeedService.record(
+                    "ALERT", "ERROR", gateway.getExecutionMode().name(), "RECOVERY",
+                    "Reconcile Pending", "Broker query failed during rehydration: " + t.getMessage() + ". No orders sent.", null
+                );
+                return;
+            }
+
+            var dbOpt = (paperActivePositionRepository != null) ? paperActivePositionRepository.findFirstByOrderByEntryTimeDesc() : Optional.<PaperActivePositionEntity>empty();
+
+            if (optPos.isEmpty() || optPos.get().quantity() <= 0) {
+                // Broker has no open position
+                if (dbOpt.isPresent()) {
+                    log.warn("RECOVERY: Local active position found in DB, but broker has 0 net position. Clearing stale DB state.");
+                    paperActivePositionRepository.deleteAll();
+                }
+                setFlatState();
+                log.info("RECOVERY: Engine confirmed FLAT at broker.");
+                return;
+            }
+
+            Position pos = optPos.get();
+            Optional<TradeOrder> stopOpt = gateway.getActiveStopOrder(pos.symbol(), null);
+
+            if (dbOpt.isEmpty()) {
+                // Unknown position detected at broker with no DB record
+                log.error("UNKNOWN OPEN POSITION DETECTED at broker: {} x {} with no active DB record!", pos.quantity(), pos.symbol());
+                activityFeedService.record(
+                    "ALERT", "WARN", gateway.getExecutionMode().name(), "UNKNOWN-" + pos.symbol(),
+                    "Unknown Position Detected", "Broker has " + pos.quantity() + " shares of " + pos.symbol() + " with no active DB record.", pos.symbol()
+                );
+                this.activeSymbol = pos.symbol();
+                this.confirmedEntryPrice = pos.entryPrice();
+                this.strategyHighWaterMark = Math.max(pos.entryPrice(), pos.currentPrice());
+                this.plannedQuantity = pos.quantity();
+                this.currentProtectedQuantity = pos.quantity();
+                this.activeTradeId = "UNKNOWN-" + pos.symbol();
+                this.entryFillTimeUtc = pos.entryTime() != null ? pos.entryTime() : Instant.now();
+
+                if (stopOpt.isEmpty()) {
+                    // No working sell exists: arm emergency SL or EMERGENCY_EXIT
+                    double tickSize = getSymbolTickSize(pos.symbol());
+                    double emTrigger = TickMath.floorToTick(pos.currentPrice() * 0.992, tickSize);
+                    double emLimit = TickMath.floorToTick(emTrigger * (1.0 - ladderBufferPct / 100.0), tickSize);
+                    if (StopLadder.isExecutable(emTrigger, pos.currentPrice(), tickSize, ladderInversionGapTicks, ladderInversionGapPct)) {
+                        String emTag = generateOrderTag("EM");
+                        TradeOrder emOrder = placeOrderWithTagFallback(gateway, pos.symbol(), "SELL", pos.quantity(), emLimit, emTrigger, "SL", emTag);
+                        if (emOrder != null) {
+                            this.activeSlOrderId = emOrder.orderId();
+                            this.armedPair = new StopLadder.StopOrderPair(emTrigger, emLimit);
+                            this.currentArmedStopPrice = emTrigger;
+                            this.lifecycleState = TradeLifecycleState.ACTIVE_POSITION;
+                            log.info("RECOVERY: Armed emergency SL for unknown position: OrderId={}, Trigger=₹{}, Limit=₹{}", activeSlOrderId, emTrigger, emLimit);
+                        } else {
+                            this.lifecycleState = TradeLifecycleState.PENDING_EXIT;
+                            executeEmergencyExit(gateway, pos, "UNKNOWN_POSITION_SL_PLACEMENT_FAILED");
+                        }
+                    } else {
+                        this.lifecycleState = TradeLifecycleState.PENDING_EXIT;
+                        executeEmergencyExit(gateway, pos, "UNKNOWN_POSITION_UNEXECUTABLE_SL");
+                    }
+                } else {
+                    TradeOrder existingStop = stopOpt.get();
+                    this.activeSlOrderId = existingStop.orderId();
+                    this.armedPair = new StopLadder.StopOrderPair(existingStop.triggerPrice(), existingStop.price());
+                    this.currentArmedStopPrice = existingStop.triggerPrice();
+                    if ("OPEN".equalsIgnoreCase(existingStop.status())) {
+                        this.lifecycleState = TradeLifecycleState.PENDING_EXIT;
+                        log.warn("RECOVERY: Unknown position has triggered OPEN stop {}. Escalating...", existingStop.orderId());
+                        executeEmergencyExit(gateway, pos, "RECOVERY_TRIGGERED_STOP");
+                    } else {
+                        this.lifecycleState = TradeLifecycleState.ACTIVE_POSITION;
+                        log.info("RECOVERY: Reconciled existing stop order {} for unknown position.", existingStop.orderId());
+                    }
+                }
+                return;
+            }
+
+            // Normal recovery: Broker has position and DB has trade state
+            PaperActivePositionEntity entity = dbOpt.get();
+            this.activeSymbol = pos.symbol();
+            this.activeTradeId = "RESTORED-" + pos.symbol();
+            this.confirmedEntryPrice = entity.getEntryPrice() > 0 ? entity.getEntryPrice() : pos.entryPrice();
+            this.initialStructuralStop = entity.getInitialStopLoss() > 0 ? entity.getInitialStopLoss() : (pos.initialStopLoss() > 0 ? pos.initialStopLoss() : confirmedEntryPrice * 0.99);
+            this.initialStructuralLimit = entity.getInitialStopLimit() != null && entity.getInitialStopLimit() > 0 ? entity.getInitialStopLimit() : TickMath.floorToTick(initialStructuralStop * (1.0 - ladderBufferPct / 100.0), getSymbolTickSize(pos.symbol()));
+            this.unitRisk = entity.getUnitRisk() != null && entity.getUnitRisk() > 0 ? entity.getUnitRisk() : (confirmedEntryPrice - initialStructuralStop);
+            this.logicalStage = entity.getLogicalStage();
+            this.strategyHighWaterMark = Math.max(entity.getHighWaterMark(), pos.highWaterMark());
+            this.entryFillTimeUtc = entity.getEntryTime() != null ? entity.getEntryTime() : pos.entryTime();
+            this.hwmTimestampUtc = entity.getHwmTime() != null ? entity.getHwmTime() : Instant.now();
+            this.lastHwmStepTsUtc = entity.getLastHwmStepTime();
+            this.slModificationCount = entity.getSlModCount();
+            this.currentProtectedQuantity = pos.quantity();
+            this.plannedQuantity = pos.quantity();
+
+            int mask = entity.getLatchesMask();
+            this.peak06Latched = (mask & 1) != 0;
+            this.incubDoneLatched = (mask & (1 << 1)) != 0;
+            this.stagDoneLatched = (mask & (1 << 2)) != 0;
+            this.t45DoneLatched = (mask & (1 << 3)) != 0;
+            this.eodDoneLatched = (mask & (1 << 4)) != 0;
+
+            if (stopOpt.isPresent()) {
+                TradeOrder slOrder = stopOpt.get();
+                this.activeSlOrderId = slOrder.orderId();
+                this.armedPair = new StopLadder.StopOrderPair(slOrder.triggerPrice(), slOrder.price());
+                this.currentArmedStopPrice = slOrder.triggerPrice();
+
+                if (slOrder.quantity() != pos.quantity()) {
+                    log.warn("RECOVERY QUANTITY RESIZE: Broker net qty {} != Stop order qty {}. In-place modifying...", pos.quantity(), slOrder.quantity());
+                    try {
+                        gateway.modifyOrder(slOrder.orderId(), pos.quantity(), slOrder.price(), slOrder.triggerPrice());
+                    } catch (Throwable t) {
+                        log.error("Failed to in-place resize stop quantity during recovery: {}", t.getMessage());
+                    }
+                }
+
+                if ("OPEN".equalsIgnoreCase(slOrder.status())) {
+                    this.lifecycleState = TradeLifecycleState.PENDING_EXIT;
+                    log.warn("RECOVERY: Found stop order {} in OPEN (triggered) state. Handing off to exit controller.", slOrder.orderId());
+                    executeEmergencyExit(gateway, pos, "RECOVERY_TRIGGERED_STOP");
+                } else {
                     this.lifecycleState = TradeLifecycleState.ACTIVE_POSITION;
-                    this.strategyHighWaterMark = pos.highWaterMark();
-                    this.currentArmedStopPrice = pos.activeTrailingStop();
-                    this.currentProtectedQuantity = pos.quantity();
-                    this.confirmedEntryPrice = pos.entryPrice();
-                    this.activeTradeId = "RESTORED-" + pos.symbol();
-                    log.info("RE-HYDRATED ACTIVE POSITION IN STRATEGY: {} x {} @ ₹{} (SL: ₹{}, HWM: ₹{})",
-                        pos.quantity(), pos.symbol(), pos.entryPrice(), pos.activeTrailingStop(), pos.highWaterMark());
-                    activityFeedService.record(
-                        "LIFECYCLE",
-                        "INFO",
-                        gateway.getExecutionMode().name(),
-                        activeTradeId,
-                        "Active Position Restored",
-                        "Restored active position for " + pos.symbol() + " (" + pos.quantity() + " shares) across server restart.",
-                        pos.symbol()
-                    );
+                    log.info("RECOVERY: Successfully restored position: {} x {} @ ₹{} (SL OrderId={}, Trigger=₹{}, Limit=₹{}, Stage={})",
+                        pos.quantity(), pos.symbol(), pos.entryPrice(), slOrder.orderId(), armedPair.triggerPrice(), armedPair.limitPrice(), logicalStage);
+                }
+            } else {
+                // Stop absent at broker! Re-arm at persisted armedPair if executable
+                log.warn("RECOVERY: No active stop order found at broker for {}! Re-arming at persisted armedPair.", pos.symbol());
+                double tickSize = getSymbolTickSize(pos.symbol());
+                double trig = entity.getActiveTrailingStop() > 0 ? entity.getActiveTrailingStop() : initialStructuralStop;
+                double lim = entity.getArmedLimit() != null && entity.getArmedLimit() > 0 ? entity.getArmedLimit() : TickMath.floorToTick(trig * (1.0 - ladderBufferPct / 100.0), tickSize);
+                if (StopLadder.isExecutable(trig, pos.currentPrice(), tickSize, ladderInversionGapTicks, ladderInversionGapPct)) {
+                    String rearmTag = generateOrderTag("RA");
+                    TradeOrder rearmed = placeOrderWithTagFallback(gateway, pos.symbol(), "SELL", pos.quantity(), lim, trig, "SL", rearmTag);
+                    if (rearmed != null) {
+                        this.activeSlOrderId = rearmed.orderId();
+                        this.armedPair = new StopLadder.StopOrderPair(trig, lim);
+                        this.currentArmedStopPrice = trig;
+                        this.lifecycleState = TradeLifecycleState.ACTIVE_POSITION;
+                        log.info("RECOVERY: Re-armed protective stop at broker: OrderId={}, Trigger=₹{}, Limit=₹{}", activeSlOrderId, trig, lim);
+                    } else {
+                        this.lifecycleState = TradeLifecycleState.PENDING_EXIT;
+                        executeEmergencyExit(gateway, pos, "RECOVERY_REARM_FAILED");
+                    }
+                } else {
+                    this.lifecycleState = TradeLifecycleState.PENDING_EXIT;
+                    executeEmergencyExit(gateway, pos, "RECOVERY_UNEXECUTABLE_REARM");
                 }
             }
+
+            activityFeedService.record(
+                "LIFECYCLE", "INFO", gateway.getExecutionMode().name(), activeTradeId,
+                "Active Position Reconciled", "Reconciled active position for " + pos.symbol() + " (" + pos.quantity() + " shares, Stage " + logicalStage + ") across restart.", pos.symbol()
+            );
         } catch (Throwable t) {
-            log.warn("Could not check/rehydrate active position on startup: {}", t.getMessage());
+            log.error("Fatal exception during active position rehydration: {}", t.getMessage(), t);
         }
     }
 
@@ -505,18 +736,33 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                         activeEntryOrderId, filledQty, filledPrice);
 
                     double tickSize = getSymbolTickSize(symbol);
-                    double triggerPrice = TickMath.floorToTick(plannedStopPrice, tickSize);
-                    double slLimitPrice = TickMath.floorToTick(triggerPrice * 0.9985, tickSize);
+                    initialStructuralStop = plannedStopPrice;
+                    StopLadder.StopOrderPair s0 = StopLadder.stage0Candidate(initialStructuralStop, tickSize, ladderBufferPct / 100.0);
+                    initialStructuralLimit = s0.limitPrice();
+                    armedPair = s0;
+                    logicalStage = 0;
+                    unitRisk = filledPrice - initialStructuralStop;
+                    entryFillTimeUtc = Instant.now();
+                    hwmTimestampUtc = Instant.now();
+                    hwm15MinAgo = filledPrice;
+                    slModificationCount = 0;
+                    String tag = generateOrderTag("SL");
+                    currentOrderTag = tag;
                     try {
-                        TradeOrder slOrder = gateway.placeOrder(symbol, "SELL", filledQty, slLimitPrice, triggerPrice, "SL");
+                        TradeOrder slOrder = placeOrderWithTagFallback(gateway, symbol, "SELL", filledQty, s0.limitPrice(), s0.triggerPrice(), "SL", tag);
+                        if (slOrder == null) {
+                            throw new IllegalStateException("Gateway returned null stop order for " + symbol);
+                        }
                         activeSlOrderId = slOrder.orderId();
-                        currentArmedStopPrice = triggerPrice;
+                        currentArmedStopPrice = s0.triggerPrice();
                         currentProtectedQuantity = filledQty;
                         confirmedEntryPrice = filledPrice;
                         lifecycleState = TradeLifecycleState.ACTIVE_POSITION;
                         strategyHighWaterMark = Math.max(filledPrice, ltp);
-                        log.info("PROTECTIVE SL ARMED AFTER RACE: OrderId={}, Qty={}, Trigger=₹{}, Limit=₹{}",
-                            activeSlOrderId, filledQty, triggerPrice, slLimitPrice);
+                        log.info("PROTECTIVE SL ARMED AFTER RACE: OrderId={}, Qty={}, Trigger=₹{}, Limit=₹{}, Tag={}",
+                            activeSlOrderId, filledQty, s0.triggerPrice(), s0.limitPrice(), tag);
+                        Position filledPos = new Position(symbol, filledQty, filledPrice, ltp, initialStructuralStop, s0.triggerPrice(), strategyHighWaterMark, entryFillTimeUtc, gateway.getExecutionMode());
+                        persistActivePositionState(gateway, filledPos);
                     } catch (Throwable t) {
                         log.error("CRITICAL: Failed to arm SL after entry timeout race: {}", t.getMessage());
                     }
@@ -551,27 +797,41 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                 if (pos.symbol().equals(symbol) && pos.quantity() > 0) {
                     // Place protective stop-loss for the confirmed filled quantity
                     double tickSize = getSymbolTickSize(symbol);
-                    double triggerPrice = TickMath.floorToTick(plannedStopPrice, tickSize);
-                    double slLimitPrice = TickMath.floorToTick(triggerPrice * 0.9985, tickSize);
+                    initialStructuralStop = plannedStopPrice;
+                    StopLadder.StopOrderPair s0 = StopLadder.stage0Candidate(initialStructuralStop, tickSize, ladderBufferPct / 100.0);
+                    initialStructuralLimit = s0.limitPrice();
+                    armedPair = s0;
+                    logicalStage = 0;
+                    unitRisk = pos.entryPrice() - initialStructuralStop;
+                    entryFillTimeUtc = pos.entryTime() != null ? pos.entryTime() : Instant.now();
+                    hwmTimestampUtc = Instant.now();
+                    hwm15MinAgo = pos.entryPrice();
+                    slModificationCount = 0;
+                    String tag = generateOrderTag("SL");
+                    currentOrderTag = tag;
                     try {
-                        TradeOrder slOrder = gateway.placeOrder(symbol, "SELL", pos.quantity(), slLimitPrice, triggerPrice, "SL");
+                        TradeOrder slOrder = placeOrderWithTagFallback(gateway, symbol, "SELL", pos.quantity(), s0.limitPrice(), s0.triggerPrice(), "SL", tag);
+                        if (slOrder == null) {
+                            throw new IllegalStateException("Gateway returned null stop order for " + symbol);
+                        }
                         activeSlOrderId = slOrder.orderId();
-                        currentArmedStopPrice = triggerPrice;
+                        currentArmedStopPrice = s0.triggerPrice();
                         currentProtectedQuantity = pos.quantity();
                         confirmedEntryPrice = pos.entryPrice();
                         lifecycleState = TradeLifecycleState.ACTIVE_POSITION; // ONLY transition once stop order is placed!
                         strategyHighWaterMark = Math.max(pos.entryPrice(), ltp);
-                        log.info("PROTECTIVE SL CONFIRMED & ARMED: OrderId={}, Qty={}, Trigger=₹{}, Limit=₹{}",
-                            activeSlOrderId, pos.quantity(), triggerPrice, slLimitPrice);
+                        log.info("PROTECTIVE SL CONFIRMED & ARMED: OrderId={}, Qty={}, Trigger=₹{}, Limit=₹{}, Tag={}",
+                            activeSlOrderId, pos.quantity(), s0.triggerPrice(), s0.limitPrice(), tag);
+                        persistActivePositionState(gateway, pos);
                         activityFeedService.record(
                             "ORDERS",
                             "SUCCESS",
                             gateway.getExecutionMode().name(),
                             activeTradeId,
                             "Protective Stop-Loss Armed",
-                            "Position confirmed (" + pos.quantity() + " shares). SL armed: Trigger=₹" + triggerPrice + ", Limit=₹" + slLimitPrice,
+                            "Position confirmed (" + pos.quantity() + " shares). SL armed: Trigger=₹" + s0.triggerPrice() + ", Limit=₹" + s0.limitPrice(),
                             symbol,
-                            Map.of("slOrderId", activeSlOrderId, "triggerPrice", triggerPrice, "limitPrice", slLimitPrice, "quantity", pos.quantity())
+                            Map.of("slOrderId", activeSlOrderId, "triggerPrice", s0.triggerPrice(), "limitPrice", s0.limitPrice(), "quantity", pos.quantity())
                         );
                     } catch (Throwable t) {
                         log.error("CRITICAL: Failed to arm protective stop for filled position {}: {}. Will retry on next tick.", symbol, t.getMessage(), t);
@@ -635,63 +895,195 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                     }
                 }
 
-                // Update persistent high-water mark monotonically (never drops on pullbacks)
-                strategyHighWaterMark = Math.max(strategyHighWaterMark, ltp);
-
-                // Dynamic 2-Stage Breakeven & Progressive Trailing
+                // Check resting Stop order status for triggered-stop watchdog (§C9)
                 if (activeSlOrderId != null) {
-                    double tickSize = getSymbolTickSize(symbol);
-                    double entryPrice = pos.entryPrice();
-                    double candidateStop = currentArmedStopPrice;
-                    String ratchetReason = null;
-
-                    // Stage 1: Exact Solvency Breakeven Lock (+1.0% gain milestone)
-                    // Solves for exact net P&L >= +₹10.00 after all statutory taxes, fees, and Zerodha brokerage
-                    if (strategyHighWaterMark >= entryPrice * (1.0 + breakevenTriggerPct / 100.0)) {
-                        Optional<Double> beOpt = ChargesBreakdown.calculateExactBreakevenPrice(pos.quantity(), entryPrice, tickSize);
-                        if (beOpt.isPresent()) {
-                            double breakevenTarget = beOpt.get();
-                            if (breakevenTarget > candidateStop) {
-                                candidateStop = breakevenTarget;
-                                ratchetReason = "Breakeven Lock (+₹10 Net Profit Secured)";
+                    TradeOrder slStatus = gateway.getOrderStatus(activeSlOrderId);
+                    if (slStatus != null && "OPEN".equalsIgnoreCase(slStatus.status())) {
+                        double bestBid = gateway.getBestBid(symbol).orElse(ltp);
+                        double activeLimit = armedPair.limitPrice() > 0 ? armedPair.limitPrice() : (slStatus.price() > 0 ? slStatus.price() : currentArmedStopPrice * (1.0 - ladderBufferPct / 100.0));
+                        if (bestBid < activeLimit) {
+                            long graceMs = logicalStage >= 2 ? 5000L : 3000L;
+                            if (protectedGraceStartTimeMs == 0L) {
+                                protectedGraceStartTimeMs = System.currentTimeMillis();
+                            } else if (System.currentTimeMillis() - protectedGraceStartTimeMs >= graceMs) {
+                                log.warn("TRIGGERED STOP GAP ESCALATION: Order {} OPEN with BestBid ₹{} < Limit ₹{} for > {}ms. Escalating to EMERGENCY_EXIT.",
+                                    activeSlOrderId, bestBid, activeLimit, graceMs);
+                                executeEmergencyExit(gateway, pos, "TRIGGERED_STOP_GAP_ESCALATION");
+                                return;
                             }
                         } else {
-                            log.warn("Fail-closed: Breakeven calculation did not converge for {} x {} @ entry ₹{}. Retaining existing stop.",
-                                pos.quantity(), symbol, entryPrice);
+                            protectedGraceStartTimeMs = 0L;
                         }
                     }
+                }
 
-                    // Stage 2: Progressive Trailing Buffer (Active ONLY once gain reaches >= 1.5%)
-                    if (strategyHighWaterMark >= entryPrice * 1.015) {
-                        double trailTarget = TickMath.floorToTick(strategyHighWaterMark * (1.0 - trailingBufferPct / 100.0), tickSize);
-                        if (trailTarget >= candidateStop + (3 * tickSize)) {
-                            candidateStop = trailTarget;
-                            ratchetReason = "Trailing Stop Ratcheted (" + trailingBufferPct + "% Buffer)";
-                        }
-                    }
+                // Update persistent high-water mark monotonically (never drops on pullbacks)
+                double prevHwm = strategyHighWaterMark;
+                strategyHighWaterMark = Math.max(strategyHighWaterMark, ltp);
+                Instant nowUtc = Instant.now();
+                if (strategyHighWaterMark > prevHwm) {
+                    hwmTimestampUtc = nowUtc;
+                    lastHwmStepTsUtc = nowUtc;
+                }
+                if (entryFillTimeUtc == null) {
+                    entryFillTimeUtc = pos.entryTime() != null ? pos.entryTime() : nowUtc;
+                }
+                long elapsedMinutes = java.time.Duration.between(entryFillTimeUtc, nowUtc).toMinutes();
+                if (hwm15MinAgo == 0.0 || (lastHwmStepTsUtc != null && java.time.Duration.between(lastHwmStepTsUtc, nowUtc).toMinutes() >= 15)) {
+                    hwm15MinAgo = (hwm15MinAgo == 0.0) ? pos.entryPrice() : strategyHighWaterMark;
+                }
 
-                    // Ratchet stop strictly upward if higher than current armed stop and above initial stop
-                    if (candidateStop > currentArmedStopPrice && candidateStop > plannedStopPrice) {
-                        // Price Inversion Guard: Candidate stop trigger must strictly be below current LTP
-                        if (candidateStop >= ltp) {
-                            log.warn("PRICE INVERSION GUARD: Candidate stop ₹{} >= current LTP ₹{}. Holding stop modification for {}.",
-                                candidateStop, ltp, symbol);
+                // Update Latches (§C7)
+                if (!incubDoneLatched && elapsedMinutes >= ladderIncubationMinutes) {
+                    incubDoneLatched = true;
+                    log.info("LADDER INCUBATION COMPLETED for {} ({} min passed)", symbol, ladderIncubationMinutes);
+                }
+                double s0 = initialStructuralStop > 0 ? initialStructuralStop : plannedStopPrice;
+                double entryPrice = pos.entryPrice();
+                double unitRiskVal = unitRisk > 0 ? unitRisk : (entryPrice - s0);
+                if (!peak06Latched && (ltp >= entryPrice + (ladderStage1TriggerR * unitRiskVal) || strategyHighWaterMark >= entryPrice + (ladderStage1TriggerR * unitRiskVal))) {
+                    peak06Latched = true;
+                    log.info("LADDER PEAK06 LATCHED for {}: LTP ₹{} reached +{}R", symbol, ltp, ladderStage1TriggerR);
+                }
+
+                double tickSize = getSymbolTickSize(symbol);
+                double bufferPct = ladderBufferPct / 100.0;
+                double profitBufferPct = ladderProfitBufferPct / 100.0;
+
+                // Time Supervisor Checks (§C7)
+                // 1. Stagnation Check at 25 min (one-shot latch)
+                if (elapsedMinutes >= ladderStagnationMinutes && !stagDoneLatched) {
+                    stagDoneLatched = true;
+                    boolean isStag = StopLadder.isStagnant(elapsedMinutes, strategyHighWaterMark, hwm15MinAgo, unitRiskVal, logicalStage, ladderStagnationMinutes, ladderStagnationProgressR);
+                    if (isStag) {
+                        log.warn("LADDER STAGNATION DETECTED for {} at {} min: HWM=₹{}, HWM15m=₹{}, LogicalStage={}",
+                            symbol, elapsedMinutes, strategyHighWaterMark, hwm15MinAgo, logicalStage);
+                        if (logicalStage >= 2) {
+                            // Branch (a): Stage 2 or 3 already confirmed -> nothing
+                            log.info("Stagnation branch (a): Stage {} already confirmed. No action.", logicalStage);
                         } else {
-                            double limitPrice = TickMath.floorToTick(candidateStop * 0.9985, tickSize);
-                            log.info("RATCHETING STOP for {}: Persistent HWM=₹{}, New Trigger=₹{}, Limit=₹{}, Reason={}",
-                                symbol, strategyHighWaterMark, candidateStop, limitPrice, ratchetReason);
-                            gateway.modifyOrder(activeSlOrderId, limitPrice, candidateStop);
-                            currentArmedStopPrice = candidateStop; // Maintain local confirmed trigger to prevent repetitive modifications
+                            double bestBid = gateway.getBestBid(symbol).orElse(ltp);
+                            Optional<StopLadder.StopOrderPair> s2Opt = StopLadder.stage2Candidate(pos.quantity(), entryPrice, tickSize, profitBufferPct, ladderStage2TargetNetProfit);
+                            if (s2Opt.isPresent() && bestBid >= s2Opt.get().limitPrice()) {
+                                // Branch (b): bid >= L2 -> Arm Stage 2 or run PROTECTED exit
+                                StopLadder.StopOrderPair s2Pair = s2Opt.get();
+                                if (StopLadder.isExecutable(s2Pair.triggerPrice(), ltp, tickSize, ladderInversionGapTicks, ladderInversionGapPct)) {
+                                    gateway.modifyOrder(activeSlOrderId, s2Pair.limitPrice(), s2Pair.triggerPrice());
+                                    armedPair = armedPair.merge(s2Pair);
+                                    logicalStage = Math.max(logicalStage, 2);
+                                    currentArmedStopPrice = armedPair.triggerPrice();
+                                    slModificationCount++;
+                                    lastStopModifyTimeMs = System.currentTimeMillis();
+                                    persistActivePositionState(gateway, pos);
+                                } else {
+                                    executeProtectedExit(gateway, pos, s2Pair.limitPrice());
+                                    return;
+                                }
+                            } else {
+                                StopLadder.StopOrderPair s1Pair = StopLadder.stage1Candidate(entryPrice, s0, tickSize, bufferPct, ladderStage1RiskR);
+                                double gap = StopLadder.calculateInversionGap(ltp, tickSize, ladderInversionGapTicks, ladderInversionGapPct);
+                                if (ltp >= s1Pair.triggerPrice() + gap) {
+                                    // Branch (c): Arm Stage 1
+                                    if (logicalStage < 1 && StopLadder.isExecutable(s1Pair.triggerPrice(), ltp, tickSize, ladderInversionGapTicks, ladderInversionGapPct)) {
+                                        gateway.modifyOrder(activeSlOrderId, s1Pair.limitPrice(), s1Pair.triggerPrice());
+                                        armedPair = armedPair.merge(s1Pair);
+                                        logicalStage = Math.max(logicalStage, 1);
+                                        currentArmedStopPrice = armedPair.triggerPrice();
+                                        slModificationCount++;
+                                        lastStopModifyTimeMs = System.currentTimeMillis();
+                                        persistActivePositionState(gateway, pos);
+                                    }
+                                } else {
+                                    // Branch (d): ltp < T1 + gap -> Controlled EMERGENCY exit
+                                    executeEmergencyExit(gateway, pos, "STAGNATION_CONTROLLED_EXIT");
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 2. Max Duration Check at 45 min (one-shot latch)
+                if (elapsedMinutes >= ladderMaxDurationMinutes && !t45DoneLatched) {
+                    t45DoneLatched = true;
+                    if (logicalStage <= 2) {
+                        log.warn("45-MIN TIME SUPERVISOR: Trade duration {}m >= {}m with Stage {}. Mandatory close.", elapsedMinutes, ladderMaxDurationMinutes, logicalStage);
+                        if (logicalStage == 2) {
+                            executeProtectedExit(gateway, pos, armedPair.limitPrice());
+                        } else {
+                            executeEmergencyExit(gateway, pos, "45_MIN_MAX_DURATION_EXCEEDED");
+                        }
+                        return;
+                    } else {
+                        log.info("45-MIN TIME SUPERVISOR: Trade duration {}m with Stage 3 runner. Holding position until trail breached or 15:05.", elapsedMinutes);
+                    }
+                }
+
+                // Opportunistic Price Ratchet (§C6)
+                if (activeSlOrderId != null && ladderEnabled) {
+                    StopLadder.StopOrderPair s0Cand = StopLadder.stage0Candidate(s0, tickSize, bufferPct);
+                    StopLadder.StopOrderPair s1Cand = (incubDoneLatched && peak06Latched) ? StopLadder.stage1Candidate(entryPrice, s0, tickSize, bufferPct, ladderStage1RiskR) : null;
+                    Optional<StopLadder.StopOrderPair> s2CandOpt = (strategyHighWaterMark >= entryPrice + (ladderStage2TriggerR * unitRiskVal))
+                        ? StopLadder.stage2Candidate(pos.quantity(), entryPrice, tickSize, profitBufferPct, ladderStage2TargetNetProfit)
+                        : Optional.empty();
+                    StopLadder.StopOrderPair s3Cand = ((logicalStage >= 2 || s2CandOpt.isPresent()) && strategyHighWaterMark >= entryPrice + (ladderStage3TriggerR * unitRiskVal))
+                        ? StopLadder.stage3Candidate(entryPrice, strategyHighWaterMark, tickSize, profitBufferPct, bufferPct, Optional.empty(), Optional.empty())
+                        : null;
+
+                    StopLadder.StopOrderPair dominant = s0Cand;
+                    int targetStage = 0;
+                    String ratchetReason = null;
+                    if (s1Cand != null) {
+                        dominant = dominant.merge(s1Cand);
+                        targetStage = Math.max(targetStage, 1);
+                        ratchetReason = "Stage 1 Soft Stop (-" + ladderStage1RiskR + "R)";
+                    }
+                    if (s2CandOpt.isPresent()) {
+                        dominant = dominant.merge(s2CandOpt.get());
+                        targetStage = Math.max(targetStage, 2);
+                        ratchetReason = "Stage 2 Floor Locked (₹" + ladderStage2TargetNetProfit + " Net Target)";
+                    }
+                    if (s3Cand != null) {
+                        dominant = dominant.merge(s3Cand);
+                        targetStage = Math.max(targetStage, 3);
+                        ratchetReason = "Stage 3 Dynamic Runner Trail";
+                    }
+
+                    StopLadder.StopOrderPair proposedPair = armedPair.merge(dominant);
+
+                    // Throttle, step size, and modification budget guards (§C5)
+                    double triggerStep = proposedPair.triggerPrice() - armedPair.triggerPrice();
+                    double minStep = ladderMinStepTicks * tickSize;
+                    if (slModificationCount >= ladderModBudgetTier1) {
+                        minStep = Math.max(minStep, 0.25 * unitRiskVal);
+                    }
+                    boolean budgetOk = (slModificationCount < 20 || targetStage > logicalStage) && (slModificationCount + ladderModBudgetReserve < 25);
+                    boolean throttleOk = (System.currentTimeMillis() - lastStopModifyTimeMs >= ladderThrottleSeconds * 1000L);
+                    boolean executable = StopLadder.isExecutable(proposedPair.triggerPrice(), ltp, tickSize, ladderInversionGapTicks, ladderInversionGapPct);
+
+                    if (triggerStep >= minStep && budgetOk && throttleOk && executable) {
+                        log.info("RATCHETING STOP (Stage {} -> {}): HWM=₹{}, New Trigger=₹{}, Limit=₹{}, Reason={}",
+                            logicalStage, targetStage, strategyHighWaterMark, proposedPair.triggerPrice(), proposedPair.limitPrice(), ratchetReason);
+                        try {
+                            gateway.modifyOrder(activeSlOrderId, proposedPair.limitPrice(), proposedPair.triggerPrice());
+                            armedPair = proposedPair;
+                            logicalStage = Math.max(logicalStage, targetStage);
+                            currentArmedStopPrice = proposedPair.triggerPrice();
+                            slModificationCount++;
+                            lastStopModifyTimeMs = System.currentTimeMillis();
+                            persistActivePositionState(gateway, pos);
                             activityFeedService.record(
                                 "ORDERS",
                                 "SUCCESS",
                                 gateway.getExecutionMode().name(),
                                 activeTradeId,
-                                ratchetReason != null ? ratchetReason : "Trailing Stop Ratcheted",
-                                "Persistent HWM updated to ₹" + strategyHighWaterMark + ". Stop raised to ₹" + candidateStop + " (Limit: ₹" + limitPrice + ")",
+                                ratchetReason != null ? ratchetReason : "Stop Ratcheted",
+                                "Raised stop to Trigger ₹" + proposedPair.triggerPrice() + " / Limit ₹" + proposedPair.limitPrice() + " (Stage " + logicalStage + ")",
                                 symbol,
-                                Map.of("highWaterMark", strategyHighWaterMark, "triggerPrice", candidateStop, "limitPrice", limitPrice)
+                                Map.of("triggerPrice", proposedPair.triggerPrice(), "limitPrice", proposedPair.limitPrice(), "logicalStage", logicalStage, "highWaterMark", strategyHighWaterMark)
                             );
+                        } catch (Throwable t) {
+                            log.error("Failed to ratchet stop order: {}", t.getMessage());
                         }
                     }
                 }
@@ -719,25 +1111,25 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             } else if (now.isAfter(LocalTime.of(15, 6))) {
                 long nowMs = System.currentTimeMillis();
                 if (exitOrderInFlight.get()) {
-                    if (nowMs - lastExitOrderDispatchMs.get() >= 5000) {
-                        TradeOrder status = gateway.getOrderStatus(activeExitOrderId);
+                    if (nowMs - lastExitOrderDispatchMs.get() >= 3000) {
+                        TradeOrder status = (activeExitOrderId != null) ? gateway.getOrderStatus(activeExitOrderId) : null;
                         if (status != null && ("REJECTED".equalsIgnoreCase(status.status()) || "CANCELLED".equalsIgnoreCase(status.status()))) {
                             log.warn("Exit order {} was {}. Resetting flight latch for emergency retry.", activeExitOrderId, status.status());
                             exitOrderInFlight.set(false);
                         } else {
-                            log.info("Exit order {} is currently {}. Waiting for broker execution.", activeExitOrderId, status != null ? status.status() : "IN_FLIGHT");
+                            Position pos = optPos.get();
+                            executeEmergencyExit(gateway, pos, "POST_15_06_LADDER_ESCALATION");
                             lastExitOrderDispatchMs.set(nowMs);
                         }
                     }
                 } else if (exitOrderInFlight.compareAndSet(false, true)) {
                     lastExitOrderDispatchMs.set(nowMs);
                     Position pos = optPos.get();
-                    log.warn("POST-15:05 ESCALATION: Dispatching single emergency market exit for {} ({} shares)", pos.symbol(), pos.quantity());
+                    log.warn("POST-15:05 ESCALATION: Dispatching emergency exit ladder for {} ({} shares)", pos.symbol(), pos.quantity());
                     try {
-                        TradeOrder exitOrder = gateway.placeOrder(pos.symbol(), "SELL", pos.quantity(), 0.0, 0.0, "MARKET");
-                        activeExitOrderId = exitOrder.orderId();
+                        executeEmergencyExit(gateway, pos, "POST_15_05_ESCALATION");
                     } catch (Throwable t) {
-                        log.error("Emergency market exit failed: {}", t.getMessage());
+                        log.error("Emergency exit ladder failed: {}", t.getMessage());
                         exitOrderInFlight.set(false);
                     }
                 }
@@ -832,9 +1224,11 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                 continue;
             }
 
-            int quantity = positionSizingEngine.calculateQuantity(winner.symbol(), entryPrice, initialStop, gateway);
+            // Step 4b: Fix N3 - Size against marketable buy limit (worst-case fill price)
+            double marketableBuyLimit = TickMath.ceilToTick(entryPrice * 1.0005, tickSize); // LTP + 0.05% ceil to valid tick
+            int quantity = positionSizingEngine.calculateQuantity(winner.symbol(), marketableBuyLimit, initialStop, gateway);
             if (quantity < 1) {
-                log.debug("Candidate {} skipped: Calculated quantity is 0 shares. Evaluating runner-up.", winner.symbol());
+                log.debug("Candidate {} skipped: Calculated quantity is 0 shares at buy limit ₹{}. Evaluating runner-up.", winner.symbol(), marketableBuyLimit);
                 continue;
             }
 
@@ -861,14 +1255,13 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                 "RISK",
                 "INFO",
                 "Position Sizing Computed",
-                "Calculated size: " + quantity + " shares. Entry ~₹" + entryPrice + ", Initial Stop: ₹" + initialStop,
+                "Calculated size: " + quantity + " shares. Entry Limit: ₹" + marketableBuyLimit + " (LTP ~₹" + entryPrice + "), Initial Stop: ₹" + initialStop,
                 winner.symbol(),
-                Map.of("quantity", quantity, "entryPrice", entryPrice, "initialStop", initialStop)
+                Map.of("quantity", quantity, "entryPrice", entryPrice, "limitPrice", marketableBuyLimit, "initialStop", initialStop)
             );
 
             // Step 5: Place Marketable Limit Buy Order
             String tradeId = "AUTO-" + LocalDate.now(ZoneId.of("Asia/Kolkata")) + "-" + winner.symbol();
-            double marketableBuyLimit = TickMath.ceilToTick(entryPrice * 1.0005, tickSize); // LTP + 0.05% ceil to valid tick
             log.info("DISPATCHING ENTRY ORDER: BUY {} x {} @ Marketable Limit ₹{}", quantity, winner.symbol(), marketableBuyLimit);
 
             TradeOrder buyOrder;
@@ -914,24 +1307,40 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             Optional<Position> immediatePos = gateway.getOpenPosition();
             if (immediatePos.isPresent() && immediatePos.get().symbol().equals(winner.symbol())) {
                 Position pos = immediatePos.get();
-                strategyHighWaterMark = Math.max(entryPrice, pos.currentPrice());
-                double slLimitPrice = TickMath.floorToTick(initialStop * 0.9985, tickSize);
+                initialStructuralStop = initialStop;
+                StopLadder.StopOrderPair s0 = StopLadder.stage0Candidate(initialStructuralStop, tickSize, ladderBufferPct / 100.0);
+                initialStructuralLimit = s0.limitPrice();
+                armedPair = s0;
+                logicalStage = 0;
+                unitRisk = pos.entryPrice() - initialStructuralStop;
+                entryFillTimeUtc = pos.entryTime() != null ? pos.entryTime() : Instant.now();
+                hwmTimestampUtc = Instant.now();
+                hwm15MinAgo = pos.entryPrice();
+                slModificationCount = 0;
+                strategyHighWaterMark = Math.max(pos.entryPrice(), pos.currentPrice());
+                String tag = generateOrderTag("SL");
+                currentOrderTag = tag;
                 try {
-                    TradeOrder slOrder = gateway.placeOrder(winner.symbol(), "SELL", pos.quantity(), slLimitPrice, initialStop, "SL");
+                    TradeOrder slOrder = placeOrderWithTagFallback(gateway, winner.symbol(), "SELL", pos.quantity(), s0.limitPrice(), s0.triggerPrice(), "SL", tag);
+                    if (slOrder == null) {
+                        throw new IllegalStateException("Gateway returned null stop order for " + winner.symbol());
+                    }
                     activeSlOrderId = slOrder.orderId();
-                    currentArmedStopPrice = initialStop;
+                    currentArmedStopPrice = s0.triggerPrice();
                     currentProtectedQuantity = pos.quantity();
+                    confirmedEntryPrice = pos.entryPrice();
                     lifecycleState = TradeLifecycleState.ACTIVE_POSITION;
-                    log.info("PROTECTIVE SL ENGAGED: OrderId={}, Trigger=₹{}, Limit=₹{}", activeSlOrderId, initialStop, slLimitPrice);
+                    log.info("PROTECTIVE SL ENGAGED: OrderId={}, Trigger=₹{}, Limit=₹{}, Tag={}", activeSlOrderId, s0.triggerPrice(), s0.limitPrice(), tag);
+                    persistActivePositionState(gateway, pos);
                     activityFeedService.record(
                         "ORDERS",
                         "SUCCESS",
                         gateway.getExecutionMode().name(),
                         activeTradeId,
                         "Protective Stop-Loss Armed",
-                        "Stop-Loss order engaged: Trigger=₹" + initialStop + ", Limit=₹" + slLimitPrice,
+                        "Stop-Loss order engaged: Trigger=₹" + s0.triggerPrice() + ", Limit=₹" + s0.limitPrice(),
                         winner.symbol(),
-                        Map.of("slOrderId", activeSlOrderId, "triggerPrice", initialStop, "limitPrice", slLimitPrice)
+                        Map.of("slOrderId", activeSlOrderId, "triggerPrice", s0.triggerPrice(), "limitPrice", s0.limitPrice(), "quantity", pos.quantity())
                     );
                 } catch (Throwable t) {
                     log.warn("Immediate SL placement failed: {}. Will retry on incoming tick stream.", t.getMessage());
@@ -972,14 +1381,9 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             activeEntryOrderId = null;
         }
 
-        // 2. Cancel resting stop-loss order first and verify
+        // 2. Square-off pipeline (§C9) - Freeze ratchets and execute PROTECTED or EMERGENCY exit
+        eodDoneLatched = true;
         if (activeSlOrderId != null) {
-            try {
-                gateway.cancelOrder(activeSlOrderId);
-            } catch (Throwable t) {
-                log.warn("Failed to cancel resting SL order {}: {}", activeSlOrderId, t.getMessage());
-            }
-
             TradeOrder slStatus = gateway.getOrderStatus(activeSlOrderId);
             if (slStatus != null && "COMPLETE".equalsIgnoreCase(slStatus.status())) {
                 log.info("Protective SL order {} was FILLED before 15:05 square-off. Settling via SL fill.", activeSlOrderId);
@@ -987,7 +1391,6 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                 handleTradeCompleted(gateway, activeSymbol != null ? activeSymbol : "", currentProtectedQuantity, confirmedEntryPrice, fillPrice, "STOP_LOSS_HIT_AT_EOD");
                 return;
             }
-            activeSlOrderId = null;
         }
 
         // 3. Reconcile Position: Check if ANY shares were filled (full or partial fill)
@@ -1001,23 +1404,19 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
                 gateway.getExecutionMode().name(),
                 activeTradeId,
                 "15:05 Mandatory Square-Off",
-                "Closing active position " + pos.symbol() + " (" + pos.quantity() + " shares) ahead of broker CAS cutoffs.",
+                "Closing active position " + pos.symbol() + " (" + pos.quantity() + " shares) ahead of broker cutoffs.",
                 pos.symbol(),
                 Map.of("quantity", pos.quantity(), "entryPrice", pos.entryPrice(), "currentPrice", pos.currentPrice())
             );
 
             lifecycleState = TradeLifecycleState.PENDING_EXIT;
-
-            // Direct Market Exit for 100% execution guarantee
-            try {
-                TradeOrder exitOrder = gateway.placeOrder(pos.symbol(), "SELL", pos.quantity(), 0.0, 0.0, "MARKET");
-                activeExitOrderId = exitOrder.orderId();
-            } catch (Throwable t) {
-                log.error("Market exit order failed for {}: {}. Retrying aggressive marketable limit.", pos.symbol(), t.getMessage());
-                double tickSize = getSymbolTickSize(pos.symbol());
-                double aggressiveSellPrice = TickMath.floorToTick(pos.currentPrice() * 0.9950, tickSize);
-                TradeOrder exitOrder = gateway.placeOrder(pos.symbol(), "SELL", pos.quantity(), aggressiveSellPrice, 0.0, "LIMIT");
-                activeExitOrderId = exitOrder.orderId();
+            double bestBid = gateway.getBestBid(pos.symbol()).orElse(pos.currentPrice());
+            if (logicalStage >= 2 && bestBid >= armedPair.limitPrice()) {
+                log.info("15:05 SQUARE-OFF: Running PROTECTED_EXIT at floor ₹{} (Bid ₹{})", armedPair.limitPrice(), bestBid);
+                executeProtectedExit(gateway, pos, armedPair.limitPrice());
+            } else {
+                log.warn("15:05 SQUARE-OFF: Running EMERGENCY_EXIT ladder (BestBid=₹{}, Stage={})", bestBid, logicalStage);
+                executeEmergencyExit(gateway, pos, "15:05_MANDATORY_SQUARE_OFF");
             }
 
             // 4. Active Reconciliation Loop: Verify flat within 5 seconds and retrieve fill price
@@ -1153,10 +1552,39 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         strategyHighWaterMark = 0.0;
         currentArmedStopPrice = 0.0;
         confirmedEntryPrice = 0.0;
+        plannedStopPrice = 0.0;
+        plannedQuantity = 0;
         currentProtectedQuantity = 0;
         exitOrderInFlight.set(false);
         lastExitOrderDispatchMs.set(0L);
         entryOrderTimestampMs = 0L;
+        logicalStage = 0;
+        armedPair = new StopLadder.StopOrderPair(0.0, 0.0);
+        initialStructuralStop = 0.0;
+        initialStructuralLimit = 0.0;
+        unitRisk = 0.0;
+        entryFillTimeUtc = null;
+        hwmTimestampUtc = null;
+        hwm15MinAgo = 0.0;
+        lastHwmStepTsUtc = null;
+        lastStopModifyTimeMs = 0L;
+        slModificationCount = 0;
+        currentOrderTag = null;
+        peak06Latched = false;
+        incubDoneLatched = false;
+        stagDoneLatched = false;
+        t45DoneLatched = false;
+        eodDoneLatched = false;
+        activeExitPolicy = "NONE";
+        emergencyStep = 0;
+        lastEmergencyStepTimeMs = 0L;
+        protectedGraceStartTimeMs = 0L;
+        emergencyUnfilledStartTimeMs = 0L;
+        if (paperActivePositionRepository != null) {
+            try {
+                paperActivePositionRepository.deleteAll();
+            } catch (Throwable ignored) {}
+        }
     }
 
     private void broadcastOverviewIfAvailable() {
@@ -1210,29 +1638,31 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         }
 
         String exitReason = (reason != null && !reason.isBlank()) ? reason : "MANUAL_OPERATOR_SELL";
-        log.info("DISPATCHING MANUAL MARKET EXIT for {} x {} (Reason: {})", pos.quantity(), pos.symbol(), exitReason);
+        log.info("DISPATCHING MANUAL EXIT for {} x {} (Reason: {})", pos.quantity(), pos.symbol(), exitReason);
 
-        // 1. Immediately cancel resting SL and entry orders to eliminate ghost fill risks
-        cancelRestingOrders(gateway);
+        // 1. Immediately cancel resting entry orders
+        if (activeEntryOrderId != null) {
+            try { gateway.cancelOrder(activeEntryOrderId); } catch (Throwable ignored) {}
+            activeEntryOrderId = null;
+        }
 
-        // 2. Place immediate Market Sell Order to active broker gateway
+        // 2. Dispatch PROTECTED or EMERGENCY exit ladder
         lifecycleState = TradeLifecycleState.PENDING_EXIT;
         exitOrderInFlight.set(true);
         lastExitOrderDispatchMs.set(System.currentTimeMillis());
         double executedPrice = pos.currentPrice();
 
-        TradeOrder exitOrder = null;
-        try {
-            exitOrder = gateway.placeOrder(pos.symbol(), "SELL", pos.quantity(), 0.0, 0.0, "MARKET");
-            activeExitOrderId = exitOrder.orderId();
-            if (exitOrder.price() > 0) {
-                executedPrice = exitOrder.price();
-            }
-        } catch (Throwable t) {
-            log.error("Direct market exit failed for {}: {}. Retrying aggressive marketable limit.", pos.symbol(), t.getMessage());
-            double tickSize = getSymbolTickSize(pos.symbol());
-            double aggressiveSellPrice = TickMath.floorToTick(pos.currentPrice() * 0.9950, tickSize);
-            exitOrder = gateway.placeOrder(pos.symbol(), "SELL", pos.quantity(), aggressiveSellPrice, 0.0, "LIMIT");
+        TradeOrder exitOrder;
+        double bestBid = gateway.getBestBid(pos.symbol()).orElse(pos.currentPrice());
+        double floorPrice = armedPair.limitPrice();
+        if (logicalStage >= 2 && bestBid >= floorPrice) {
+            log.info("MANUAL LIQUIDATE: Executing PROTECTED_EXIT at floor ₹{} (Bid=₹{})", floorPrice, bestBid);
+            exitOrder = executeProtectedExit(gateway, pos, floorPrice);
+        } else {
+            log.warn("MANUAL LIQUIDATE: Executing EMERGENCY_EXIT ladder (Bid=₹{})", bestBid);
+            exitOrder = executeEmergencyExit(gateway, pos, exitReason);
+        }
+        if (exitOrder != null) {
             activeExitOrderId = exitOrder.orderId();
             if (exitOrder.price() > 0) {
                 executedPrice = exitOrder.price();
@@ -1378,15 +1808,16 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
             initialStop = TickMath.floorToTick(entryPrice * 0.9935, tickSize);
         }
 
-        // Determine Quantity
+        // Determine Quantity (sized against marketable buy limit / worst-case fill price)
+        double marketableBuyLimit = TickMath.ceilToTick(entryPrice * 1.0005, tickSize);
         int quantity;
         if (customQuantity != null && customQuantity > 0) {
-            positionSizingEngine.validateManualOrder(symbol, customQuantity, entryPrice, initialStop, gateway);
+            positionSizingEngine.validateManualOrder(symbol, customQuantity, marketableBuyLimit, initialStop, gateway);
             quantity = customQuantity;
         } else {
-            quantity = positionSizingEngine.calculateQuantity(symbol, entryPrice, initialStop, gateway);
+            quantity = positionSizingEngine.calculateQuantity(symbol, marketableBuyLimit, initialStop, gateway);
             if (quantity < 1) {
-                throw new IllegalStateException("Risk sizing calculated 0 shares for " + symbol + " (check margin / cash / stop distance)");
+                throw new IllegalStateException("Risk sizing calculated 0 shares for " + symbol + " at limit ₹" + marketableBuyLimit + " (check margin / cash / stop distance)");
             }
         }
 
@@ -1397,7 +1828,6 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         plannedQuantity = quantity;
         lifecycleState = TradeLifecycleState.PENDING_ENTRY;
 
-        double marketableBuyLimit = TickMath.ceilToTick(entryPrice * 1.0005, tickSize);
         log.info("DISPATCHING MANUAL ENTRY ORDER: BUY {} x {} @ Marketable Limit ₹{}", quantity, symbol, marketableBuyLimit);
 
         TradeOrder buyOrder = gateway.placeOrder(symbol, "BUY", quantity, marketableBuyLimit, 0.0, "LIMIT");
@@ -1421,13 +1851,29 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
         if (immediatePos.isPresent() && immediatePos.get().symbol().equals(symbol)) {
             Position pos = immediatePos.get();
             strategyHighWaterMark = Math.max(entryPrice, pos.currentPrice());
-            double slLimitPrice = TickMath.floorToTick(initialStop * 0.9985, tickSize);
+            initialStructuralStop = initialStop;
+            StopLadder.StopOrderPair s0 = StopLadder.stage0Candidate(initialStop, tickSize, ladderBufferPct / 100.0);
+            initialStructuralLimit = s0.limitPrice();
+            armedPair = s0;
+            logicalStage = 0;
+            unitRisk = pos.entryPrice() - initialStop;
+            entryFillTimeUtc = Instant.now();
+            hwmTimestampUtc = Instant.now();
+            hwm15MinAgo = pos.entryPrice();
+            slModificationCount = 0;
+            String tag = generateOrderTag("SL");
+            currentOrderTag = tag;
             try {
-                TradeOrder slOrder = gateway.placeOrder(symbol, "SELL", pos.quantity(), slLimitPrice, initialStop, "SL");
+                TradeOrder slOrder = placeOrderWithTagFallback(gateway, symbol, "SELL", pos.quantity(), s0.limitPrice(), s0.triggerPrice(), "SL", tag);
+                if (slOrder == null) {
+                    throw new IllegalStateException("Gateway returned null stop order for manual trade " + symbol);
+                }
                 activeSlOrderId = slOrder.orderId();
-                currentArmedStopPrice = initialStop;
+                currentArmedStopPrice = s0.triggerPrice();
+                currentProtectedQuantity = pos.quantity();
                 lifecycleState = TradeLifecycleState.ACTIVE_POSITION;
-                log.info("PROTECTIVE SL ENGAGED FOR MANUAL TRADE: OrderId={}, Trigger=₹{}, Limit=₹{}", activeSlOrderId, initialStop, slLimitPrice);
+                persistActivePositionState(gateway, pos);
+                log.info("PROTECTIVE SL ENGAGED FOR MANUAL TRADE: OrderId={}, Trigger=₹{}, Limit=₹{}, Tag={}", activeSlOrderId, initialStop, s0.limitPrice(), tag);
             } catch (Throwable t) {
                 log.warn("Immediate SL placement for manual trade failed: {}. Will retry on incoming tick stream.", t.getMessage());
             }
@@ -1448,4 +1894,226 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
     public Set<String> getTradedSymbolsToday() {
         return Collections.unmodifiableSet(tradedSymbolsToday);
     }
+
+    /**
+     * Executes PROTECTED_EXIT per §C9: Limit = max(floor, bestBid), clamped to lower circuit limit.
+     * Respects single-working-sell invariant.
+     */
+    public synchronized TradeOrder executeProtectedExit(BrokerGateway gateway, Position pos, double floorPrice) {
+        if (pos == null) return null;
+        this.activeExitPolicy = "PROTECTED";
+        lifecycleState = TradeLifecycleState.PENDING_EXIT;
+        exitOrderInFlight.set(true);
+        lastExitOrderDispatchMs.set(System.currentTimeMillis());
+
+        double tickSize = getSymbolTickSize(pos.symbol());
+        double bestBid = gateway.getBestBid(pos.symbol()).orElse(pos.currentPrice());
+        double lowerCircuit = gateway.getLowerCircuitLimit(pos.symbol()).orElse(pos.currentPrice() * 0.90);
+        double limitPrice = StopLadder.protectedExitLimit(floorPrice, bestBid, lowerCircuit);
+
+        // Grace period watchdog: If bid < floor for > 5s, escalate to EMERGENCY
+        if (bestBid < floorPrice) {
+            if (protectedGraceStartTimeMs == 0L) {
+                protectedGraceStartTimeMs = System.currentTimeMillis();
+            } else if (System.currentTimeMillis() - protectedGraceStartTimeMs >= 5000L) {
+                log.warn("PROTECTED EXIT GRACE EXPIRED: Best bid ₹{} < Floor ₹{} for > 5s. Escalating to EMERGENCY_EXIT.", bestBid, floorPrice);
+                return executeEmergencyExit(gateway, pos, "PROTECTED_GRACE_EXPIRED");
+            }
+        } else {
+            protectedGraceStartTimeMs = 0L;
+        }
+
+        // Single-working-sell invariant:
+        // Case 1: Active exit order already working -> modify in place
+        if (activeExitOrderId != null) {
+            TradeOrder existing = gateway.getOrderStatus(activeExitOrderId);
+            if (existing != null && ("TRIGGER PENDING".equalsIgnoreCase(existing.status()) || "OPEN".equalsIgnoreCase(existing.status()))) {
+                int pending = existing.pendingQuantity() > 0 ? existing.pendingQuantity() : existing.quantity();
+                log.info("PROTECTED EXIT: In-place modifying exit order {} to Limit ₹{} (Qty={})", activeExitOrderId, limitPrice, pending);
+                return gateway.modifyOrder(activeExitOrderId, pending, limitPrice, 0.0);
+            }
+        }
+
+        // Case 2: Active SL order already OPEN (triggered) -> modify in place
+        if (activeSlOrderId != null) {
+            TradeOrder slOrder = gateway.getOrderStatus(activeSlOrderId);
+            if (slOrder != null && "OPEN".equalsIgnoreCase(slOrder.status())) {
+                int pending = slOrder.pendingQuantity() > 0 ? slOrder.pendingQuantity() : slOrder.quantity();
+                log.info("PROTECTED EXIT: In-place modifying triggered OPEN stop {} to Limit ₹{} (Qty={})", activeSlOrderId, limitPrice, pending);
+                TradeOrder modified = gateway.modifyOrder(activeSlOrderId, pending, limitPrice, 0.0);
+                activeExitOrderId = activeSlOrderId;
+                return modified;
+            } else {
+                try {
+                    gateway.cancelOrder(activeSlOrderId);
+                } catch (Throwable ignored) {}
+                activeSlOrderId = null;
+            }
+        }
+
+        // Case 3: Place new tagged limit sell order
+        String tag = generateOrderTag("EX");
+        TradeOrder exitOrder = placeOrderWithTagFallback(gateway, pos.symbol(), "SELL", pos.quantity(), limitPrice, 0.0, "LIMIT", tag);
+        if (exitOrder != null) {
+            activeExitOrderId = exitOrder.orderId();
+        }
+        log.info("PROTECTED EXIT DISPATCHED: OrderId={}, Symbol={}, Qty={}, Limit=₹{} (Floor=₹{}, Bid=₹{})",
+            activeExitOrderId, pos.symbol(), pos.quantity(), limitPrice, floorPrice, bestBid);
+        return exitOrder;
+    }
+
+    /**
+     * Executes EMERGENCY_EXIT per §C9: Escalation ladder starting at Step 1 (t=0) down to Step 4+ (every 3s).
+     * Clamped to lower circuit limit. Respects single-working-sell invariant.
+     */
+    public synchronized TradeOrder executeEmergencyExit(BrokerGateway gateway, Position pos, String reason) {
+        if (pos == null) return null;
+        this.activeExitPolicy = "EMERGENCY";
+        lifecycleState = TradeLifecycleState.PENDING_EXIT;
+        exitOrderInFlight.set(true);
+        lastExitOrderDispatchMs.set(System.currentTimeMillis());
+
+        long nowMs = System.currentTimeMillis();
+        if (emergencyStep == 0) {
+            emergencyStep = 1;
+            lastEmergencyStepTimeMs = nowMs;
+            emergencyUnfilledStartTimeMs = nowMs;
+        } else {
+            long elapsed = nowMs - lastEmergencyStepTimeMs;
+            if (emergencyStep == 1 && elapsed >= 2000L) {
+                emergencyStep = 2;
+                lastEmergencyStepTimeMs = nowMs;
+            } else if (emergencyStep == 2 && elapsed >= 2000L) {
+                emergencyStep = 3;
+                lastEmergencyStepTimeMs = nowMs;
+            } else if (emergencyStep >= 3 && elapsed >= 3000L) {
+                emergencyStep++;
+                lastEmergencyStepTimeMs = nowMs;
+            }
+        }
+
+        if (emergencyUnfilledStartTimeMs > 0 && (nowMs - emergencyUnfilledStartTimeMs >= 30000L)) {
+            activityFeedService.record(
+                "ALERT",
+                "CRITICAL",
+                gateway.getExecutionMode().name(),
+                activeTradeId,
+                "Emergency Exit Unfilled > 30s",
+                "Emergency exit for " + pos.symbol() + " remains unfilled for > 30s. Escalation continuing...",
+                pos.symbol()
+            );
+        }
+
+        double tickSize = getSymbolTickSize(pos.symbol());
+        double bestBid = gateway.getBestBid(pos.symbol()).orElse(pos.currentPrice());
+        double lowerCircuit = gateway.getLowerCircuitLimit(pos.symbol()).orElse(pos.currentPrice() * 0.90);
+        double emergencyLimit = StopLadder.emergencyExitLimit(bestBid, emergencyStep, tickSize, lowerCircuit);
+
+        log.warn("EMERGENCY EXIT LADDER (Step {}): {} BestBid=₹{}, Limit=₹{}, LowerCircuit=₹{}, Reason={}",
+            emergencyStep, pos.symbol(), bestBid, emergencyLimit, lowerCircuit, reason);
+
+        // Single-working-sell invariant:
+        // Case 1: Active exit order already working -> modify in place
+        if (activeExitOrderId != null) {
+            TradeOrder existing = gateway.getOrderStatus(activeExitOrderId);
+            if (existing != null && ("TRIGGER PENDING".equalsIgnoreCase(existing.status()) || "OPEN".equalsIgnoreCase(existing.status()))) {
+                int pending = existing.pendingQuantity() > 0 ? existing.pendingQuantity() : existing.quantity();
+                log.info("EMERGENCY EXIT: In-place modifying exit order {} to Step {} Limit ₹{}", activeExitOrderId, emergencyStep, emergencyLimit);
+                return gateway.modifyOrder(activeExitOrderId, pending, emergencyLimit, 0.0);
+            }
+        }
+
+        // Case 2: Active SL order already OPEN (triggered) -> modify in place
+        if (activeSlOrderId != null) {
+            TradeOrder slOrder = gateway.getOrderStatus(activeSlOrderId);
+            if (slOrder != null && "OPEN".equalsIgnoreCase(slOrder.status())) {
+                int pending = slOrder.pendingQuantity() > 0 ? slOrder.pendingQuantity() : slOrder.quantity();
+                log.info("EMERGENCY EXIT: In-place modifying triggered OPEN stop {} to Step {} Limit ₹{}", activeSlOrderId, emergencyStep, emergencyLimit);
+                TradeOrder modified = gateway.modifyOrder(activeSlOrderId, pending, emergencyLimit, 0.0);
+                activeExitOrderId = activeSlOrderId;
+                return modified;
+            } else {
+                try {
+                    gateway.cancelOrder(activeSlOrderId);
+                } catch (Throwable ignored) {}
+                activeSlOrderId = null;
+            }
+        }
+
+        // Case 3: Place new tagged limit sell order
+        String tag = generateOrderTag("EM");
+        TradeOrder exitOrder = placeOrderWithTagFallback(gateway, pos.symbol(), "SELL", pos.quantity(), emergencyLimit, 0.0, "LIMIT", tag);
+        if (exitOrder != null) {
+            activeExitOrderId = exitOrder.orderId();
+        }
+        return exitOrder;
+    }
+
+    private TradeOrder placeOrderWithTagFallback(BrokerGateway gateway, String symbol, String transactionType, int quantity, double price, double triggerPrice, String orderType, String tag) {
+        TradeOrder order = gateway.placeOrder(symbol, transactionType, quantity, price, triggerPrice, orderType, tag);
+        if (order == null) {
+            order = gateway.placeOrder(symbol, transactionType, quantity, price, triggerPrice, orderType);
+        }
+        return order;
+    }
+
+    public String generateOrderTag(String prefix) {
+        String pfx = (prefix != null && !prefix.isBlank()) ? prefix : "AT";
+        String dateStr = LocalDate.now(ZoneId.of("Asia/Kolkata")).format(java.time.format.DateTimeFormatter.ofPattern("yyMMdd"));
+        long seq = System.currentTimeMillis() % 1000000L;
+        String tag = pfx + dateStr + String.format(Locale.US, "%06d", seq);
+        return tag.length() > 20 ? tag.substring(0, 20) : tag;
+    }
+
+    private void persistActivePositionState(BrokerGateway gateway, Position pos) {
+        if (paperActivePositionRepository == null || pos == null) return;
+        try {
+            var opt = paperActivePositionRepository.findFirstByOrderByEntryTimeDesc();
+            PaperActivePositionEntity entity = opt.orElseGet(PaperActivePositionEntity::new);
+            entity.setSymbol(pos.symbol());
+            entity.setQuantity(pos.quantity());
+            entity.setEntryPrice(pos.entryPrice());
+            entity.setCurrentPrice(pos.currentPrice());
+            entity.setInitialStopLoss(initialStructuralStop > 0 ? initialStructuralStop : plannedStopPrice);
+            entity.setInitialStopLimit(initialStructuralLimit);
+            entity.setActiveTrailingStop(armedPair.triggerPrice());
+            entity.setArmedLimit(armedPair.limitPrice());
+            entity.setUnitRisk(unitRisk);
+            entity.setLogicalStage(logicalStage);
+            entity.setSlModCount(slModificationCount);
+            entity.setHighWaterMark(strategyHighWaterMark);
+            entity.setEntryTime(pos.entryTime() != null ? pos.entryTime() : (entryFillTimeUtc != null ? entryFillTimeUtc : Instant.now()));
+            entity.setActiveSlOrderId(activeSlOrderId);
+            entity.setExitPolicy(activeExitPolicy);
+            entity.setExitOrderId(activeExitOrderId);
+            entity.setMode(gateway != null ? gateway.getExecutionMode().name() : ExecutionMode.PAPER.name());
+            entity.setHwmTime(hwmTimestampUtc);
+            entity.setLastHwmStepTime(lastHwmStepTsUtc);
+            
+            int mask = 0;
+            if (peak06Latched) mask |= 1;
+            if (incubDoneLatched) mask |= (1 << 1);
+            if (stagDoneLatched) mask |= (1 << 2);
+            if (t45DoneLatched) mask |= (1 << 3);
+            if (eodDoneLatched) mask |= (1 << 4);
+            entity.setLatchesMask(mask);
+            entity.setUpdatedAt(Instant.now());
+            
+            paperActivePositionRepository.save(entity);
+        } catch (Throwable t) {
+            log.warn("Failed to persist active trade state: {}", t.getMessage());
+        }
+    }
+
+    public int getLogicalStage() { return logicalStage; }
+    public StopLadder.StopOrderPair getArmedPair() { return armedPair; }
+    public String getActiveExitPolicy() { return activeExitPolicy; }
+    public int getSlModificationCount() { return slModificationCount; }
+    public String getActiveSlOrderId() { return activeSlOrderId; }
+    public double getCurrentArmedStopPrice() { return currentArmedStopPrice; }
+    public boolean isPeak06Latched() { return peak06Latched; }
+    public boolean isIncubDoneLatched() { return incubDoneLatched; }
+    public boolean isStagDoneLatched() { return stagDoneLatched; }
+    public boolean isT45DoneLatched() { return t45DoneLatched; }
+    public boolean isEodDoneLatched() { return eodDoneLatched; }
 }

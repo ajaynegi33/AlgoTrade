@@ -10,6 +10,7 @@ import com.algotrade.algotradebackend.scanner.ContinuousIntradayScannerService;
 import com.algotrade.algotradebackend.scanner.PreMarketScannerService;
 import com.algotrade.algotradebackend.core.model.ScoredCandidate;
 import com.algotrade.algotradebackend.strategy.StrategyManager;
+import com.algotrade.algotradebackend.strategy.momentum_breakout.MomentumBreakoutStrategy;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonPrimitive;
@@ -333,6 +334,13 @@ public class LiveEngineWebSocketHandler extends TextWebSocketHandler {
             posData.put("unrealizedPnL", pos.getUnrealizedPnL());
             posData.put("unrealizedPnLPct", pos.getUnrealizedPnLPct());
             posData.put("entryTime", pos.entryTime().toString());
+            if (strategyManager.getActiveStrategy() instanceof MomentumBreakoutStrategy mbs) {
+                posData.put("logicalStage", mbs.getLogicalStage());
+                posData.put("armedLimit", mbs.getArmedPair() != null ? mbs.getArmedPair().limitPrice() : null);
+                posData.put("armedTrigger", mbs.getArmedPair() != null ? mbs.getArmedPair().triggerPrice() : null);
+                posData.put("activeExitPolicy", mbs.getActiveExitPolicy());
+                posData.put("slModificationCount", mbs.getSlModificationCount());
+            }
             response.put("activePosition", posData);
         } else if (!marketCalendarService.isMarketOpen()) {
             response.put("status", "MARKET_CLOSED");

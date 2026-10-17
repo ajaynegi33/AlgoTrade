@@ -66,8 +66,8 @@ public class ManualExitTest {
             ExecutionMode.PAPER
         );
         when(mockGateway.getOpenPosition()).thenReturn(Optional.of(activePos));
-        when(mockGateway.placeOrder(eq("BHARTIARTL"), eq("SELL"), eq(21), eq(0.0), eq(0.0), eq("MARKET")))
-            .thenReturn(new TradeOrder("ORD-EXIT-1", "BHARTIARTL", "SELL", 21, 1866.50, 0.0, "MARKET", "FILLED", ExecutionMode.PAPER, Instant.now()));
+        when(mockGateway.placeOrder(eq("BHARTIARTL"), eq("SELL"), eq(21), anyDouble(), eq(0.0), eq("LIMIT"), anyString()))
+            .thenReturn(new TradeOrder("ORD-EXIT-1", "BHARTIARTL", "SELL", 21, 1866.50, 0.0, "LIMIT", "FILLED", ExecutionMode.PAPER, Instant.now()));
 
         Map<String, Object> result = strategy.executeManualExit("BHARTIARTL", "MANUAL_OPERATOR_SELL");
 
@@ -79,8 +79,8 @@ public class ManualExitTest {
         assertEquals(1866.50, result.get("exitPrice"));
         assertEquals(TradeLifecycleState.FLAT, strategy.getLifecycleState(), "Strategy lifecycle state must be FLAT after manual exit");
 
-        // Verify resting market exit order was placed immediately
-        verify(mockGateway, times(1)).placeOrder(eq("BHARTIARTL"), eq("SELL"), eq(21), eq(0.0), eq(0.0), eq("MARKET"));
+        // Verify resting emergency limit exit order was placed immediately
+        verify(mockGateway, times(1)).placeOrder(eq("BHARTIARTL"), eq("SELL"), eq(21), anyDouble(), eq(0.0), eq("LIMIT"), anyString());
     }
 
     @Test

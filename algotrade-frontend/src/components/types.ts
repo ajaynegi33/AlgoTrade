@@ -9,6 +9,11 @@ export interface ActivePosition {
   unrealizedPnL: number;
   unrealizedPnLPct: number;
   entryTime: string;
+  logicalStage?: number;
+  armedLimit?: number | null;
+  armedTrigger?: number | null;
+  activeExitPolicy?: string | null;
+  slModificationCount?: number;
 }
 
 export interface OverviewData {

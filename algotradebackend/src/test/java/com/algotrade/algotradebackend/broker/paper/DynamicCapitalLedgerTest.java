@@ -60,8 +60,8 @@ public class DynamicCapitalLedgerTest {
         // Place stop loss at 98.0
         gateway.placeOrder("ABC", "SELL", 100, 97.8, 98.0, "SL");
 
-        // Tick drops below SL -> triggers exit at 97.8
-        gateway.onTick("ABC", 97.5);
+        // Tick drops to SL limit price 97.8 -> triggers and fills exit
+        gateway.onTick("ABC", 97.8);
 
         assertTrue(gateway.getOpenPosition().isEmpty());
         assertTrue(gateway.getTotalCapital() < 10000.0, "Capital must be deducted after loss");

@@ -124,16 +124,18 @@ public class Phase2CorrectnessRegressionTest {
     }
 
     @Test
-    void test7_1505SquareOffPlacesMarketOrderAndGuaranteesExit() {
+    void test7_1505SquareOffPlacesEmergencyOrderAndGuaranteesExit() {
         Position openPos = new Position("INFY", 50, 1600.0, 1610.0, 1590.0, 1590.0, 1615.0, Instant.now(), ExecutionMode.PAPER);
         when(mockGateway.getOpenPosition())
             .thenReturn(Optional.of(openPos))
             .thenReturn(Optional.empty()); // Returns empty on reconciliation check
+        when(mockGateway.placeOrder(eq("INFY"), eq("SELL"), eq(50), anyDouble(), eq(0.0), eq("LIMIT"), anyString()))
+            .thenReturn(new TradeOrder("ORD-EXIT-INFY", "INFY", "SELL", 50, 1609.15, 0.0, "LIMIT", "FILLED", ExecutionMode.PAPER, Instant.now()));
 
         strategy.executeSquareOff();
 
-        // Verify MARKET exit order was dispatched
-        verify(mockGateway).placeOrder(eq("INFY"), eq("SELL"), eq(50), eq(0.0), eq(0.0), eq("MARKET"));
+        // Verify EMERGENCY_EXIT limit order was dispatched
+        verify(mockGateway).placeOrder(eq("INFY"), eq("SELL"), eq(50), anyDouble(), eq(0.0), eq("LIMIT"), anyString());
 
         // Verify strategy reached FLAT state
         assertEquals(TradeLifecycleState.FLAT, strategy.getLifecycleState(),

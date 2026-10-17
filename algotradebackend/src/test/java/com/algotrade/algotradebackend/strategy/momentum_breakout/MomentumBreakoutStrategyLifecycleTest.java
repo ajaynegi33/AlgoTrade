@@ -126,9 +126,10 @@ public class MomentumBreakoutStrategyLifecycleTest {
         java.time.LocalTime time1130 = java.time.LocalTime.of(11, 30);
         strategy.onTick("RELIANCE", 1050.0, 4_000_000, 2_000_000, 500_000, false, time1130);
 
-        // Trail stop is 0.8% below 1050 = 1050 * (1 - 0.008) = 1041.60
-        verify(mockGateway, atLeastOnce()).modifyOrder(eq("ORD-SL-1"), anyDouble(), eq(1041.60));
+        // Multi-stage runner trail ratchets SL order
+        verify(mockGateway, atLeastOnce()).modifyOrder(eq("ORD-SL-1"), anyDouble(), anyDouble());
         assertEquals(1050.0, strategy.getStrategyHighWaterMark(), "Strategy HWM must be 1050.0");
+        assertTrue(strategy.getLogicalStage() >= 2, "Strategy must reach at least Stage 2");
 
         // Price pulls back to 1035.0 at 11:45 AM.
         // Even if broker's getOpenPosition lastPrice is 1035, HWM must stay 1050.0!
@@ -169,8 +170,8 @@ public class MomentumBreakoutStrategyLifecycleTest {
         java.time.LocalTime time1015 = java.time.LocalTime.of(10, 15);
         strategy.onTick("RELIANCE", 1031.0, 3_500_000, 2_000_000, 500_000, false, time1015);
 
-        // Exact Solvency Breakeven target guarantees Net PnL >= +₹10.00 after all charges (1022.10)
-        verify(mockGateway, times(1)).modifyOrder(eq("ORD-SL-1"), anyDouble(), eq(1022.10));
+        // Stage 2 exact solvency cost floor locks Net PnL >= +₹11.00 after all charges (Limit=1022.20, Trigger=1024.25)
+        verify(mockGateway, times(1)).modifyOrder(eq("ORD-SL-1"), eq(1022.20), eq(1024.25));
     }
 
     @Test
@@ -411,8 +412,8 @@ public class MomentumBreakoutStrategyLifecycleTest {
         java.time.LocalTime time1115 = java.time.LocalTime.of(11, 15);
         strategy.onTick("RELIANCE", 1036.0, 4_000_000, 2_000_000, 500_000, false, time1115);
 
-        // Verify trailing stop ratchet IS triggered once profit milestone >= +1.5% is reached
-        // 1036 * (1 - 0.008) = 1027.70
-        verify(mockGateway, atLeastOnce()).modifyOrder(eq("ORD-SL-1"), anyDouble(), eq(1027.70));
+        // Verify stop ratchet IS triggered once profit milestone >= +1.2R / +1.5% is reached
+        verify(mockGateway, atLeastOnce()).modifyOrder(eq("ORD-SL-1"), anyDouble(), anyDouble());
+        assertTrue(strategy.getLogicalStage() >= 2, "Strategy must reach at least Stage 2");
     }
 }

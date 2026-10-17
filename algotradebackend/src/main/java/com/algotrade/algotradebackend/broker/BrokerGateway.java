@@ -30,6 +30,13 @@ public interface BrokerGateway {
     TradeOrder placeOrder(String symbol, String transactionType, int quantity, double price, double triggerPrice, String orderType);
 
     /**
+     * Submits a new order tagged with a unique identifier (Kite tag <= 20 chars) for crash recovery.
+     */
+    default TradeOrder placeOrder(String symbol, String transactionType, int quantity, double price, double triggerPrice, String orderType, String tag) {
+        return placeOrder(symbol, transactionType, quantity, price, triggerPrice, orderType);
+    }
+
+    /**
      * In-place atomic modification of an existing resting order.
      * Crucial for ratcheting trailing stop-losses without creating an unhedged gap.
      * 
@@ -124,6 +131,44 @@ public interface BrokerGateway {
      */
     default double getBaseCapital() {
         return 10000.00;
+    }
+
+    /**
+     * Retrieves the active resting or triggered protective stop order matching the symbol and optional tag.
+     */
+    default Optional<TradeOrder> getActiveStopOrder(String symbol, String tag) {
+        return Optional.empty();
+    }
+
+    /**
+     * Extracts the best bid from live depth or quote for emergency/protected exit reference.
+     */
+    default Optional<Double> getBestBid(String symbol) {
+        java.util.Map<String, Object> quote = getStockQuote(symbol);
+        if (quote != null && quote.get("depth") instanceof java.util.Map<?, ?> depthMap) {
+            Object buyObj = depthMap.get("buy");
+            if (buyObj instanceof java.util.List<?> buyList && !buyList.isEmpty()) {
+                Object first = buyList.get(0);
+                if (first instanceof java.util.Map<?, ?> topBid && topBid.get("price") instanceof Number p && p.doubleValue() > 0.0) {
+                    return Optional.of(p.doubleValue());
+                }
+            }
+        }
+        if (quote != null && quote.get("lastPrice") instanceof Number lp && lp.doubleValue() > 0.0) {
+            return Optional.of(lp.doubleValue());
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Retrieves the instrument's official lower circuit limit from broker market quote.
+     */
+    default Optional<Double> getLowerCircuitLimit(String symbol) {
+        java.util.Map<String, Object> quote = getStockQuote(symbol);
+        if (quote != null && quote.get("lowerCircuitLimit") instanceof Number lcl && lcl.doubleValue() > 0.0) {
+            return Optional.of(lcl.doubleValue());
+        }
+        return Optional.empty();
     }
 
     /**

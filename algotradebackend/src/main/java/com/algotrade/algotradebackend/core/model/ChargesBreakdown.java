@@ -109,6 +109,15 @@ public record ChargesBreakdown(
      * @return Valid tick-aligned exit price guaranteeing netPnL >= 10.00, or empty if impossible
      */
     public static Optional<Double> calculateExactBreakevenPrice(int quantity, double filledBuyPrice, double tickSize) {
+        return calculateExactBreakevenPrice(quantity, filledBuyPrice, tickSize, 10.00);
+    }
+
+    /**
+     * Computes the exact minimum exit price aligned to the instrument's tick size
+     * that secures at least the specified target Net Take-Home P&L after all statutory taxes,
+     * exchange fees, SEBI charges, stamp duty, GST, and brokerages.
+     */
+    public static Optional<Double> calculateExactBreakevenPrice(int quantity, double filledBuyPrice, double tickSize, double targetNetProfit) {
         if (quantity <= 0 || filledBuyPrice <= 0.0 || tickSize <= 0.0) {
             return Optional.empty();
         }
@@ -116,16 +125,16 @@ public record ChargesBreakdown(
         // 1. Analytical baseline estimation:
         // Evaluate an initial candidate around +0.20% to get an authoritative charge estimate.
         ChargesBreakdown estBreakdown = calculate(quantity, filledBuyPrice, filledBuyPrice * 1.0020);
-        double targetGrossProfit = estBreakdown.totalCharges() + 10.00;
+        double targetGrossProfit = estBreakdown.totalCharges() + targetNetProfit;
         double priceDeltaPerShare = targetGrossProfit / quantity;
         double candidate = TickMath.ceilToTick(filledBuyPrice + priceDeltaPerShare, tickSize);
 
         // 2. Exact verification loop:
-        // Check if candidate yields netPnL >= 10.00. Step up by tick if needed (up to 10 ticks max).
+        // Check if candidate yields netPnL >= targetNetProfit. Step up by tick if needed (up to 50 ticks max).
         double maxAllowedCandidate = filledBuyPrice * 1.015; // Safeguard: never exceed +1.5% for breakeven
-        for (int step = 0; step < 10 && candidate <= maxAllowedCandidate; step++) {
+        for (int step = 0; step < 50 && candidate <= maxAllowedCandidate; step++) {
             ChargesBreakdown verified = calculate(quantity, filledBuyPrice, candidate);
-            if (verified.netPnL() >= 10.00) {
+            if (verified.netPnL() >= targetNetProfit) {
                 return Optional.of(candidate);
             }
             candidate = TickMath.ceilToTick(candidate + tickSize, tickSize);
