@@ -280,6 +280,9 @@ public class LiveEngineWebSocketHandler extends TextWebSocketHandler {
             if (scannerProvider != null && scannerProvider.getIfAvailable() != null) {
                 snapshotData.put("shortlistedCandidates", scannerProvider.getIfAvailable().getShortlistedCandidates());
             }
+            if (brokerGatewayManager != null && brokerGatewayManager.getZerodhaLiveGateway() != null) {
+                snapshotData.put("zerodhaSession", brokerGatewayManager.getZerodhaLiveGateway().getSessionDetails());
+            }
 
             Map<String, Object> frame = new LinkedHashMap<>();
             frame.put("type", "INITIAL_SNAPSHOT");

@@ -36,14 +36,15 @@ export default function Dashboard() {
     latestTicks,
     subscribeSymbol,
     marketPhase,
+    zerodhaSession,
+    setZerodhaSession,
   } = useEngineWebSocket(accessToken);
 
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [switchingMode, setSwitchingMode] = useState(false);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
 
-  // Zerodha Kite session state
-  const [zerodhaSession, setZerodhaSession] = useState<ZerodhaSessionData | null>(null);
+  // Zerodha Kite session state (streamed 100% via WebSocket)
   const [loginUrl, setLoginUrl] = useState<string | null>(null);
   const [activatingToken, setActivatingToken] = useState(false);
   const [autoLoggingIn, setAutoLoggingIn] = useState(false);
@@ -205,10 +206,9 @@ export default function Dashboard() {
     }
   }, []);
 
-  // Initial load for session and reference data (no periodic polling!)
+  // Initial load for static reference data (zero periodic polling!)
   useEffect(() => {
     fetchAnalytics();
-    fetchZerodhaStatus();
     fetchLoginUrl();
     fetchPopularStocks();
   }, []);
@@ -243,24 +243,6 @@ export default function Dashboard() {
       subscribeSymbol(overview.activePosition.symbol);
     }
   }, [overview?.activePosition?.symbol, subscribeSymbol]);
-
-  // Dynamic fallback polling exclusively while an active position is open (every 3 seconds)
-  useEffect(() => {
-    if (!overview?.activePosition) return;
-    const interval = setInterval(async () => {
-      try {
-        const res = await apiFetch("/api/dashboard/overview");
-        if (res.ok) {
-          const fresh = await res.json();
-          setOverview((prev) => {
-            if (JSON.stringify(prev) === JSON.stringify(fresh)) return prev;
-            return fresh;
-          });
-        }
-      } catch {}
-    }, 3000);
-    return () => clearInterval(interval);
-  }, [overview?.activePosition?.symbol, setOverview]);
 
   const handleToggleMode = async () => {
     if (!overview) return;
@@ -440,6 +422,8 @@ export default function Dashboard() {
             overview={overview}
             backendUrl={BACKEND_URL}
             latestTick={overview?.activePosition ? latestTicks[overview.activePosition.symbol] : undefined}
+            streamEvents={recentDecisions}
+            wsStatus={connectionStatus}
           />
         )}
 

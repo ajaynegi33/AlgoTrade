@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { OverviewData, ScoredCandidate, EngineActivityEvent, MarketDepthLevel } from "@/components/types";
+import { OverviewData, ScoredCandidate, EngineActivityEvent, MarketDepthLevel, ZerodhaSessionData } from "@/components/types";
 import { TOKEN_STORAGE_KEY } from "@/lib/apiClient";
 
 export type WebSocketConnectionStatus =
@@ -46,6 +46,8 @@ interface UseEngineWebSocketReturn {
   latestTicks: Record<string, TickUpdate>;
   subscribeSymbol: (symbol: string) => void;
   marketPhase: string;
+  zerodhaSession: ZerodhaSessionData | null;
+  setZerodhaSession: React.Dispatch<React.SetStateAction<ZerodhaSessionData | null>>;
 }
 
 /**
@@ -89,6 +91,8 @@ export function useEngineWebSocket(token?: string | null): UseEngineWebSocketRet
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [latestTicks, setLatestTicks] = useState<Record<string, TickUpdate>>({});
   const [marketPhase, setMarketPhase] = useState<string>("");
+  const [zerodhaSession, setZerodhaSession] = useState<ZerodhaSessionData | null>(null);
+  const lastMessageTimestampRef = useRef<number>(0);
 
   // Client-side only: compute and periodically refresh marketPhase to naturally advance with the clock
   useEffect(() => {
@@ -163,10 +167,17 @@ export function useEngineWebSocket(token?: string | null): UseEngineWebSocketRet
           });
         }
 
-        // Start 15-second heartbeat ping
+        // Start 15-second heartbeat ping with half-open socket watchdog
         if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+        lastMessageTimestampRef.current = Date.now();
         pingIntervalRef.current = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
+            // Watchdog: detect silent half-open TCP drop (no frame for > 30s)
+            if (Date.now() - lastMessageTimestampRef.current > 30000) {
+              console.warn("WebSocket watchdog: No incoming frames for 30s. Terminating dead socket to reconnect.");
+              ws.close();
+              return;
+            }
             ws.send(JSON.stringify({ type: "PING" }));
           }
         }, 15000);
@@ -174,6 +185,7 @@ export function useEngineWebSocket(token?: string | null): UseEngineWebSocketRet
 
       ws.onmessage = (event) => {
         try {
+          lastMessageTimestampRef.current = Date.now();
           const message = JSON.parse(event.data);
           const type = message.type;
           const data = message.data;
@@ -190,6 +202,9 @@ export function useEngineWebSocket(token?: string | null): UseEngineWebSocketRet
                   subscribedSymbolsRef.current.add(data.overview.activePosition.symbol);
                 } catch {}
               }
+            }
+            if (data.zerodhaSession) {
+              setZerodhaSession(data.zerodhaSession);
             }
             if (typeof data.marketPhase === "string") {
               setMarketPhase(data.marketPhase);
@@ -318,8 +333,12 @@ export function useEngineWebSocket(token?: string | null): UseEngineWebSocketRet
               setMarketPhase(data.phase);
             }
             setLastUpdated(new Date());
+          } else if (type === "SESSION_UPDATE" && data) {
+            setZerodhaSession(data);
+            setLastUpdated(new Date());
           } else if (type === "PONG") {
             // Heartbeat acknowledged
+            lastMessageTimestampRef.current = Date.now();
           }
         } catch (err) {
           console.warn("Failed to parse incoming WebSocket message:", err);
@@ -425,5 +444,7 @@ export function useEngineWebSocket(token?: string | null): UseEngineWebSocketRet
     latestTicks,
     subscribeSymbol,
     marketPhase,
+    zerodhaSession,
+    setZerodhaSession,
   };
 }

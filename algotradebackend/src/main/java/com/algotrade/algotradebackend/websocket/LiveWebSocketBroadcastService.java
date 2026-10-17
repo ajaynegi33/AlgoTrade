@@ -94,6 +94,13 @@ public class LiveWebSocketBroadcastService {
     }
 
     /**
+     * Broadcasts updated Zerodha Kite session metadata to all connected clients.
+     */
+    public void broadcastSessionUpdate(Object sessionData) {
+        broadcast("SESSION_UPDATE", sessionData);
+    }
+
+    /**
      * Broadcasts real-time price tick for a symbol to active clients.
      */
     public void broadcastTick(String symbol, double ltp, long volume, double change, double changePct, double high, double low) {

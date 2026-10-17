@@ -1,8 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { OverviewData } from "../types";
-import { TickUpdate } from "@/hooks/useEngineWebSocket";
+import { OverviewData, EngineActivityEvent } from "../types";
+import { TickUpdate, WebSocketConnectionStatus } from "@/hooks/useEngineWebSocket";
 import { SkeletonOverview } from "../common/Skeleton";
 import { apiFetch } from "@/lib/apiClient";
 import DecisionFeedTerminal from "./DecisionFeedTerminal";
@@ -11,9 +11,17 @@ interface OverviewTabProps {
   overview: OverviewData | null;
   backendUrl?: string;
   latestTick?: TickUpdate;
+  streamEvents?: EngineActivityEvent[];
+  wsStatus?: WebSocketConnectionStatus;
 }
 
-export default function OverviewTab({ overview, backendUrl = "http://localhost:8080", latestTick }: OverviewTabProps) {
+export default function OverviewTab({
+  overview,
+  backendUrl = "http://localhost:8080",
+  latestTick,
+  streamEvents,
+  wsStatus,
+}: OverviewTabProps) {
   const [isSelling, setIsSelling] = useState<boolean>(false);
   const [sellError, setSellError] = useState<string | null>(null);
   const [isEditingSl, setIsEditingSl] = useState<boolean>(false);
@@ -437,8 +445,12 @@ export default function OverviewTab({ overview, backendUrl = "http://localhost:8
         </div>
       )}
 
-      {/* Live Engine Decision Stream & Audit Terminal */}
-      <DecisionFeedTerminal backendUrl={backendUrl} />
+      {/* Live Engine Decision Stream & Audit Terminal (100% Real-Time WebSocket) */}
+      <DecisionFeedTerminal
+        backendUrl={backendUrl}
+        streamEvents={streamEvents}
+        wsStatus={wsStatus}
+      />
     </div>
   );
 }

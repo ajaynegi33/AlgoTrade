@@ -59,6 +59,9 @@ public class TradingDashboardController {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private com.algotrade.algotradebackend.scanner.StockSearchService stockSearchService;
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.algotrade.algotradebackend.websocket.LiveWebSocketBroadcastService broadcastService;
+
     public TradingDashboardController(
         BrokerGatewayManager brokerGatewayManager,
         StrategyManager strategyManager,
@@ -443,6 +446,9 @@ public class TradingDashboardController {
             Map<String, Object> resp = new LinkedHashMap<>();
             resp.put("success", true);
             resp.putAll(userData);
+            if (broadcastService != null) {
+                broadcastService.broadcastSessionUpdate(brokerGatewayManager.getZerodhaLiveGateway().getSessionDetails());
+            }
             return ResponseEntity.ok(resp);
         } catch (Throwable e) {
             return ResponseEntity.badRequest().body(Map.of("success", false, "error", e.getMessage() != null ? e.getMessage() : e.toString()));
@@ -476,6 +482,9 @@ public class TradingDashboardController {
             resp.put("success", true);
             resp.put("message", "Automated TOTP authentication successful!");
             resp.putAll(userData);
+            if (broadcastService != null) {
+                broadcastService.broadcastSessionUpdate(brokerGatewayManager.getZerodhaLiveGateway().getSessionDetails());
+            }
             return ResponseEntity.ok(resp);
         } catch (Throwable e) {
             String msg = e.getMessage() != null ? e.getMessage() : e.toString();
@@ -504,6 +513,9 @@ public class TradingDashboardController {
         if (requestToken != null && !requestToken.isBlank()) {
             try {
                 brokerGatewayManager.getZerodhaLiveGateway().authenticateSession(requestToken);
+                if (broadcastService != null) {
+                    broadcastService.broadcastSessionUpdate(brokerGatewayManager.getZerodhaLiveGateway().getSessionDetails());
+                }
                 return ResponseEntity.status(302).header("Location", baseUrl + "/?session=activated").build();
             } catch (Throwable e) {
                 String errMsg = e.getMessage() != null ? e.getMessage() : "Authentication failed";
