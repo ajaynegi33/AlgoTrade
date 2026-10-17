@@ -15,14 +15,16 @@
 5. [Momentum Scoring Matrix & Qualification Pipeline](#5-momentum-scoring-matrix--qualification-pipeline)
 6. [Dynamic Position Sizing & Three-Tier Risk Engine](#6-dynamic-position-sizing--three-tier-risk-engine)
 7. [Finite State Machine (FSM) & Trade Lifecycle Engine](#7-finite-state-machine-fsm--trade-lifecycle-engine)
-8. [Broker Gateways & Order Execution Mechanics](#8-broker-gateways--order-execution-mechanics)
-9. [Statutory Taxation, Transaction Fees & Slippage Accounting](#9-statutory-taxation-transaction-fees--slippage-accounting)
-10. [Zero-Latency Telemetry & Real-Time WebSocket Streaming](#10-zero-latency-telemetry--real-time-websocket-streaming)
-11. [REST API Surface & Data Transfer Schema](#11-rest-api-surface--data-transfer-schema)
-12. [Backtesting Engine & Real Historical Data Simulation](#12-backtesting-engine--real-historical-data-simulation)
-13. [Security, Authentication & Failure Protection Guardrails](#13-security-authentication--failure-protection-guardrails)
+8. [Multi-Stage Intraday Stop Ladder & Dynamic Risk Management Engine](#8-multi-stage-intraday-stop-ladder--dynamic-risk-management-engine)
+9. [Broker Gateways & Order Execution Mechanics](#9-broker-gateways--order-execution-mechanics)
+10. [Statutory Taxation, Transaction Fees & Slippage Accounting](#10-statutory-taxation-transaction-fees--slippage-accounting)
+11. [Zero-Latency Telemetry & Real-Time WebSocket Streaming](#11-zero-latency-telemetry--real-time-websocket-streaming)
+12. [REST API Surface & Data Transfer Schema](#12-rest-api-surface--data-transfer-schema)
+13. [Backtesting Engine & Real Historical Data Simulation](#13-backtesting-engine--real-historical-data-simulation)
+14. [Security, Authentication & Failure Protection Guardrails](#14-security-authentication--failure-protection-guardrails)
 
 ---
+
 
 ## 1. Executive System Architecture & Topology
 
@@ -364,38 +366,380 @@ stateDiagram-v2
     
     FLAT --> PENDING_ENTRY : Breakout Radar / 09:30 Eval -> Buy Limit Dispatched
     
-    PENDING_ENTRY --> ACTIVE_POSITION : Broker Confirms Fill AND Stop-Loss Armed
+    PENDING_ENTRY --> ACTIVE_POSITION : Broker Confirms Fill AND Protective Stop-Loss Armed (Stage 0)
     PENDING_ENTRY --> FLAT : 30s Entry Timeout / 15:05 Cutoff / Cancelled
     
-    ACTIVE_POSITION --> ACTIVE_POSITION : LTP Advances -> Breakeven Locked (+1.0%)
-    ACTIVE_POSITION --> ACTIVE_POSITION : LTP Advances -> Trailing Stop Ratcheted (0.8% Buffer)
-    ACTIVE_POSITION --> FLAT : Stop-Loss Hit / Broker Confirms Flat / Manual Exit
-    ACTIVE_POSITION --> PENDING_EXIT : 15:05 Mandatory Square-Off Triggered
+    ACTIVE_POSITION --> ACTIVE_POSITION : Time >= 3m & Peak >= +0.6R -> Stage 1 Soft Stop (-0.35R)
+    ACTIVE_POSITION --> ACTIVE_POSITION : Peak >= +1.2R -> Stage 2 Exact Post-Tax Floor (>= +₹11.00 Net)
+    ACTIVE_POSITION --> ACTIVE_POSITION : Peak >= +1.5R -> Stage 3 Dynamic Runner Retention Trail
+    ACTIVE_POSITION --> ACTIVE_POSITION : Operator Discretionary Manual Stop-Loss Override
+    ACTIVE_POSITION --> FLAT : Stop Trigger Executed / Broker Confirms Flat
+    ACTIVE_POSITION --> PENDING_EXIT : 15:05 Mandatory Square-Off / 45m Supervisor / Manual Exit
     
-    PENDING_EXIT --> FLAT : Broker Confirms Position Flat
+    PENDING_EXIT --> FLAT : Broker Confirms Position Flat (Net Qty = 0)
 ```
 
 ### State Behavior Details
-- `FLAT`: No active position held. Real-time Breakout Radar evaluates candidate ticks.
-- `PENDING_ENTRY`: Marketable limit buy order resting (`LTP * 1.0005`). Has a **30-second TTL**.
+- `FLAT`: No active position held. Real-time Breakout Radar evaluates candidate ticks across the NIFTY universe.
+- `PENDING_ENTRY`: Marketable limit buy order resting at worst-case limit price (`ceilToTick(LTP * 1.0005, tickSize)`). Has a **30-second TTL**.
   - **Cancel-Fill Race Reconciliation:** At 30s timeout, the engine dispatches `gateway.cancelOrder(activeEntryOrderId)` and queries `gateway.getOrderStatus(activeEntryOrderId)`.
-  - If the broker confirms the order was already `COMPLETE` or an open position is detected, the engine **does not reset to FLAT**. It transitions directly to `ACTIVE_POSITION` and arms the protective stop-loss for the confirmed filled shares.
+  - If the broker confirms the order was already `COMPLETE` or an open position is detected, the engine **does not reset to FLAT**. It transitions directly to `ACTIVE_POSITION` and arms the protective Stage 0 stop-loss for the confirmed filled shares.
   - State only returns to `FLAT` once the broker confirms cancellation (`CANCELLED` or `REJECTED`).
-  - **State remains `PENDING_ENTRY` until the stop order is acknowledged by the broker.**
-- `ACTIVE_POSITION`: Fully hedged active position.
+  - **Anti-Naked Exposure Guard:** State remains `PENDING_ENTRY` until the broker acknowledges placement of the protective stop-loss order.
+- `ACTIVE_POSITION`: Fully hedged active position governed by the Multi-Stage Stop Ladder (Section 8).
   - **Partial Fill Protection:** Automatically resizes resting stop-loss if filled position quantity expands.
-  - **Stage 1 (Breakeven Lock):** Triggered when price gains $\ge +1.0\%$. Stop is raised to the exact breakeven price covering all statutory taxes, STT, exchange fees, and brokerage, plus a guaranteed $+₹10.00$ net profit buffer.
-  - **Stage 2 (Progressive Trailing Stop):** Triggered when gain reaches $\ge +1.5\%$. Trailing stop ratchets upward maintaining a **0.8% buffer** below peak High-Water Mark:
-    $$\text{Trail Target} = \lfloor \text{High-Water Mark} \times (1.0 - 0.008) \rfloor_{\text{tick}}$$
-    Stop modifies only when the new target exceeds both current armed stop and planned stop, with a strict Price Inversion Guard ($\text{Target} < \text{LTP}$).
-  - **Authoritative Fill Settlement:** When stopped out, exit price is resolved from `getOrderStatus(activeSlOrderId).averagePrice()` rather than naked tick LTP.
-- `PENDING_EXIT`: Square-off limit order dispatched.
-  - **Sequential 15:05 Square-Off Protocol:** Stop-loss is cancelled first and checked for `COMPLETE` status. If already executed, market exit is aborted to prevent duplicate sell orders.
-  - If cancelled, executes market exit, polls for fill status to capture `averagePrice`, and routes execution through `handleTradeCompleted()` to persist the trade and update circuit breakers.
+  - **Stage 0 (Initial Structural Stop):** Armed immediately at fill: $S_0 = \lfloor \min(\text{Low}_{15}) - \tau \rfloor_{\tau}$ with $0.15\%$ limit buffer, guaranteeing max all-in loss $\le ₹200.00$.
+  - **Stage 1 (Soft Risk Reduction):** Triggered once $\Delta t \ge 3\text{m}$ AND $H \ge E + 0.60R$. Reduces open risk to $-0.35R$.
+  - **Stage 2 (Exact Post-Tax Cost Floor):** Triggered when $H \ge E + 1.20R$. Locks in an exact minimum exit price $P_{\text{floor}}$ ensuring net take-home profit $\ge +₹11.00$ after all taxes and brokerage.
+  - **Stage 3 (Dynamic Runner Retention Trail):** Triggered when $H \ge E + 1.50R$. Continuously ratchets up, retaining $50\%$ to $75\%$ of peak unrealized profit via piecewise linear curve $r(g)$.
+  - **Manual Stop Override:** Operator may manually adjust the stop loss via the dashboard; the engine updates the broker order in-place and seamlessly trails above the new price floor as market price rallies.
+  - **Authoritative Fill Settlement:** Exit price is resolved strictly from broker trade settlement (`averagePrice`) rather than naked tick LTP.
+- `PENDING_EXIT`: Square-off or emergency exit limit order dispatched.
+  - **Single-Working-Sell Invariant:** Reuses and modifies the existing resting stop order in-place into an aggressive limit exit, eliminating cancel-before-replace exposure gaps.
+  - Polls fill status to capture `averagePrice` and routes execution through `handleTradeCompleted()` to persist the trade and update circuit breakers.
 
 ---
 
-## 8. Broker Gateways & Order Execution Mechanics
+## 8. Multi-Stage Intraday Stop Ladder & Dynamic Risk Management Engine
+
+### 8.1 The Structural Problem with Naive Intraday Trailing Stops
+Conventional intraday equity trading systems typically rely on static percentage trailing stops (e.g., trailing 0.80% or 1.00% behind market price) or naive breakeven rules (moving the stop to entry price $E$). In institutional Indian equity markets (NSE MIS), this naive approach causes catastrophic structural failure:
+1. **The Friction Trap (Breakeven Fallacy):**
+   - Setting an intraday stop to the gross entry price ($P_{\text{exit}} = E$) guarantees an immediate **net loss**.
+   - Under Indian taxation laws (Section 10), every round-trip transaction incurs Securities Transaction Tax (STT, 0.025% on sell), exchange transaction fees (0.00307%), SEBI turnover charges (0.0001%), stamp duty (0.003% on buy), two legs of brokerage ($\min(₹20, 0.03\%)$), and 18% GST.
+   - For an average ₹20,000 turnover trade, transaction friction totals ₹35.00 to ₹45.00. A "breakeven" exit at $E$ is an actual $-₹40.00$ net loss.
+2. **Price-Scale & Tick-Size Inelasticity:**
+   - A rigid 0.8% stop distance behaves wildly differently across price regimes: on a ₹150 stock (₹0.01 tick size), 0.8% represents ₹1.20 (120 ticks of structural room); on a ₹3,500 stock (₹0.05 tick size), 0.8% represents ₹28.00 (560 ticks).
+   - Fixed-percentage trails fail to adapt to instrument volatility, causing premature stop-outs during opening order-book retests on low-priced stocks while surrendering massive open profits on high-priced runners.
+3. **The Premature Shakeout vs Profit-Forfeiture Dilemma:**
+   - Trailing too early suffocates the trade during the critical post-breakout consolidation (retest of the breakout level).
+   - Trailing too loosely allows a $+2.0\%$ unrealized winner to turn into a full $-1.0R$ loser on sudden mean-reversion wicks.
+4. **Exchange Market Order Restrictions & Slippage Disasters:**
+   - Naive systems submit `"MARKET"` orders or `SL-M` orders upon stop breach.
+   - Indian exchanges (NSE) restrict retail algorithmic market orders, and `SL-M` order types on illiquid or high-momentum breakouts suffer massive execution slippage (sometimes 0.5%–1.5% below trigger).
+
+AlgoTrade eliminates these failure modes via a **mathematically formal, multi-stage, tick-quantized, post-tax stop ladder** implemented in `StopLadder.java` and orchestrated by `MomentumBreakoutStrategy.java`.
+
+---
+
+### 8.2 Pure Mathematical Framework & Order-Pair Primitive (`StopLadder.java`)
+
+#### 1. The Atomic Order-Pair Primitive: `StopOrderPair`
+An immutable Java record representing the physical exchange stop order parameters:
+```java
+public record StopOrderPair(double triggerPrice, double limitPrice)
+```
+- **Strict Class Invariant:** $\text{triggerPrice} \ge \text{limitPrice} > 0.0$. An `IllegalArgumentException` is immediately thrown if this condition is violated.
+- **NSE Stop-Loss Limit (`SL`) Mechanics:** The order rests in the exchange order book in `TRIGGER PENDING` status. When an incoming tick satisfies $\text{LTP} \le \text{triggerPrice}$, the exchange matching engine activates the order as an active sell limit order with a limit price of $\text{limitPrice}$. The buffer between trigger and limit ensures execution during fast downward momentum without suffering market order slippage.
+
+#### 2. Component-Wise Maximum Monotonic Merge
+To guarantee that trailing adjustments never regress (lower the stop or widen the risk), any proposed candidate pair $(T_c, L_c)$ is merged with the currently active confirmed pair $(T_a, L_a)$ via component-wise maximum:
+$$T_{\text{merged}} = \max(T_a, T_c), \quad L_{\text{merged}} = \max(L_a, L_c)$$
+- **Mathematical Invariant Proof:**
+  $$\because T_a \ge L_a \quad \text{and} \quad T_c \ge L_c$$
+  $$\implies \max(T_a, T_c) \ge \max(L_a, L_c)$$
+  $$\therefore T_{\text{merged}} \ge L_{\text{merged}}$$
+- **Monotonicity Guarantee:** For any sequence of price ticks $t_1 < t_2 < \dots < t_n$, the armed trigger and limit prices satisfy $T_{t_{k+1}} \ge T_{t_k}$ and $L_{t_{k+1}} \ge L_{t_k}$. Downward regression is mathematically impossible.
+
+#### 3. Dual Anchoring Mechanics
+Candidate pairs are generated according to two distinct economic anchoring principles:
+- **Trigger-Anchored (Risk & Structure):** Proposes a trigger price $T_c$ based on support or risk units ($1R$). The limit price $L_c$ is calculated downward using the limit buffer $b$ (default $0.15\%$):
+  $$L_c = \lfloor T_c \times (1.0 - b) \rfloor_{\tau}$$
+  where $\lfloor \cdot \rfloor_{\tau}$ denotes flooring to the instrument's exchange tick size $\tau$.
+- **Limit-Anchored (Profit Floor & Cost Protection):** Proposes a protective limit floor $L_c$ (rounded up via $\lceil \cdot \rceil_{\tau}$). The trigger price $T_c$ is placed above the limit using the profit buffer $b_{\text{profit}}$ (default $0.20\%$):
+  $$T_c = \max\Big(\lceil L_c \times (1.0 + b_{\text{profit}}) \rceil_{\tau},\, L_c\Big)$$
+  This guarantees that when the trigger is breached, the market price has headroom above the limit floor to fill before crashing through the limit.
+
+---
+
+### 8.3 The 4-Stage Stop Progression Lifecycle ($S_0 \to S_1 \to S_2 \to S_3$)
+
+```mermaid
+graph TD
+    S0["<b>Stage 0: Initial Structural Support Stop</b><br/>Trigger: S0 = floor(Low15 - tick)<br/>Limit: floor(S0 * (1 - 0.15%))<br/>Risk: 1R = Entry - S0 (Capped at ₹200)"]
+    
+    S1["<b>Stage 1: Soft Risk Reduction (-0.35R)</b><br/>Gating: Time >= 3m AND Peak >= +0.60R<br/>Trigger: floor(Entry - 0.35R)<br/>Limit: floor(T1 * (1 - 0.15%))<br/>Open Risk Reduced by ~65%"]
+    
+    S2["<b>Stage 2: Exact Post-Tax Cost Floor</b><br/>Gating: Peak >= +1.20R (Impulse allowed in <3m)<br/>Floor: P_floor(Net Profit >= +₹11.00)<br/>Trigger: ceil(P_floor * (1 + 0.20%))<br/>Zero Risk of Capital Loss"]
+    
+    S3["<b>Stage 3: Dynamic Runner Retention Trail</b><br/>Gating: Stage 2 Confirmed AND Peak >= +1.50R<br/>Retention Factor: r(g) = 50% to 75%<br/>Dominant: max(RetentionPair, StructuralPair)<br/>Protects Deep Trend Exponentially"]
+    
+    S0 -->|3m Incub Elapsed & HWM >= +0.6R| S1
+    S0 -->|Sharp Surge: HWM >= +1.2R| S2
+    S1 -->|HWM >= +1.2R| S2
+    S2 -->|HWM >= +1.5R| S3
+    S3 -->|HWM Expands| S3
+```
+
+#### Detailed Stage Specifications:
+
+#### 1. Stage 0: Initial Structural Support Stop ($S_0$)
+- **Structural Discovery:** Anchored strictly 1 tick below the lowest low of the morning consolidation / 15-minute opening base:
+  $$S_0 = \lfloor \min(\text{Low}_{15}) - \tau \rfloor_{\tau}$$
+- **Boundary Clamping:** The initial structural distance $\frac{E - S_0}{E}$ is evaluated against system risk parameters:
+  - Noise floor minimum: $0.45\%$ (`minStopLossPct`)
+  - Maximum allowable risk: $0.80\%$ (`maxStopLossPct`)
+  - *Hard-Gate Rule:* If the natural structural stop is $< 0.45\%$, it is clamped up to $0.45\%$; if it exceeds $0.80\%$, the candidate setup is hard-rejected during trade qualification. The system **never** arbitrarily pulls a wide stop inward just to force trade qualification.
+- **Unit Risk Definition:**
+  $$1R = \text{EntryPrice} - S_0$$
+  This value is computed once upon broker fill confirmation, persisted to SQLite, and remains permanently immutable throughout the trade.
+- **Worst-Case Execution Sizing:**
+  - Sizing in `PositionSizingEngine.java` computes position quantity $q$ against the **marketable buy limit price** ($E_{\text{worst}} = \lceil \text{LTP} \times 1.0005 \rceil_{\tau}$) and the worst-case Stage 0 limit exit ($L_0 = \lfloor S_0 \times (1.0 - 0.0015) \rfloor_{\tau}$).
+  - All statutory taxes, STT, turnover charges, and brokerages at $L_0$ are deducted inside an exact mathematical convergence loop to ensure:
+    $$\text{TotalNetLoss}(q, E_{\text{worst}}, L_0) \le ₹200.00 \quad (\text{Max Risk Budget})$$
+
+#### 2. Stage 1: Soft Risk Reduction Stop ($-0.35R$)
+- **Purpose:** Drastically reduces capital exposure from $1.0R$ to $0.35R$ (a $\sim 65\%$ reduction in open dollar risk) once momentum demonstrates follow-through, while granting sufficient breathing room for opening retest volatility.
+- **Dual Gating Criteria (AND Logic):**
+  1. *Time Incubation Window:* $\Delta t \ge 3\text{ minutes}$ (`ladderIncubationMinutes: 3`). Protects against post-breakout liquidity hunts and order book jitter during the initial 180 seconds.
+  2. *Momentum High-Water Mark Latch:* Price must have demonstrated positive expansion by reaching $H \ge E + 0.60R$ (`ladderStage1TriggerR: 0.6`). Once reached, the boolean latch `peak06Latched` is permanently set.
+- **Candidate Calculation:**
+  $$\text{RawTrigger}_1 = E - (0.35 \times 1R)$$
+  $$T_1 = \lfloor \text{RawTrigger}_1 \rfloor_{\tau}, \quad L_1 = \lfloor T_1 \times (1.0 - 0.0015) \rfloor_{\tau}$$
+
+#### 3. Stage 2: Exact Post-Tax Cost Floor ($P_{\text{floor}}$ with Guaranteed Net Profit)
+- **Purpose:** Eliminates all downside risk and guarantees a positive net take-home profit by establishing an impenetrable price floor that fully covers all statutory exchange charges, taxes, brokerages, and slippage.
+- **Activation Gate:** High-water mark reaches $H \ge E + 1.20R$ (`ladderStage2TriggerR: 1.20`). *Note:* Stage 2 is permitted to activate during the 3-minute incubation window if a strong momentum surge occurs ($H \ge E + 1.20R$), ensuring fast windfall gains are never left unprotected.
+- **Exact Breakeven Solver (`ChargesBreakdown.calculateExactBreakevenPrice`):**
+  - Uses an exact closed-loop analytical solver that models all Indian transaction costs:
+    $$\text{Charges}(q, E, P) = \text{Brokerage} + \text{STT} + \text{ExchangeCharges} + \text{SEBITurnover} + \text{StampDuty} + \text{GST}$$
+    $$\text{NetPnL}(P) = q \times (P - E) - \text{Charges}(q, E, P)$$
+  - **The $+₹11.00$ Net Target Guarantee:** The solver searches for the lowest valid tick price $P_{\text{floor}}$ where:
+    $$\text{NetPnL}(P_{\text{floor}}) \ge +₹11.00$$
+    The $+₹11.00$ target includes a deliberate $+₹1.00$ safety cushion above the $+₹10.00$ mandate to absorb Zerodha/NSE integer rupee rounding on STT and stamp duty.
+  - **Two-Tier Fail-Safe Degradation Matrix:**
+    1. *Attempt 1 (Optimal):* Solves for $P_{\text{floor}}$ securing $\ge +₹11.00$ net profit within a $+1.5\%$ price delta cap.
+    2. *Degrade 1 (Cost-Only Floor):* If $+₹11.00$ cannot be achieved within $+1.5\%$ (e.g. low quantity $q=1$ or $q=2$ on a lower-priced stock where flat ₹20 brokerage dominates percentage gains), the solver automatically degrades target to $\ge +₹1.00$ net profit.
+    3. *Degrade 2 (Graceful Skip):* If $+₹1.00$ net profit is also unattainable within $+1.5\%$, Stage 2 is safely skipped without throwing an exception. Stage 1 remains active until Stage 3 criteria are satisfied.
+- **Candidate Calculation:**
+  $$L_2 = P_{\text{floor}}, \quad T_2 = \lceil L_2 \times (1.0 + 0.0020) \rceil_{\tau}$$
+  The $0.20\%$ trigger buffer ensures that when the trigger is breached, the market retains positive momentum above the limit floor.
+
+#### 4. Stage 3: Smooth Dynamic Runner Retention Trail
+- **Purpose:** Once a breakout matures into a major runner ($H \ge E + 1.50R$), Stage 3 captures the bulk of the trend by dynamically locking in an increasing percentage of accumulated peak profits.
+- **Activation Gate:** Stage 2 must be confirmed armed AND high-water mark must reach $H \ge E + 1.50R$ (`ladderStage3TriggerR: 1.50`).
+- **Dynamic Retention Factor Curve $r(g)$:**
+  The percentage of peak unrealized gain $(H - E)$ retained is defined by the continuous piecewise linear function:
+  $$g = \frac{H - E}{E} \times 100 \quad (\text{Peak Gain in Percentage Points})$$
+  $$r(g) = 0.50 + 0.25 \times \text{clamp}\left(\frac{g - 1.0\%}{1.5\%},\, 0.0,\, 1.0\right)$$
+  - For $g \le 1.0\%$: $r(g) = 0.50$ ($50.0\%$ profit retention)
+  - For $g = 1.75\%$: $r(g) = 0.625$ ($62.5\%$ profit retention)
+  - For $g \ge 2.5\%$: $r(g) = 0.75$ ($75.0\%$ profit retention)
+- **Retention Candidate Pair:**
+  $$\text{RawFloor} = E + r(g) \times (H - E)$$
+  $$L_{\text{ret}} = \lceil \text{RawFloor} \rceil_{\tau}, \quad T_{\text{ret}} = \max\Big(\lceil \text{RawFloor} \times (1.0 + 0.0020) \rceil_{\tau},\, L_{\text{ret}}\Big)$$
+- **Structural Swing Support Candidate:**
+  To prevent exiting during healthy trend pullbacks, the engine simultaneously monitors completed 5-minute intraday candles:
+  $$T_{\text{struct}} = \lfloor \min(\text{Low}_{t-1}, \text{Low}_{t-2}) - \tau \rfloor_{\tau}, \quad L_{\text{struct}} = \lfloor T_{\text{struct}} \times (1.0 - 0.0015) \rfloor_{\tau}$$
+  *Rule:* Structural candidate requires two completed session bars; if unavailable, it gracefully yields to retention.
+- **Dominant Pair Synthesis:**
+  $$\text{Candidate}_3 = \text{RetentionPair} \oplus \text{StructuralPair} = \Big(\max(T_{\text{ret}}, T_{\text{struct}}),\, \max(L_{\text{ret}}, L_{\text{struct}})\Big)$$
+
+---
+
+### 8.4 Executability Gate & Minimum Price Inversion Gap Guard
+
+#### The Microstructure Inversion Vulnerability
+In exchange matching engines (NSE), submitting or modifying a sell stop-loss limit order where $\text{triggerPrice} \ge \text{LTP}$ causes an immediate **HTTP 400 / RMS order rejection** (`Trigger price cannot be greater than or equal to last traded price`). If a stop trail attempts to ratchet up while price is experiencing a momentary pullback, naive systems repeatedly fail and flood the broker gateway with rejections.
+
+#### Minimum Inversion Gap Formula
+AlgoTrade enforces an executability gate before dispatching any order modification:
+$$\text{MinTickGap} = 5 \times \tau$$
+$$\text{PctGap} = \lceil \text{LTP} \times 0.20\% \rceil_{\tau}$$
+$$\text{InversionGap} = \max(\text{MinTickGap},\, \text{PctGap})$$
+$$\text{isExecutable}(T_c, \text{LTP}) \iff T_c \le (\text{LTP} - \text{InversionGap})$$
+
+#### Dual-Track Instruction Dispatching:
+1. **Opportunistic Instructions (Price Ratchets):**
+   - Evaluated on every price tick in `ACTIVE_POSITION`.
+   - If `isExecutable` returns `false`, the modification is **safely skipped** without modifying broker state or corrupting stage tracking. The engine quietly retains the active confirmed stop and retries on subsequent incoming ticks.
+2. **Mandatory Instructions (Time Supervisors):**
+   - Issued by time-based watchdogs (stagnation, 45-min duration, 15:05 cutoff).
+   - If `isExecutable` returns `false`, the instruction **cannot be skipped**. It immediately converts into an active execution exit (`PROTECTED_EXIT` or `EMERGENCY_EXIT`).
+
+---
+
+### 8.5 Safety Watchdogs & Time Supervisors (One-Shot Latches)
+
+To prevent holding stagnant capital, AlgoTrade employs supervisory background watchdogs. All supervisors operate on monotonic elapsed time $\Delta t = \text{now}_{\text{UTC}} - \text{entryFillTime}_{\text{UTC}}$ and enforce strict one-shot latching via atomic bitmasks (`latchesMask`), guaranteeing that no watchdog can fire more than once per trade.
+
+```mermaid
+flowchart TD
+    TICK["Periodic Ingestion / Ticks"] --> T3{"Elapsed >= 3 min?"}
+    T3 -- Yes --> L_INCUB["Latch: incubDoneLatched = true<br/>Enables Stage 1 Evaluation"]
+    
+    L_INCUB --> T25{"Elapsed >= 25 min & stagDone == false?"}
+    T25 -- Yes --> STAG_CHK{"Is Stagnant?<br/>(Stage < 3 AND HWM Gain < 0.25R over 15m)"}
+    
+    STAG_CHK -- Yes --> BRANCHES["Evaluate 5 Mutually Exclusive Branches:"]
+    BRANCHES --> BR_A["Branch (a): Stage 2 or 3 Confirmed -> No Action"]
+    BRANCHES --> BR_B["Branch (b): Bid >= L2 (MTM Net >= ₹11) -> Arm Stage 2 or PROTECTED_EXIT"]
+    BRANCHES --> BR_C["Branch (c): Bid < L2 & LTP >= T1 + Gap -> Arm Stage 1 Soft Stop"]
+    BRANCHES --> BR_D["Branch (d): LTP < T1 + Gap (Near -0.35R) -> Controlled EMERGENCY_EXIT"]
+    BRANCHES --> BR_E["Branch (e): Stop Already Triggered (OPEN) -> Defer to Exit Controller"]
+    
+    BRANCHES --> L_STAG["Latch: stagDoneLatched = true"]
+    
+    L_STAG --> T45{"Elapsed >= 45 min & t45Done == false?"}
+    T45 -- Yes --> STAGE_CHK{"Check Logical Stage"}
+    STAGE_CHK -- Stage <= 1 --> EM_EXIT["Controlled EMERGENCY_EXIT Ladder"]
+    STAGE_CHK -- Stage == 2 --> PROT_EXIT["Controlled PROTECTED_EXIT (>= L2)"]
+    STAGE_CHK -- Stage >= 3 --> EXEMPT["Exempt (Proven Momentum Runner)"]
+    STAGE_CHK --> L_T45["Latch: t45DoneLatched = true"]
+    
+    L_T45 --> T_EOD{"Time >= 15:05:00 IST & eodDone == false?"}
+    T_EOD -- Yes --> EOD_SQ["Freeze Ratchets -> Cancel Entry -> Sequential Square-Off"]
+    EOD_SQ --> L_EOD["Latch: eodDoneLatched = true"]
+```
+
+#### Detailed Supervisor Specifications:
+
+#### 1. 25-Minute Stagnation Supervisor (`stagDoneLatched`)
+- **Evaluation Criteria:** $\Delta t \ge 25\text{ minutes}$, `logicalStage < 3`, and $H_{\text{current}} - H_{15\text{m ago}} < (0.25 \times 1R)$.
+- **Deterministic 5-Branch Execution Matrix (Evaluated Top-Down):**
+  - **Branch a (Already Protected):** `logicalStage >= 2` $\implies$ No action required; runner protection handles exit.
+  - **Branch b (Profitable Stagnation):** $\text{bestBid} \ge L_2$ ($MTM_{\text{net}} \ge +₹11.00$). Arms Stage 2 immediately. If the $T_2$ executability check fails due to tight spread, initiates a `PROTECTED_EXIT` at $\max(L_2, \text{bestBid})$ securing the net gain.
+  - **Branch c (Mild Consolidation):** $\text{bestBid} < L_2$ and $\text{LTP} \ge T_1 + \text{InversionGap}$. Arms Stage 1 soft stop to cap downside risk.
+  - **Branch d (Adverse Stagnation):** $\text{LTP} < T_1 + \text{InversionGap}$ (trade is stagnating near the $-0.35R$ boundary). Converts immediately to a controlled `EMERGENCY_EXIT` ladder. Rather than letting the position slowly bleed out to the initial structural stop, the trade is liquidated at $\approx -0.35R$, preserving capital.
+  - **Branch e (Order Already Triggered):** Stop order status is `OPEN` with pending shares $\implies$ Defers handling directly to the Exit Controller.
+
+#### 2. 45-Minute Maximum Duration Supervisor (`t45DoneLatched`)
+- **Evaluation Criteria:** $\Delta t \ge 45\text{ minutes}$.
+- **Stage-Based Policy:**
+  - `logicalStage <= 1`: Trade has failed to achieve escape velocity within 45 minutes. Liquidates immediately via `EMERGENCY_EXIT` ladder.
+  - `logicalStage == 2`: Trade has covered costs but failed to trigger runner expansion. Liquidates via `PROTECTED_EXIT` at $\ge L_2$.
+  - `logicalStage >= 3`: **Exempt.** Proven momentum runners are granted full freedom to ride intraday trend extensions until 15:05 or until the dynamic retention stop triggers.
+
+#### 3. 15:05:00 IST Mandatory Square-Off Supervisor (`eodDoneLatched`)
+- All trailing stop ratchets are immediately suspended.
+- Resting pending entry orders are cancelled.
+- Triggers the sequential square-off protocol to flatten positions before Zerodha's broker auto-square-off cutoff (15:20 IST), avoiding exchange penalty fees.
+
+#### 4. Triggered-Stop Gap Escalation Watchdog
+- Continuously monitors exchange stop orders in `OPEN` status (triggered, but pending quantity $> 0$).
+- If the market gaps down past the limit price ($\text{bestBid} < \text{limitPrice}$), resting shares will not fill.
+- The watchdog initiates a strict grace period:
+  - **3 Seconds:** For Stage 0 and Stage 1 stops (capital protection priority).
+  - **5 Seconds:** For Stage 2 and Stage 3 stops (gives the bid depth time to absorb the block).
+- If the order remains unfilled upon grace expiry, it escalates in-place to the `EMERGENCY_EXIT` ladder.
+
+---
+
+### 8.6 Exit Controller & The Single-Working-Sell Invariant
+
+#### 1. The Single-Working-Sell Invariant
+To eliminate the risk of duplicate sell fills, short exposures, or order collisions:
+- At any instant, there can exist **at most ONE working SELL order** per active trade across the entire broker account.
+- Every exit operation **modifies the existing working sell order** in-place rather than cancelling and creating a new order.
+- A new sell order is submitted if and only if authoritative broker reconciliation verifies that zero working sell orders exist.
+
+#### 2. Regulatory Compliance: Zero `"MARKET"` Orders
+Per NSE automated trading circulars and retail algorithmic guidelines, AlgoTrade completely prohibits the dispatch of unpriced `"MARKET"` sell orders. All liquidations route strictly as marketable `LIMIT` orders.
+
+#### 3. PROTECTED_EXIT Engine
+- Used for Stage 2, Stage 3, and profitable stagnation exits.
+- Formula:
+  $$\text{LimitPrice} = \max(L_{\text{floor}},\, \text{bestBid})$$
+  $$\text{ExitLimit} = \max(\text{lowerCircuitLimit},\, \text{LimitPrice})$$
+- Holds a hard guarantee that if filled, the execution settles at or above the designated cost floor.
+
+#### 4. EMERGENCY_EXIT Ladder Engine
+Used for loss-side exits, duration timeouts, manual emergency exits, and gap-down escalations. Uses Level-2 `bestBid` (falling back to LTP only if depth feeds are interrupted):
+
+| Escalation Step | Elapsed Window | Limit Price Calculation |
+| :--- | :--- | :--- |
+| **Step 1** | $t = 0\text{ s}$ | $\lfloor \text{bestBid} - \max(2\tau,\, 0.05\% \times \text{bestBid}) \rfloor_{\tau}$ |
+| **Step 2** | $t + 2\text{ s}$ (unfilled) | $\lfloor \text{bestBid} \times (1.0 - 0.0025) \rfloor_{\tau}$ |
+| **Step 3** | $t + 4\text{ s}$ (unfilled) | $\lfloor \text{bestBid} \times (1.0 - 0.0050) \rfloor_{\tau}$ |
+| **Step 4+** | Every $3\text{ s}$ thereafter | $\lfloor \text{bestBid} \times (1.0 - 0.0100) \rfloor_{\tau}$ |
+
+- **Lower Circuit Clamping:** Every step is strictly bounded by $\max(\text{lowerCircuitLimit},\, \text{CalculatedLimit})$.
+- **Alert Escalation:** If unfilled after 30 seconds, a `CRITICAL` telemetry alert is dispatched to the dashboard while the ladder continues stepping aggressively down to the circuit limit.
+
+---
+
+### 8.7 Exchange Rate-Limiting & Order Modification Budget Management
+
+Zerodha KiteConnect and Indian exchanges enforce strict rate limits on order modifications (typically capping total modifications at 25 per order). An unrestricted tick trailing engine on a strong trending stock could exhaust this limit within minutes.
+
+AlgoTrade implements a three-tier throttle and modification budget manager:
+1. **Time-Based Throttle:** Minimum 10 seconds between consecutive broker modifications (`ladderThrottleSeconds: 10`).
+2. **Tick Quantization Threshold:** A proposed stop adjustment must improve the active trigger price by at least 3 ticks:
+   $$T_{\text{new}} - T_{\text{active}} \ge 3 \times \tau$$
+3. **The 25-Modification Budget Ladder:**
+   - **Modifications 0 – 10:** Standard dynamic ratcheting ($3\tau$ threshold).
+   - **Modifications 11 – 20:** Threshold widens to $\max(3\tau,\, 0.25R)$, filtering out sub-trend noise.
+   - **Modifications 21 – 23:** Trailing within the same stage is locked. Only major stage transitions ($S_1 \to S_2 \to S_3$) are permitted to modify the order.
+   - **Modification 24+:** All upward ratchets are completely frozen. The final remaining modifications are reserved exclusively for the Exit Controller to execute `EMERGENCY_EXIT` or 15:05 square-off.
+
+---
+
+### 8.8 Crash Rehydration & Resilient Recovery Matrix
+
+#### Persisted Position Schema (`paper_active_positions` / SQLite)
+Every active trade state is continuously mirrored to persistent storage in integer paise:
+- **Identity & Time:** `trade_id`, `symbol`, `quantity`, `entry_avg_price`, `entry_fill_time_utc`
+- **Structural Risk:** `s0_trigger_price`, `s0_limit_price`, `unit_risk`
+- **Active Protection:** `logical_stage`, `armed_trigger_price`, `armed_limit_price`, `sl_order_id`, `sl_mod_count`
+- **High-Water Mark & Progress:** `strategy_high_water_mark`, `hwm_updated_time_utc`, `hwm_15m_ago`
+- **Latches Mask:** Bitmask representing `{ incubDone, peak06, stagDone, t45Done, eodDone }`
+
+#### Cold-Start Recovery Workflow:
+1. **Clock Re-basing:** Restores monotonic clock elapsed time from the persisted UTC fill timestamp ($\Delta t = \text{now}_{\text{UTC}} - \text{entryFillTime}_{\text{UTC}}$).
+2. **HWM Backfill:** Ingests 1-minute historical candles from Kite for the downtime period and backfills `strategyHighWaterMark`. The backfill can only increase $H$, never decrease it.
+3. **Broker Reconciliation Matrix:**
+   - *Broker Net Quantity $= 0$:* Trade has closed during downtime. Settle fill price from broker trade history, record trade in journal, transition to `FLAT`.
+   - *Broker Net Quantity $> 0$ and Matching Stop Order Found:* Validates order prices against `armedPair` (broker order book is authoritative), syncs `slOrderId`, and resumes trailing.
+   - *Broker Net Quantity $> 0$ but Stop Order Missing:* Detects orphaned exposure. Immediately calculates an emergency protective stop ($S_0$ or persisted `armedPair`) and submits a fresh SL-L order tagged with `"RA"` (Re-Armed).
+   - *Broker Net Quantity $\ne$ Persisted Quantity:* Position was partially filled or altered. Resizes stop order quantity to match broker net quantity and logs `WARN` telemetry.
+
+---
+
+### 8.9 Manual Stop-Loss Override & Interactive Dashboard Integration
+
+#### Operator Discretionary Control
+AlgoTrade provides operators with direct manual intervention capabilities via the Dashboard Active Position card:
+- Clicking the **"Stop Loss"** button transforms the view into an inline price editor with an input field, instant tick validation, and an abort (`X`) button.
+- Submitting a price sends `POST /api/dashboard/update-stop-loss` with payload `{ symbol, stopLossPrice }`.
+
+#### Multi-Tier Backend Validation Guardrails:
+1. **Instrument Tick Alignment:** Stop price must be positive, non-zero, and aligned to $\tau$ (`TickMath.isTickAligned`).
+2. **Inversion Gap Guard:** Stop price cannot exceed $\text{LTP} - \text{InversionGap}$, preventing immediate exchange rejection.
+3. **Floor Protection Guard:** Stop price cannot be lower than the original structural stop $S_0$ (operator can only tighten risk, never widen it).
+4. **Circuit Band Guard:** Stop price must be strictly $\ge \text{lowerCircuitLimit}$.
+5. **Budget Check:** Verifies modification count $< 24$ to avoid broker rejection.
+
+#### Continuous Engine Integration
+When an operator sets a manual stop:
+1. The engine dispatches an atomic in-place `modifyOrder` to the broker gateway with the new trigger price and corresponding buffered limit price.
+2. `currentArmedStopPrice` and `armedPair` are updated in memory and persisted to SQLite.
+3. **The engine does not halt:** The manual stop becomes the new active protection floor. If market price continues to rally and the automated ladder reaches higher stages ($S_2$ breakeven or $S_3$ runner trail), the automated ladder smoothly takes over and trails above the manual stop!
+
+---
+
+### 8.10 End-to-End Mathematical Walkthrough: Reference Trade Verification
+
+To verify all formulas against actual production numbers, consider the reference test trade:
+- **Symbol:** `TECHM`
+- **Tick Size ($\tau$):** ₹0.05
+- **Entry Fill Price ($E$):** ₹1,763.30
+- **Session Consolidation Low:** ₹1,748.35
+- **Initial Structural Stop ($S_0$):** ₹1,748.30 (1 tick below low)
+- **Position Quantity ($q$):** 10 shares
+- **Unit Risk ($1R$):** $E - S_0 = ₹1,763.30 - ₹1,748.30 = ₹15.00$ ($0.851\%$)
+
+| Event / Milestone | High-Water Mark ($H$) | Stage | Formula Applied | Trigger Price ($T$) | Limit Price ($L$) | Net Post-Tax P&L Outcome |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Fill Confirmation** | ₹1,763.30 | **0** | $T_0 = S_0, \quad L_0 = \lfloor S_0 \times (1 - 0.0015) \rfloor_{0.05}$ | **₹1,748.30** | **₹1,745.65** | If stopped at limit: **−₹195.14** (Fully within ₹200 budget) |
+| **Momentum Advance ($+0.6R$)** | ₹1,772.30 ($E + 0.6R$) | **0 $\to$ 1** | $\Delta t \ge 3\text{m}$, `peak06` latches. $T_1 = \lfloor E - 0.35R \rfloor_{0.05}$ | **₹1,758.05** | **₹1,755.40** | If stopped at trigger: **−₹57.75**; at limit: **−₹86.90** |
+| **Breakout Impulse ($+1.2R$)** | ₹1,781.30 ($E + 1.2R$) | **1 $\to$ 2** | `calculateExactBreakevenPrice(10, 1763.30, 0.05, 11.00)` | **₹1,769.75** | **₹1,766.20** | If stopped at limit floor: **+₹11.26** Net Take-Home Gain |
+| **Runner Expansion ($+1.5R$)** | ₹1,785.80 ($E + 1.5R$) | **2 $\to$ 3** | $g = 1.276\% \implies r(g) = 54.60\%$. Raw floor: ₹1,775.58 | **₹1,779.15** | **₹1,775.60** | If stopped at limit floor: **+₹101.48** Net Take-Home Gain |
+| **Deep Trend Runner ($+2.5R$)** | ₹1,800.80 ($E + 2.5R$) | **3** | $g = 2.127\% \implies r(g) = 68.78\%$. Raw floor: ₹1,789.11 | **₹1,792.70** | **₹1,789.15** | If stopped at limit floor: **+₹230.15** Net Take-Home Gain |
+| **Peak Exhaustion ($+3.5R$)** | ₹1,815.80 ($E + 3.5R$) | **3** | $g = 2.977\% \implies r(g) = 75.00\%$. Raw floor: ₹1,802.68 | **₹1,806.30** | **₹1,802.70** | If stopped at limit floor: **+₹358.92** Net Take-Home Gain |
+
+---
+
+## 9. Broker Gateways & Order Execution Mechanics
 
 Orders route through `BrokerGatewayManager.java`:
 
@@ -431,7 +775,7 @@ Automates daily morning 08:45 AM authentication:
 
 ---
 
-## 9. Statutory Taxation, Transaction Fees & Slippage Accounting
+## 10. Statutory Taxation, Transaction Fees & Slippage Accounting
 
 Accurately modeled in `ChargesBreakdown.java`:
 
@@ -451,7 +795,7 @@ $$\text{Net P\&L} = (\text{Sell Turnover} - \text{Buy Turnover}) - \text{Total C
 
 ---
 
-## 10. Zero-Latency Telemetry & Real-Time WebSocket Streaming
+## 11. Zero-Latency Telemetry & Real-Time WebSocket Streaming
 
 Managed by `EngineActivityFeedService.java` and `LiveWebSocketBroadcastService.java`:
 - **In-Memory Ring Buffer:** `ConcurrentLinkedDeque<EngineActivityEvent>` bounded to **200 events** (< 1 µs write time).
@@ -462,7 +806,7 @@ Managed by `EngineActivityFeedService.java` and `LiveWebSocketBroadcastService.j
 
 ---
 
-## 11. REST API Surface & Data Transfer Schema
+## 12. REST API Surface & Data Transfer Schema
 
 Controller: `TradingDashboardController.java` (`/api/dashboard`):
 
@@ -475,6 +819,7 @@ Controller: `TradingDashboardController.java` (`/api/dashboard`):
 | `POST`| `/api/dashboard/mode` | Hot-swap between `PAPER` and `LIVE` trading venues. |
 | `POST`| `/api/dashboard/manual-exit` | Immediate market exit of active position (Sell button). |
 | `POST`| `/api/dashboard/emergency-exit`| Emergency kill-switch: squares off all open positions immediately. |
+| `POST`| `/api/dashboard/update-stop-loss` | Discretionary stop-loss modification with boundary validation and continuous ladder sync. |
 | `POST`| `/api/dashboard/risk/reset` | Resets daily trade limits and loss circuit breaker counters. |
 | `POST`| `/api/dashboard/strategy/manual-entry` | Places discretionary limit entry with automated stop attachment. |
 | `POST`| `/api/dashboard/scan/trigger` | Triggers on-demand evaluation cycle. |
@@ -492,7 +837,7 @@ Controller: `TradingDashboardController.java` (`/api/dashboard`):
 
 ---
 
-## 12. Backtesting Engine & Real Historical Data Simulation
+## 13. Backtesting Engine & Real Historical Data Simulation
 
 Implemented in `BacktestEngineService.java` & `HistoricalMarketDataService.java`:
 - **Real Market Data Ingestion & Caching:**
@@ -528,7 +873,7 @@ Implemented in `BacktestEngineService.java` & `HistoricalMarketDataService.java`
 
 ---
 
-## 13. Security, Authentication & Failure Protection Guardrails
+## 14. Security, Authentication & Failure Protection Guardrails
 
 1. **Stateless JWT Security Architecture:**
    Dashboard authentication is secured via HMAC-SHA256 JWT tokens. REST routes and WebSockets require authenticated Bearer tokens or verified HTTP-only cookies.
