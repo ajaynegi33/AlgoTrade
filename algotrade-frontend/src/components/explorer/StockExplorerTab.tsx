@@ -9,6 +9,7 @@ import ZerodhaAuthCard from "../auth/ZerodhaAuthCard";
 import { SkeletonStockExplorer } from "../common/Skeleton";
 import { TickUpdate } from "@/hooks/useEngineWebSocket";
 import { apiFetch } from "@/lib/apiClient";
+import { StockSearchCombobox } from "./StockSearchCombobox";
 
 interface StockExplorerTabProps {
   backendUrl: string;
@@ -35,8 +36,6 @@ export default function StockExplorerTab({
   latestTicks,
   subscribeSymbol,
 }: StockExplorerTabProps) {
-  // Search input state (user typing)
-  const [searchInput, setSearchInput] = useState("RELIANCE");
   // Active inspected symbol (only updated on successful fetch)
   const [activeSymbol, setActiveSymbol] = useState("RELIANCE");
   const [quote, setQuote] = useState<StockQuoteData | null>(null);
@@ -346,15 +345,7 @@ export default function StockExplorerTab({
     }
   };
 
-  const handleSearchSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (searchInput.trim()) {
-      fetchSymbolData(searchInput.trim(), false);
-    }
-  };
-
   const handleChipClick = (sym: string) => {
-    setSearchInput(sym);
     fetchSymbolData(sym, false);
   };
 
@@ -411,28 +402,12 @@ export default function StockExplorerTab({
           </div>
         </div>
 
-        {/* Search Bar */}
-        <form onSubmit={handleSearchSubmit} className="flex gap-2">
-          <div className="relative flex-1">
-            <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500 text-sm font-mono">
-              NSE:
-            </span>
-            <input
-              type="text"
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              placeholder="Search symbol (e.g. NTPC, INFY, TCS, RELIANCE)..."
-              className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-lg pl-14 pr-4 py-3 text-sm font-mono text-white placeholder-slate-500 outline-none transition"
-            />
-          </div>
-          <button
-            type="submit"
-            disabled={loading || !searchInput.trim()}
-            className="px-6 py-3 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold text-sm tracking-wide transition flex items-center gap-2 cursor-pointer disabled:cursor-not-allowed shadow-md shadow-emerald-950/40"
-          >
-            Search
-          </button>
-        </form>
+        {/* Search Combobox */}
+        <StockSearchCombobox
+          currentSymbol={activeSymbol}
+          onSelectStock={(sym) => fetchSymbolData(sym, false)}
+          loading={loading}
+        />
 
         {/* Popular Stocks Quick Chips */}
         <div className="flex items-center gap-2 flex-wrap pt-1">

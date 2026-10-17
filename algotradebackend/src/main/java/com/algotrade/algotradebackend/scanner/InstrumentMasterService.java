@@ -56,6 +56,9 @@ public class InstrumentMasterService {
     private final List<String> cachedFnoSymbols = new CopyOnWriteArrayList<>();
     private volatile Instant lastSyncedAt = null;
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private StockSearchService stockSearchService;
+
     public InstrumentMasterService(
         MarketUniverseRepository universeRepository,
         EngineActivityFeedService activityFeedService
@@ -119,8 +122,11 @@ public class InstrumentMasterService {
             // Step 3: Transactional Persistence
             persistUniverse(validatedEntities);
 
-            // Step 4: Refresh In-Memory Cache
+            // Step 4: Refresh In-Memory Cache & Search Index
             loadCacheFromDatabase();
+            if (stockSearchService != null) {
+                stockSearchService.rebuildIndex(validatedEntities);
+            }
             lastSyncedAt = Instant.now();
 
             long fnoCount = cachedFnoSymbols.size();

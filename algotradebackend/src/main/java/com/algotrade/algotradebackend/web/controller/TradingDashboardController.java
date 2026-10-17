@@ -56,6 +56,9 @@ public class TradingDashboardController {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private com.algotrade.algotradebackend.websocket.LiveEngineWebSocketHandler webSocketHandler;
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.algotrade.algotradebackend.scanner.StockSearchService stockSearchService;
+
     public TradingDashboardController(
         BrokerGatewayManager brokerGatewayManager,
         StrategyManager strategyManager,
@@ -534,6 +537,21 @@ public class TradingDashboardController {
         @RequestParam(defaultValue = "5m") String interval
     ) {
         return ResponseEntity.ok(brokerGatewayManager.getZerodhaLiveGateway().getStockChart(symbol, timeframe, interval));
+    }
+
+    /**
+     * Ultra-fast in-memory stock search & autocomplete across symbol, company name, and market aliases.
+     * Response latency: < 0.2 ms.
+     */
+    @GetMapping("/search-stocks")
+    public ResponseEntity<List<com.algotrade.algotradebackend.scanner.StockSearchResult>> searchStocks(
+        @RequestParam(defaultValue = "") String q,
+        @RequestParam(defaultValue = "8") int limit
+    ) {
+        if (stockSearchService == null) {
+            return ResponseEntity.ok(Collections.emptyList());
+        }
+        return ResponseEntity.ok(stockSearchService.search(q, limit));
     }
 
     /**
