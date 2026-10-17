@@ -294,8 +294,50 @@ public class TradingDashboardController {
     }
 
     /**
+     * Updates the protective stop-loss price for the active position in-place at the broker,
+     * maintaining the single-working-sell invariant and automated ladder coexistence.
+     */
+    @PostMapping("/update-stop-loss")
+    public ResponseEntity<Map<String, Object>> updateStopLoss(@RequestBody Map<String, Object> payload) {
+        if (payload == null || !payload.containsKey("symbol") || !payload.containsKey("stopPrice")) {
+            return ResponseEntity.badRequest().body(Map.of(
+                "success", false,
+                "error", "Payload must contain 'symbol' and 'stopPrice'"
+            ));
+        }
+        String symbol = String.valueOf(payload.get("symbol"));
+        double stopPrice;
+        try {
+            stopPrice = Double.parseDouble(String.valueOf(payload.get("stopPrice")));
+        } catch (NumberFormatException e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                "success", false,
+                "error", "Invalid stopPrice number: " + payload.get("stopPrice")
+            ));
+        }
+
+        try {
+            var result = strategyManager.updateManualStopLoss(symbol, stopPrice);
+            return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            log.warn("Manual stop-loss update rejected: {}", e.getMessage());
+            return ResponseEntity.badRequest().body(Map.of(
+                "success", false,
+                "error", e.getMessage()
+            ));
+        } catch (Throwable t) {
+            log.error("Manual stop-loss update failed: {}", t.getMessage(), t);
+            return ResponseEntity.internalServerError().body(Map.of(
+                "success", false,
+                "error", "Failed to update stop loss: " + t.getMessage()
+            ));
+        }
+    }
+
+    /**
      * Triggers manual scoring evaluation of the active trading strategy on demand (e.g. for testing/dry-run).
      */
+
     @PostMapping("/strategy/evaluate")
     public ResponseEntity<Map<String, Object>> evaluateStrategyManually() {
         strategyManager.evaluate0930();

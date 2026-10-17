@@ -16,6 +16,10 @@ interface OverviewTabProps {
 export default function OverviewTab({ overview, backendUrl = "http://localhost:8080", latestTick }: OverviewTabProps) {
   const [isSelling, setIsSelling] = useState<boolean>(false);
   const [sellError, setSellError] = useState<string | null>(null);
+  const [isEditingSl, setIsEditingSl] = useState<boolean>(false);
+  const [manualSlPrice, setManualSlPrice] = useState<string>("");
+  const [isUpdatingSl, setIsUpdatingSl] = useState<boolean>(false);
+  const [slError, setSlError] = useState<string | null>(null);
 
   if (!overview) {
     return <SkeletonOverview />;
@@ -31,6 +35,40 @@ export default function OverviewTab({ overview, backendUrl = "http://localhost:8
   const rawPnLPct = pos && entryPrice > 0 ? ((currentLtp - entryPrice) / entryPrice) * 100 : 0;
   const unrealizedPnLPct = Math.round(rawPnLPct * 100) / 100;
   const highWaterMark = pos ? Math.max(pos.highWaterMark, currentLtp) : 0;
+
+  const handleUpdateStopLoss = async () => {
+    if (isUpdatingSl || !overview?.activePosition || !manualSlPrice) return;
+    const price = parseFloat(manualSlPrice);
+    if (isNaN(price) || price <= 0) {
+      setSlError("Please enter a valid positive stop price");
+      return;
+    }
+
+    setIsUpdatingSl(true);
+    setSlError(null);
+
+    try {
+      const res = await apiFetch("/api/dashboard/update-stop-loss", {
+        method: "POST",
+        body: JSON.stringify({
+          symbol: overview.activePosition.symbol,
+          stopPrice: price,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "Failed to update stop loss");
+      }
+
+      setIsEditingSl(false);
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : "Failed to update stop loss";
+      setSlError(errorMessage);
+    } finally {
+      setIsUpdatingSl(false);
+    }
+  };
 
   const handleInstantSell = async () => {
     if (isSelling || !overview?.activePosition) return;
@@ -158,8 +196,93 @@ export default function OverviewTab({ overview, backendUrl = "http://localhost:8
                 )}
               </p>
             </div>
-            {/* Right side cluster: Immediate Sell Button on the left, Unrealized P&L on the right */}
-            <div className="flex items-center gap-3 sm:gap-5 w-full sm:w-auto justify-between sm:justify-end">
+            {/* Right side cluster: Stop Loss Controls + Immediate Sell Button + Unrealized P&L */}
+            <div className="flex flex-wrap items-center gap-2.5 sm:gap-4 w-full sm:w-auto justify-between sm:justify-end">
+              {/* Stop Loss Button or Inline Input */}
+              {!isEditingSl ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsEditingSl(true);
+                    setManualSlPrice(
+                      overview.activePosition?.armedTrigger
+                        ? String(overview.activePosition.armedTrigger)
+                        : overview.activePosition?.activeTrailingStop
+                        ? String(overview.activePosition.activeTrailingStop)
+                        : ""
+                    );
+                    setSlError(null);
+                  }}
+                  disabled={isSelling || isUpdatingSl}
+                  title="Set or adjust custom stop-loss price"
+                  className="px-3 sm:px-4 py-2 sm:py-2 rounded-md font-bold flex items-center gap-1.5 transition-all duration-150 cursor-pointer shadow-lg select-none bg-slate-900/90 hover:bg-slate-800 text-amber-400 border border-amber-500/30 hover:border-amber-500/60 shadow-slate-950/50 hover:shadow-amber-950/20 active:scale-[0.98]"
+                >
+                  <svg className="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                  </svg>
+                  <span className="text-xs sm:text-sm font-black tracking-wider uppercase">
+                    Stop Loss
+                  </span>
+                </button>
+              ) : (
+                <div className="flex items-center gap-1.5 bg-slate-900/95 border border-amber-500/60 rounded-md px-2.5 py-1.5 shadow-lg shadow-amber-950/40 animate-fadeIn">
+                  <span className="text-xs font-mono text-amber-400 font-bold">₹</span>
+                  <input
+                    type="number"
+                    step="0.05"
+                    autoFocus
+                    value={manualSlPrice}
+                    disabled={isUpdatingSl}
+                    onChange={(e) => setManualSlPrice(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        handleUpdateStopLoss();
+                      } else if (e.key === "Escape") {
+                        setIsEditingSl(false);
+                        setSlError(null);
+                      }
+                    }}
+                    placeholder="SL Price"
+                    className="w-20 sm:w-24 bg-transparent text-white font-mono text-xs sm:text-sm font-bold focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                  />
+                  {/* Enter / Save checkmark button */}
+                  <button
+                    type="button"
+                    onClick={handleUpdateStopLoss}
+                    disabled={isUpdatingSl || !manualSlPrice}
+                    title="Save Stop Loss (Enter)"
+                    className="p-1 text-emerald-400 hover:text-emerald-300 disabled:opacity-40 cursor-pointer transition-colors"
+                  >
+                    {isUpdatingSl ? (
+                      <svg className="animate-spin h-3.5 w-3.5 text-amber-300" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+                      </svg>
+                    ) : (
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7" />
+                      </svg>
+                    )}
+                  </button>
+                  {/* X-Circle cancel button */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsEditingSl(false);
+                      setSlError(null);
+                    }}
+                    disabled={isUpdatingSl}
+                    title="Cancel (Esc)"
+                    className="p-1 text-slate-400 hover:text-rose-400 transition-colors cursor-pointer"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  </button>
+                </div>
+              )}
+
               {/* Immediate 1-Click Market Sell Button */}
               <button
                 type="button"
@@ -211,6 +334,22 @@ export default function OverviewTab({ overview, backendUrl = "http://localhost:8
               </div>
             </div>
           </div>
+
+          {slError && (
+            <div className="mt-3 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center justify-between animate-fadeIn">
+              <span className="flex items-center gap-2">
+                <span>⚠️</span>
+                <span>{slError}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setSlError(null)}
+                className="text-amber-400 hover:text-white text-xs font-bold px-2 py-0.5 rounded bg-amber-950/40 hover:bg-amber-900/60 cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
 
           {sellError && (
             <div className="mt-3 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center justify-between animate-fadeIn">

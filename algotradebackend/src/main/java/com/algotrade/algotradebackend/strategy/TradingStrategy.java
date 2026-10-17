@@ -93,4 +93,13 @@ public interface TradingStrategy {
     default java.util.Map<String, Object> executeManualExit(String symbol, String reason) {
         throw new UnsupportedOperationException("Manual exit is not supported by " + getStrategyId());
     }
+
+    /**
+     * Updates the protective stop-loss price for the active position in-place at the broker,
+     * maintaining the single-working-sell invariant and automated ladder coexistence.
+     */
+    default java.util.Map<String, Object> updateManualStopLoss(String symbol, double stopPrice) {
+        throw new UnsupportedOperationException("Manual stop-loss update is not supported by " + getStrategyId());
+    }
 }
+

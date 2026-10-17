@@ -150,4 +150,18 @@ public class StrategyManager {
         }
         return result;
     }
+
+    public java.util.Map<String, Object> updateManualStopLoss(String symbol, double stopPrice) {
+        TradingStrategy strategy = getActiveStrategy();
+        if (strategy == null) {
+            throw new IllegalStateException("No active trading strategy is currently configured.");
+        }
+        var result = strategy.updateManualStopLoss(symbol, stopPrice);
+        var broadcast = getBroadcastService();
+        if (broadcast != null) {
+            broadcast.broadcastOverview();
+        }
+        return result;
+    }
 }
+

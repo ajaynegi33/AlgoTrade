@@ -350,4 +350,60 @@ public class StopLadderScenarioTest {
         // Zero duplicate orders placed
         verify(mockGateway, never()).placeOrder(anyString(), anyString(), anyInt(), anyDouble(), anyDouble(), anyString(), anyString());
     }
+
+    @Test
+    @DisplayName("Manual SL: In-place broker modification + automated ladder continues seamlessly")
+    void testManualStopLossUpdate_ModifiesInPlaceAndContinuesAutomatedLadder() {
+        setupActivePosition("TCS", 10, 1000.0, 990.0);
+        Position activePos = new Position("TCS", 10, 1000.0, 1010.0, 990.0, 990.0, 1010.0, Instant.now(), ExecutionMode.PAPER);
+        when(mockGateway.getOpenPosition()).thenReturn(Optional.of(activePos));
+
+        // 1. User sets manual stop to 1005.0 (below LTP 1010.0, above S0 990.0)
+        var res = strategy.updateManualStopLoss("TCS", 1005.0);
+        assertTrue((Boolean) res.get("success"));
+        assertEquals(1005.0, (Double) res.get("triggerPrice"));
+        assertEquals(1005.0, strategy.getCurrentArmedStopPrice());
+
+        // In-place modification of ORD-SL-1 with zero duplicate sell orders placed
+        verify(mockGateway, atLeastOnce()).modifyOrder(eq("ORD-SL-1"), eq(10), anyDouble(), eq(1005.0));
+        verify(mockGateway, never()).placeOrder(anyString(), eq("SELL"), anyInt(), anyDouble(), anyDouble(), anyString(), anyString());
+
+        // 2. Price pulls back to 1006.0: Stop holds at 1005.0 without regression
+        Position pullbackPos = new Position("TCS", 10, 1000.0, 1006.0, 990.0, 1005.0, 1010.0, Instant.now(), ExecutionMode.PAPER);
+        when(mockGateway.getOpenPosition()).thenReturn(Optional.of(pullbackPos));
+        strategy.onTick("TCS", 1006.0, 100_000, 1_000_000, 500_000, false, LocalTime.of(9, 45));
+        assertEquals(1005.0, strategy.getCurrentArmedStopPrice(), "Stop must not regress on pullback");
+
+        // 3. Price rallies to 1025.0 (+2.5R, Stage 3 runner): Automated ladder smoothly takes over and ratchets higher
+        // Fast-forward lastStopModifyTimeMs past 10s throttle window
+        ReflectionTestUtils.setField(strategy, "lastStopModifyTimeMs", System.currentTimeMillis() - 15000L);
+        Position rallyPos = new Position("TCS", 10, 1000.0, 1025.0, 990.0, 1005.0, 1025.0, Instant.now(), ExecutionMode.PAPER);
+        when(mockGateway.getOpenPosition()).thenReturn(Optional.of(rallyPos));
+        strategy.onTick("TCS", 1025.0, 200_000, 1_000_000, 500_000, false, LocalTime.of(9, 50));
+
+        assertTrue(strategy.getLogicalStage() >= 2, "Automated ladder must advance");
+        assertTrue(strategy.getCurrentArmedStopPrice() > 1005.0, "Automated ladder must ratchet stop higher than manual stop once trail candidate exceeds it");
+    }
+
+    @Test
+    @DisplayName("Manual SL: Boundary guards reject price inversion, circuit, and S0 violations")
+    void testManualStopLossUpdate_RejectsBoundaryViolations() {
+        setupActivePosition("INFY", 10, 1000.0, 990.0);
+        Position pos = new Position("INFY", 10, 1000.0, 1010.0, 990.0, 990.0, 1010.0, Instant.now(), ExecutionMode.PAPER);
+        when(mockGateway.getOpenPosition()).thenReturn(Optional.of(pos));
+        when(mockGateway.getLowerCircuitLimit("INFY")).thenReturn(Optional.of(900.0));
+
+        // Inversion violation: stop >= LTP (1015.0 >= 1010.0)
+        assertThrows(IllegalArgumentException.class, () -> strategy.updateManualStopLoss("INFY", 1015.0));
+
+        // Circuit violation: stop <= Lower Circuit (850.0 <= 900.0)
+        assertThrows(IllegalArgumentException.class, () -> strategy.updateManualStopLoss("INFY", 850.0));
+
+        // Risk expansion violation: stop < initial structural stop S0 (980.0 < 990.0)
+        assertThrows(IllegalArgumentException.class, () -> strategy.updateManualStopLoss("INFY", 980.0));
+
+        // Symbol mismatch: "TCS" vs active "INFY"
+        assertThrows(IllegalArgumentException.class, () -> strategy.updateManualStopLoss("TCS", 1005.0));
+    }
 }
+

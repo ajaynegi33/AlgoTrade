@@ -1724,9 +1724,135 @@ public class MomentumBreakoutStrategy implements TradingStrategy {
     }
 
     @Override
+    public synchronized Map<String, Object> updateManualStopLoss(String expectedSymbol, double stopPrice) {
+        BrokerGateway gateway = brokerGatewayManager.getActiveGateway();
+        Optional<Position> optPos = gateway.getOpenPosition();
+
+        if (optPos.isEmpty() || optPos.get().quantity() <= 0 || lifecycleState != TradeLifecycleState.ACTIVE_POSITION) {
+            throw new IllegalStateException("No active position is currently open to update stop-loss.");
+        }
+
+        Position pos = optPos.get();
+        if (expectedSymbol != null && !expectedSymbol.isBlank() && !pos.symbol().equalsIgnoreCase(expectedSymbol)) {
+            throw new IllegalArgumentException("Requested symbol " + expectedSymbol + " does not match active position symbol " + pos.symbol());
+        }
+
+        if (!Double.isFinite(stopPrice) || stopPrice <= 0) {
+            throw new IllegalArgumentException("Stop-loss price must be a valid positive number.");
+        }
+
+        double tickSize = getSymbolTickSize(pos.symbol());
+        double currentLtp = pos.currentPrice();
+        CandidateMetrics metrics = metricsMap.get(pos.symbol());
+        if (metrics != null && metrics.getLtp() > 0) {
+            currentLtp = metrics.getLtp();
+        }
+
+        // 1. Price Inversion Check: Stop trigger must be strictly below current LTP with required inversion gap
+        double minGap = StopLadder.calculateInversionGap(currentLtp, tickSize, ladderInversionGapTicks, ladderInversionGapPct);
+        if (stopPrice >= (currentLtp - minGap)) {
+            throw new IllegalArgumentException(String.format(
+                Locale.US,
+                "Stop loss price ₹%.2f is too close to or above current market price ₹%.2f. Minimum gap required is ₹%.2f.",
+                stopPrice, currentLtp, minGap
+            ));
+        }
+
+        // 2. Lower Circuit Check
+        double lowerCircuit = gateway.getLowerCircuitLimit(pos.symbol()).orElse(pos.entryPrice() * 0.90);
+        if (stopPrice <= lowerCircuit) {
+            throw new IllegalArgumentException(String.format(
+                Locale.US,
+                "Stop loss price ₹%.2f cannot be at or below lower circuit limit ₹%.2f.",
+                stopPrice, lowerCircuit
+            ));
+        }
+
+        // 3. Downside risk expansion check: Cannot set stop lower than initial structural stop S0
+        double s0 = initialStructuralStop > 0 ? initialStructuralStop : plannedStopPrice;
+        if (s0 > 0 && stopPrice < s0) {
+            throw new IllegalArgumentException(String.format(
+                Locale.US,
+                "Stop loss price ₹%.2f cannot be lower than initial planned stop ₹%.2f.",
+                stopPrice, s0
+            ));
+        }
+
+        // 4. Resting order state check: cannot modify trigger if stop already triggered (status == OPEN)
+        if (activeSlOrderId != null) {
+            TradeOrder resting = gateway.getOrderStatus(activeSlOrderId);
+            if (resting != null && "OPEN".equalsIgnoreCase(resting.status())) {
+                throw new IllegalStateException("Resting stop order " + activeSlOrderId + " has already triggered and is in exit execution.");
+            }
+        }
+
+        // 5. Modification budget check (NSE / Zerodha limit of 25 modifications per order)
+        if (slModificationCount >= 24) {
+            throw new IllegalStateException("Order modification budget exhausted (24/25 modifications reached).");
+        }
+
+        // 6. Calculate tick-aligned trigger and limit prices
+        double newTriggerPrice = TickMath.floorToTick(stopPrice, tickSize);
+        double newLimitPrice = TickMath.floorToTick(newTriggerPrice * (1.0 - ladderBufferPct / 100.0), tickSize);
+
+        log.info("MANUAL STOP-LOSS UPDATE for {} x {}: Trigger=₹{}, Limit=₹{} (Prev Trigger=₹{})",
+            pos.quantity(), pos.symbol(), newTriggerPrice, newLimitPrice, currentArmedStopPrice);
+
+        // 7. In-place order modification maintaining single-working-sell invariant
+        if (activeSlOrderId != null) {
+            try {
+                gateway.modifyOrder(activeSlOrderId, pos.quantity(), newLimitPrice, newTriggerPrice);
+            } catch (Throwable t) {
+                log.error("Failed to modify stop loss order {}: {}", activeSlOrderId, t.getMessage());
+                throw new RuntimeException("Broker rejected stop-loss modification: " + t.getMessage(), t);
+            }
+        } else {
+            String tag = generateOrderTag("MSL");
+            TradeOrder newSl = placeOrderWithTagFallback(gateway, pos.symbol(), "SELL", pos.quantity(), newLimitPrice, newTriggerPrice, "SL", tag);
+            if (newSl == null) {
+                throw new RuntimeException("Broker failed to place protective stop loss order for " + pos.symbol());
+            }
+            activeSlOrderId = newSl.orderId();
+        }
+
+        // 8. Update strategy state: monotonic armedPair and armed price
+        this.armedPair = new StopLadder.StopOrderPair(newTriggerPrice, newLimitPrice);
+        this.currentArmedStopPrice = newTriggerPrice;
+        this.slModificationCount++;
+        this.lastStopModifyTimeMs = System.currentTimeMillis();
+
+        // 9. Persist updated trade state
+        persistActivePositionState(gateway, pos);
+
+        activityFeedService.record(
+            "ORDERS",
+            "INFO",
+            gateway.getExecutionMode().name(),
+            activeTradeId,
+            "Manual Stop-Loss Updated",
+            String.format(Locale.US, "Manual stop updated to Trigger ₹%.2f / Limit ₹%.2f (Mods: %d)", newTriggerPrice, newLimitPrice, slModificationCount),
+            pos.symbol(),
+            Map.of("triggerPrice", newTriggerPrice, "limitPrice", newLimitPrice, "orderId", activeSlOrderId != null ? activeSlOrderId : "")
+        );
+
+        broadcastOverviewIfAvailable();
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("success", true);
+        response.put("symbol", pos.symbol());
+        response.put("triggerPrice", newTriggerPrice);
+        response.put("limitPrice", newLimitPrice);
+        response.put("orderId", activeSlOrderId != null ? activeSlOrderId : "");
+        response.put("slModificationCount", slModificationCount);
+        response.put("message", String.format(Locale.US, "Stop loss updated to Trigger ₹%.2f / Limit ₹%.2f", newTriggerPrice, newLimitPrice));
+        return response;
+    }
+
+    @Override
     public synchronized void executeSquareOff1515() {
         executeSquareOff();
     }
+
 
     @Override
     public List<ScoredCandidate> getLatestTopCandidates() {
