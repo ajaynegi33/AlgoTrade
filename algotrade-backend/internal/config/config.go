@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -86,10 +88,70 @@ func loadEnvFile(path string) error {
 	return scanner.Err()
 }
 
+// findAndLoadEnvFile searches current and parent directories for .env configuration files
+func findAndLoadEnvFile(paths ...string) (string, error) {
+	if os.Getenv("SKIP_ENV_LOAD") == "true" {
+		return "", nil
+	}
+
+	if len(paths) > 0 && paths[0] != "" {
+		if err := loadEnvFile(paths[0]); err != nil {
+			return "", err
+		}
+		return paths[0], nil
+	}
+
+	if envFile := os.Getenv("ENV_FILE"); envFile != "" {
+		if err := loadEnvFile(envFile); err == nil {
+			return envFile, nil
+		}
+	}
+
+	candidates := []string{
+		".env",
+		".env.dev",
+		".env.local",
+		"../.env",
+		"../../.env",
+		"algotrade-backend/.env",
+	}
+
+	for _, p := range candidates {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			if err := loadEnvFile(p); err == nil {
+				return p, nil
+			}
+		}
+	}
+
+	// Dynamic walk-up search from current working directory
+	cwd, err := os.Getwd()
+	if err == nil {
+		dir := cwd
+		for i := 0; i < 4; i++ {
+			testPath := filepath.Join(dir, ".env")
+			if fi, err := os.Stat(testPath); err == nil && !fi.IsDir() {
+				if err := loadEnvFile(testPath); err == nil {
+					return testPath, nil
+				}
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+
+	return "", nil
+}
+
 // LoadAndValidate loads environment variables from .env and strictly validates all required variables
-func LoadAndValidate() (*Config, error) {
-	// Attempt to load .env file if present
-	_ = loadEnvFile(".env")
+func LoadAndValidate(paths ...string) (*Config, error) {
+	loadedPath, _ := findAndLoadEnvFile(paths...)
+	if loadedPath != "" {
+		slog.Debug("Loaded environment configuration file", "path", loadedPath)
+	}
 
 	missing := make([]string, 0)
 	invalid := make(map[string]string)

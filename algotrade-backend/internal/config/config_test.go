@@ -7,6 +7,9 @@ import (
 )
 
 func TestConfigValidation_MissingVariables(t *testing.T) {
+	os.Setenv("SKIP_ENV_LOAD", "true")
+	defer os.Unsetenv("SKIP_ENV_LOAD")
+
 	// Clear all relevant environment variables
 	envKeys := []string{
 		"PORT", "ENV", "JWT_SECRET", "FRONTEND_URL",
@@ -16,12 +19,6 @@ func TestConfigValidation_MissingVariables(t *testing.T) {
 	for _, k := range envKeys {
 		os.Unsetenv(k)
 	}
-
-	// Rename .env temporarily if it exists so we test purely empty environment
-	_ = os.Rename(".env", ".env.tmp")
-	defer func() {
-		_ = os.Rename(".env.tmp", ".env")
-	}()
 
 	_, err := LoadAndValidate()
 	if err == nil {
@@ -40,10 +37,8 @@ func TestConfigValidation_MissingVariables(t *testing.T) {
 }
 
 func TestConfigValidation_InvalidSecretAndPort(t *testing.T) {
-	_ = os.Rename(".env", ".env.tmp")
-	defer func() {
-		_ = os.Rename(".env.tmp", ".env")
-	}()
+	os.Setenv("SKIP_ENV_LOAD", "true")
+	defer os.Unsetenv("SKIP_ENV_LOAD")
 
 	os.Setenv("PORT", "99999") // invalid port > 65535
 	os.Setenv("ENV", "development")
