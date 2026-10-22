@@ -1,16 +1,18 @@
 "use client";
 
-import React, { useEffect, useCallback } from "react";
+import React, { useEffect } from "react";
 import Image from "next/image";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { User } from "@/lib/types";
+import { useTradingStore } from "@/store/useTradingStore";
+import UserAvatar from "./UserAvatar";
 
 export interface DashboardSidebarProps {
   isCollapsed: boolean;
   onToggleCollapse: () => void;
   isMobileOpen: boolean;
   onCloseMobile: () => void;
-  activeSection?: string;
-  onSelectSection?: (section: string) => void;
   user: User | null;
   onLogout: () => void;
 }
@@ -20,11 +22,11 @@ export default function DashboardSidebar({
   onToggleCollapse,
   isMobileOpen,
   onCloseMobile,
-  activeSection = "dashboard",
-  onSelectSection,
   user,
   onLogout,
 }: DashboardSidebarProps) {
+  const pathname = usePathname();
+
   // Close mobile drawer on Escape key press
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -36,20 +38,14 @@ export default function DashboardSidebar({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isMobileOpen, onCloseMobile]);
 
-  const handleNavClick = useCallback(
-    (section: string) => {
-      if (onSelectSection) {
-        onSelectSection(section);
-      }
-      onCloseMobile();
-    },
-    [onSelectSection, onCloseMobile]
-  );
+  const { kiteProfile } = useTradingStore();
 
-  const userInitial = user?.name ? user.name.charAt(0).toUpperCase() : "U";
-  const userRole = user?.role || "PRO_TRADER";
-  const userName = user?.name || "Alex Vance";
-  const userEmail = user?.email || "alex.vance@algotrade.com";
+  const displayName = kiteProfile?.user_name || user?.name || "Ajju";
+  const displayEmail = kiteProfile?.email || user?.email;
+
+  const isDashboardActive = pathname === "/dashboard";
+  const isUniverseActive = pathname.startsWith("/universe");
+  const isProfileActive = pathname.startsWith("/profile");
 
   return (
     <>
@@ -74,16 +70,10 @@ export default function DashboardSidebar({
           ========================================================================= */}
       <aside
         className={`fixed md:sticky top-0 left-0 z-50 h-screen bg-white border-r border-slate-200/90 flex flex-col justify-between shrink-0 select-none transition-[width,transform] duration-250 ease-[cubic-bezier(0.23,1,0.32,1)] ${
-          // Mobile state: off-canvas drawer
           isMobileOpen ? "translate-x-0 w-72 shadow-2xl" : "-translate-x-full md:translate-x-0"
-        } ${
-          // Desktop state: responsive width
-          isCollapsed ? "md:w-20" : "md:w-64"
-        }`}
+        } ${isCollapsed ? "md:w-20" : "md:w-64"}`}
       >
-        {/* =======================================================================
-            Floating Circular Toggle Button on the Border (Reference Image Match)
-            ======================================================================= */}
+        {/* Floating Circular Toggle Button on the Border */}
         <button
           type="button"
           onClick={onToggleCollapse}
@@ -108,14 +98,14 @@ export default function DashboardSidebar({
             Top Section: Brand Logo & Title
             ======================================================================= */}
         <div className="p-4 sm:p-5 flex items-center justify-between border-b border-slate-100">
-          <div className="flex items-center gap-3 overflow-hidden">
-            <div className="w-10 h-10 rounded-2xl bg-white border border-slate-200/80 p-1 flex items-center justify-center shadow-2xs shrink-0">
+          <Link href="/dashboard" className="flex items-center gap-3 overflow-hidden">
+            <div className="w-10 h-10 flex items-center justify-center shadow-2xs shrink-0">
               <Image
                 src="/AlgoTrade.png"
                 alt="AlgoTrade Logo"
                 width={32}
                 height={32}
-                className="w-full h-full object-contain"
+                className="w-full h-full object-contain rounded-2xl"
                 priority
               />
             </div>
@@ -132,7 +122,7 @@ export default function DashboardSidebar({
                 Terminal v2.4
               </div>
             </div>
-          </div>
+          </Link>
 
           {/* Mobile close button */}
           <button
@@ -148,24 +138,23 @@ export default function DashboardSidebar({
         </div>
 
         {/* =======================================================================
-            Middle Section: Navigation Links
+            Middle Section: Navigation Links (Real Next.js Links)
             ======================================================================= */}
         <nav className="flex-1 px-3 py-4 space-y-1.5 overflow-y-auto">
-          {/* Dashboard Item (Active Pill - Exact match to reference style) */}
-          <button
-            type="button"
-            onClick={() => handleNavClick("dashboard")}
+          {/* Dashboard Overview */}
+          <Link
+            href="/dashboard"
+            onClick={onCloseMobile}
             title="Dashboard Overview"
             className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-2xl transition-all group cursor-pointer active:scale-[0.98] ${
-              activeSection === "dashboard"
+              isDashboardActive
                 ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-500/20 shadow-2xs"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 font-medium"
             } ${isCollapsed ? "md:justify-center md:px-0" : ""}`}
           >
-            {/* 4-square Dashboard Grid Icon */}
             <svg
               className={`w-5 h-5 shrink-0 transition-colors ${
-                activeSection === "dashboard" ? "text-emerald-700" : "text-slate-500 group-hover:text-slate-900"
+                isDashboardActive ? "text-emerald-700" : "text-slate-500 group-hover:text-slate-900"
               }`}
               viewBox="0 0 24 24"
               fill="currentColor"
@@ -180,22 +169,23 @@ export default function DashboardSidebar({
             >
               Dashboard
             </span>
-          </button>
+          </Link>
 
-          {/* Quick jump anchor: Live Positions */}
-          <button
-            type="button"
-            onClick={() => handleNavClick("positions")}
-            title="Active Positions"
+          {/* Stock Universe (F&O Cash Equities) */}
+          <Link
+            href="/universe"
+            onClick={onCloseMobile}
+            title="Stock Universe & Scanner"
             className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-2xl transition-all group cursor-pointer active:scale-[0.98] ${
-              activeSection === "positions"
+              isUniverseActive
                 ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-500/20 shadow-2xs"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 font-medium"
             } ${isCollapsed ? "md:justify-center md:px-0" : ""}`}
           >
-            {/* Table / Positions Icon */}
             <svg
-              className="w-5 h-5 text-slate-500 group-hover:text-slate-900 shrink-0"
+              className={`w-5 h-5 shrink-0 transition-colors ${
+                isUniverseActive ? "text-emerald-700" : "text-slate-500 group-hover:text-slate-900"
+              }`}
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -213,80 +203,45 @@ export default function DashboardSidebar({
                 isCollapsed ? "md:opacity-0 md:w-0 md:hidden" : "opacity-100"
               }`}
             >
-              Open Positions
+              Stock Universe
             </span>
-          </button>
-
-          {/* Quick jump anchor: Token Security */}
-          <button
-            type="button"
-            onClick={() => handleNavClick("security")}
-            title="Token Security & RTR"
-            className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-2xl transition-all group cursor-pointer active:scale-[0.98] ${
-              activeSection === "security"
-                ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-500/20 shadow-2xs"
-                : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 font-medium"
-            } ${isCollapsed ? "md:justify-center md:px-0" : ""}`}
-          >
-            {/* Key / Shield Icon */}
-            <svg
-              className="w-5 h-5 text-slate-500 group-hover:text-slate-900 shrink-0"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"
-              />
-            </svg>
-
-            <span
-              className={`text-xs font-semibold whitespace-nowrap overflow-hidden transition-all duration-150 ${
-                isCollapsed ? "md:opacity-0 md:w-0 md:hidden" : "opacity-100"
-              }`}
-            >
-              Security &amp; RTR
-            </span>
-          </button>
+          </Link>
         </nav>
 
         {/* =======================================================================
-            Bottom Section: Profile Card & Logout (Exact match to reference style)
+            Bottom Section: Profile Link Card & Logout
             ======================================================================= */}
         <div className="p-3 border-t border-slate-100 space-y-2">
-          {/* User Profile Card */}
-          <div
-            title={`${userName} (${userEmail})`}
-            className={`flex items-center gap-3 p-2 rounded-2xl transition-all ${
-              isCollapsed ? "md:justify-center md:p-1.5" : "bg-slate-50/80 border border-slate-200/70"
-            }`}
+          {/* User Profile Card (Clickable Link to /profile) */}
+          <Link
+            href="/profile"
+            onClick={onCloseMobile}
+            title={`View Zerodha Profile: ${displayName} (${displayEmail})`}
+            className={`flex items-center gap-3 p-2 rounded-2xl transition-all cursor-pointer group ${
+              isProfileActive
+                ? "bg-emerald-50 border border-emerald-500/30 text-emerald-950 shadow-2xs"
+                : "bg-slate-50/80 border border-slate-200/70 hover:bg-slate-100/80 hover:border-slate-300"
+            } ${isCollapsed ? "md:justify-center md:p-1.5" : ""}`}
           >
-            <div className="relative shrink-0">
-              <div className="w-9 h-9 rounded-full bg-gradient-to-tr from-emerald-600 to-teal-500 text-white font-bold text-xs flex items-center justify-center shadow-2xs">
-                {userInitial}
-              </div>
-              {/* Online indicator dot */}
-              <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-emerald-500 rounded-full ring-2 ring-white" />
-            </div>
+            <UserAvatar
+              avatarUrl={kiteProfile?.avatar_url}
+              name={displayName}
+              size="sm"
+              showOnlineDot
+            />
 
             <div
               className={`overflow-hidden transition-all duration-150 ${
                 isCollapsed ? "md:opacity-0 md:w-0 md:hidden" : "opacity-100"
               }`}
             >
-              <div className="font-bold text-xs text-slate-900 truncate leading-snug">
-                {userName}
-              </div>
-              <div className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-wider">
-                {userRole}
+              <div className="font-bold text-xs text-slate-900 group-hover:text-emerald-700 transition-colors truncate leading-snug">
+                {displayName}
               </div>
             </div>
-          </div>
+          </Link>
 
-          {/* Sign Out Button (Reference Image Match) */}
+          {/* Sign Out Button */}
           <button
             type="button"
             onClick={onLogout}
@@ -295,7 +250,6 @@ export default function DashboardSidebar({
               isCollapsed ? "md:justify-center md:px-0" : ""
             }`}
           >
-            {/* Exit / Door Arrow Icon */}
             <svg
               className="w-5 h-5 text-slate-400 group-hover:text-rose-600 shrink-0 transition-colors"
               fill="none"

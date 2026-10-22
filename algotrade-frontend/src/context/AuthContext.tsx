@@ -41,14 +41,9 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       try {
         const token = await refreshAccessToken();
         if (token && isMounted) {
-          const profileData = await getUserProfile();
+          const userProfile = await getUserProfile();
           if (isMounted) {
-            setUser({
-              id: profileData.profile.id,
-              email: profileData.profile.email,
-              name: profileData.profile.name,
-              role: profileData.profile.role,
-            });
+            setUser(userProfile);
           }
         }
       } catch (err) {

@@ -5,43 +5,6 @@ export interface User {
   role: string;
 }
 
-export interface UserProfileDetails {
-  id: string;
-  name: string;
-  email: string;
-  role: string;
-  account_status: string;
-  tier: string;
-  kyc_verified: boolean;
-  created_at: string;
-}
-
-export interface PortfolioSummary {
-  account_number: string;
-  currency: string;
-  total_equity: number;
-  cash_balance: number;
-  unrealized_pnl: number;
-  unrealized_pnl_percent: number;
-  active_bots_count: number;
-}
-
-export interface Position {
-  symbol: string;
-  side: "LONG" | "SHORT";
-  size: number;
-  entry_price: number;
-  current_price: number;
-  pnl: number;
-  pnl_percent: number;
-}
-
-export interface ProfileResponseData {
-  profile: UserProfileDetails;
-  portfolio_summary: PortfolioSummary;
-  active_positions: Position[];
-}
-
 export interface AuthResponseData {
   access_token: string;
   token_type: string;
@@ -53,6 +16,60 @@ export interface RefreshResponseData {
   access_token: string;
   token_type: string;
   expires_in: number;
+}
+
+export interface KiteStatusData {
+  is_configured: boolean;
+  is_connected: boolean;
+  user_id?: string;
+  user_name?: string;
+  login_time?: string;
+}
+
+export interface EquityMarginsData {
+  net: number;
+  available_cash: number;
+  collateral: number;
+  opening_balance: number;
+  live_balance: number;
+  utilised_debits: number;
+}
+
+export interface KiteUserProfileData {
+  is_connected: boolean;
+  user_id?: string;
+  user_name?: string;
+  user_shortname?: string;
+  email?: string;
+  broker?: string;
+  user_type?: string;
+  avatar_url?: string;
+  exchanges?: string[];
+  products?: string[];
+  order_types?: string[];
+  login_time?: string;
+  equity_margin?: EquityMarginsData;
+}
+
+export interface ScannedStock {
+  instrument_token: number;
+  tradingsymbol: string;
+  name: string;
+  exchange: string;
+  segment: string;
+  instrument_type: string;
+  lot_size: number;
+  tick_size: number;
+  last_price: number;
+  scan_date: string;
+  updated_at: string;
+}
+
+export interface UniverseSummaryData {
+  scan_date: string;
+  total_stocks: number;
+  last_updated: string;
+  stocks: ScannedStock[];
 }
 
 export interface ApiResponse<T> {

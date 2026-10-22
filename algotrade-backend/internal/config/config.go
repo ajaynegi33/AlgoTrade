@@ -28,6 +28,19 @@ type Config struct {
 	AuthUserName     string
 	AuthUserID       string
 	AuthUserRole     string
+
+	// Database configuration
+	DatabasePath string
+
+	// Zerodha Kite Connect configuration
+	KiteAPIKey      string
+	KiteAPISecret   string
+	KiteRedirectURL string
+}
+
+// IsKiteConfigured returns true if Kite API key and secret are both provided
+func (c *Config) IsKiteConfigured() bool {
+	return c.KiteAPIKey != "" && c.KiteAPISecret != ""
 }
 
 type ConfigValidationError struct {
@@ -220,6 +233,18 @@ func LoadAndValidate(paths ...string) (*Config, error) {
 
 	isProd := strings.EqualFold(envStr, "production")
 
+	dbPath := strings.TrimSpace(os.Getenv("DATABASE_PATH"))
+	if dbPath == "" {
+		dbPath = "data/algotrade.db"
+	}
+
+	kiteAPIKey := strings.TrimSpace(os.Getenv("KITE_API_KEY"))
+	kiteAPISecret := strings.TrimSpace(os.Getenv("KITE_API_SECRET"))
+	kiteRedirectURL := strings.TrimSpace(os.Getenv("KITE_REDIRECT_URL"))
+	if kiteRedirectURL == "" && frontendURL != "" {
+		kiteRedirectURL = frontendURL + "/dashboard"
+	}
+
 	return &Config{
 		Port:               portStr,
 		JWTSecret:          []byte(jwtSecretStr),
@@ -233,5 +258,9 @@ func LoadAndValidate(paths ...string) (*Config, error) {
 		AuthUserName:       authUserName,
 		AuthUserID:         authUserID,
 		AuthUserRole:       authUserRole,
+		DatabasePath:       dbPath,
+		KiteAPIKey:         kiteAPIKey,
+		KiteAPISecret:      kiteAPISecret,
+		KiteRedirectURL:    kiteRedirectURL,
 	}, nil
 }

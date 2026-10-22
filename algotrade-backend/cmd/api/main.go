@@ -12,7 +12,10 @@ import (
 
 	"github.com/ajaynegi33/AlgoTrade/internal/auth"
 	"github.com/ajaynegi33/AlgoTrade/internal/config"
+	"github.com/ajaynegi33/AlgoTrade/internal/database"
+	"github.com/ajaynegi33/AlgoTrade/internal/kite"
 	"github.com/ajaynegi33/AlgoTrade/internal/response"
+	"github.com/ajaynegi33/AlgoTrade/internal/scanner"
 	"github.com/ajaynegi33/AlgoTrade/internal/user"
 )
 
@@ -35,12 +38,32 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Initialize Universal SQLite Database (WAL mode, connection pool, auto-migrations)
+	db, err := database.Init(cfg.DatabasePath)
+	if err != nil {
+		slog.Error("CRITICAL: Failed to initialize SQLite database", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := database.Close(); err != nil {
+			slog.Error("Error closing database connection", "error", err)
+		}
+	}()
+
 	// Initialize user store dynamically from validated configuration
 	userStore, err := user.NewMemoryStore(cfg)
 	if err != nil {
 		slog.Error("CRITICAL: Failed to initialize user store from configuration", "error", err)
 		os.Exit(1)
 	}
+
+	// Initialize Kite Connect Service
+	kiteService := kite.NewService(cfg, db)
+	kiteHandler := kite.NewHandler(kiteService)
+
+	// Initialize Stock Universe Scanner Service
+	scannerService := scanner.NewService(db, kiteService)
+	scannerHandler := scanner.NewHandler(scannerService)
 
 	// Initialize Handlers
 	authHandler := auth.NewHandler(cfg, userStore)
@@ -63,7 +86,28 @@ func main() {
 
 	// Protected User Routes
 	requireAuth := auth.AuthMiddleware(cfg.JWTSecret)
+	mux.Handle("GET /api/user/me", requireAuth(http.HandlerFunc(userHandler.GetProfile)))
 	mux.Handle("GET /api/user/profile", requireAuth(http.HandlerFunc(userHandler.GetProfile)))
+
+	// Zerodha Kite Connect Routes
+	mux.HandleFunc("GET /api/kite/status", kiteHandler.GetStatus)
+	mux.HandleFunc("GET /api/kite/login-url", kiteHandler.GetLoginURL)
+	mux.HandleFunc("GET /api/kite/callback", kiteHandler.HandleBrowserCallback) // Direct browser redirect from Zerodha
+	mux.HandleFunc("GET /api/kite/profile", kiteHandler.GetProfile)             // Real Zerodha profile & account margins
+	mux.Handle("POST /api/kite/callback", requireAuth(http.HandlerFunc(kiteHandler.HandleCallback)))
+
+	// Stock Universe & 08:30 AM Scanner Routes
+	mux.HandleFunc("GET /api/scanner/universe", scannerHandler.GetUniverse)
+	mux.Handle("POST /api/scanner/run", requireAuth(http.HandlerFunc(scannerHandler.RunScan)))
+
+	// Deferred non-blocking initial scan check on startup
+	go func() {
+		time.Sleep(1 * time.Second)
+		_, err := scannerService.RunScan(false)
+		if err != nil {
+			slog.Info("Initial universe scan deferred (no network or already scanned)", "info", err.Error())
+		}
+	}()
 
 	// Compose global middlewares: Recovery -> CORS -> Router
 	var rootHandler http.Handler = mux

@@ -3,8 +3,11 @@ import {
   ApiResponse,
   AuthResponseData,
   NetworkError,
-  ProfileResponseData,
   RefreshResponseData,
+  User,
+  KiteStatusData,
+  KiteUserProfileData,
+  UniverseSummaryData,
 } from "./types";
 
 const API_BASE_URL =
@@ -13,7 +16,7 @@ const API_BASE_URL =
 // In-memory token storage (isolated from XSS / localStorage)
 let inMemoryAccessToken: string | null = null;
 
-export const setAccessToken = (token: string | null) => {
+const setAccessToken = (token: string | null) => {
   inMemoryAccessToken = token;
 };
 
@@ -212,6 +215,90 @@ export async function logoutUser(): Promise<void> {
   }
 }
 
-export async function getUserProfile(): Promise<ProfileResponseData> {
-  return fetchWithAuth<ProfileResponseData>("/api/user/profile");
+export async function getUserProfile(): Promise<User> {
+  return fetchWithAuth<User>("/api/user/me");
 }
+
+export async function getKiteStatus(): Promise<KiteStatusData> {
+  const res = await fetch(`${API_BASE_URL}/api/kite/status`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new ApiError("Failed to fetch Kite status", "KITE_STATUS_ERROR", res.status);
+  }
+  const json: ApiResponse<KiteStatusData> = await res.json();
+  if (!json.success || !json.data) {
+    throw new ApiError(json.error?.message || "Failed to fetch Kite status", json.error?.code || "KITE_ERROR");
+  }
+  return json.data;
+}
+
+export async function getKiteUserProfile(): Promise<KiteUserProfileData> {
+  const res = await fetch(`${API_BASE_URL}/api/kite/profile`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new ApiError("Failed to fetch Kite user profile", "KITE_PROFILE_ERROR", res.status);
+  }
+  const json: ApiResponse<KiteUserProfileData> = await res.json();
+  if (!json.success || !json.data) {
+    throw new ApiError(json.error?.message || "Failed to fetch Kite user profile", json.error?.code || "KITE_ERROR");
+  }
+  return json.data;
+}
+
+export async function getKiteLoginURL(): Promise<string> {
+  const res = await fetch(`${API_BASE_URL}/api/kite/login-url`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new ApiError("Failed to get Kite login URL", "KITE_URL_ERROR", res.status);
+  }
+  const json: ApiResponse<{ login_url: string }> = await res.json();
+  if (!json.success || !json.data?.login_url) {
+    throw new ApiError(json.error?.message || "Kite not configured", json.error?.code || "KITE_ERROR");
+  }
+  return json.data.login_url;
+}
+
+export async function sendKiteCallback(requestToken: string): Promise<{ message: string; user_id: string; user_name: string; login_time: string }> {
+  return fetchWithAuth<{ message: string; user_id: string; user_name: string; login_time: string }>("/api/kite/callback", {
+    method: "POST",
+    body: JSON.stringify({ request_token: requestToken }),
+  });
+}
+
+export async function getStockUniverse(date?: string): Promise<UniverseSummaryData> {
+  const endpoint = date ? `/api/scanner/universe?date=${encodeURIComponent(date)}` : "/api/scanner/universe";
+  const res = await fetch(`${API_BASE_URL}${endpoint}`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new ApiError("Failed to fetch stock universe", "UNIVERSE_ERROR", res.status);
+  }
+  const json: ApiResponse<UniverseSummaryData> = await res.json();
+  if (!json.success || !json.data) {
+    throw new ApiError(json.error?.message || "Failed to fetch stock universe", json.error?.code || "UNIVERSE_ERROR");
+  }
+  return json.data;
+}
+
+export async function triggerUniverseScan(): Promise<UniverseSummaryData> {
+  interface ScanApiResponse {
+    message: string;
+    scan_date: string;
+    total_stocks: number;
+    last_updated: string;
+    universe: UniverseSummaryData["stocks"];
+  }
+  const res = await fetchWithAuth<ScanApiResponse>("/api/scanner/run", {
+    method: "POST",
+  });
+  return {
+    scan_date: res.scan_date,
+    total_stocks: res.total_stocks,
+    last_updated: res.last_updated,
+    stocks: res.universe,
+  };
+}
+

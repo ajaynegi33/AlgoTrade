@@ -42,3 +42,9 @@ yarn-error.log*
 next-env.d.ts
 
 Kite Docs
+
+# SQLite databases
+*.db
+*.db-wal
+*.db-shm
+algotrade-backend/data/
