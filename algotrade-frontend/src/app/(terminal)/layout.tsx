@@ -1,23 +1,58 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import AuthGuard from "@/components/AuthGuard";
 import DashboardSidebar from "@/components/dashboard/DashboardSidebar";
 import { useAuth } from "@/context/AuthContext";
 import { useTradingStore } from "@/store/useTradingStore";
 import { toast } from "sonner";
 
+interface MarketCountdownState {
+  label: string;
+  isLive: boolean;
+  isUrgent: boolean;
+}
+
 export default function TerminalLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  const pathname = usePathname();
   const { user, logout } = useAuth();
   const { kiteStatus, fetchKiteStatus } = useTradingStore();
 
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isMobileOpen, setIsMobileOpen] = useState(false);
+  const [marketCountdown, setMarketCountdown] = useState<MarketCountdownState | null>(null);
+
+  const pageHeaderInfo = useMemo(() => {
+    if (pathname.startsWith("/leaderboard")) {
+      return {
+        title: "Quantitative Leaderboard",
+        description:
+          "Real-time institutional ranking across 213 NSE F&O cash stocks with VWAP sweet spots, anti-spoof depth, relative strength, and pre-trade expected value (EV ≥ +0.25R).",
+      };
+    }
+    if (pathname.startsWith("/universe")) {
+      return {
+        title: "Stock Universe Scanner",
+        description: "08:30 AM NSE F&O Cash Equity master universe & high-liquidity filters.",
+      };
+    }
+    if (pathname.startsWith("/profile")) {
+      return {
+        title: "Kite Profile & Margins",
+        description: "Zerodha account credentials, live margins, and fund balances.",
+      };
+    }
+    return {
+      title: "Trading Command Center",
+      description: "Executive platform telemetry, market regime, and quant signals.",
+    };
+  }, [pathname]);
 
   // Load saved sidebar collapsed preference from localStorage
   useEffect(() => {
@@ -55,6 +90,75 @@ export default function TerminalLayout({
       window.history.replaceState({}, document.title, window.location.pathname);
     }
   }, [fetchKiteStatus]);
+
+  // Live countdown to NSE Market Close (03:30 PM IST)
+  useEffect(() => {
+    function updateCountdown() {
+      const now = new Date();
+      // Convert to IST (UTC + 5.5 hours)
+      const istOffsetMs = 5.5 * 60 * 60 * 1000;
+      const istDate = new Date(now.getTime() + now.getTimezoneOffset() * 60 * 1000 + istOffsetMs);
+      const day = istDate.getDay(); // 0 is Sunday, 6 is Saturday
+      const isWeekday = day >= 1 && day <= 5;
+
+      const openTime = new Date(istDate);
+      openTime.setHours(9, 15, 0, 0);
+
+      const closeTime = new Date(istDate);
+      closeTime.setHours(15, 30, 0, 0);
+
+      if (!isWeekday) {
+        setMarketCountdown({
+          label: "Market Closed (Weekend)",
+          isLive: false,
+          isUrgent: false,
+        });
+        return;
+      }
+
+      const diffMs = closeTime.getTime() - istDate.getTime();
+      const openDiffMs = openTime.getTime() - istDate.getTime();
+
+      if (openDiffMs > 0) {
+        // Pre-market: before 09:15 IST
+        const h = Math.floor(openDiffMs / (1000 * 60 * 60));
+        const m = Math.floor((openDiffMs % (1000 * 60 * 60)) / (1000 * 60));
+        setMarketCountdown({
+          label: h > 0 ? `Opens in ${h}h ${m}m` : `Opens in ${m}m`,
+          isLive: false,
+          isUrgent: false,
+        });
+      } else if (diffMs > 0) {
+        // Live market: between 09:15 and 15:30 IST
+        const h = Math.floor(diffMs / (1000 * 60 * 60));
+        const m = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+        const s = Math.floor((diffMs % (1000 * 60)) / 1000);
+
+        const isUrgent = diffMs <= 15 * 60 * 1000; // < 15 mins to market close
+        let label = `Closes in ${h}h ${m}m`;
+        if (h === 0) {
+          label = `Closes in ${m}m ${s.toString().padStart(2, "0")}s`;
+        }
+
+        setMarketCountdown({
+          label,
+          isLive: true,
+          isUrgent,
+        });
+      } else {
+        // Post-market: after 15:30 IST
+        setMarketCountdown({
+          label: "Market Closed",
+          isLive: false,
+          isUrgent: false,
+        });
+      }
+    }
+
+    updateCountdown();
+    const interval = setInterval(updateCountdown, 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   const handleToggleCollapse = useCallback(() => {
     setIsCollapsed((prev) => {
@@ -95,18 +199,27 @@ export default function TerminalLayout({
           {/* Top Header Bar */}
           <header className="sticky top-0 z-30 bg-white/85 backdrop-blur-md border-b border-slate-200/80">
             <div className="px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
-              {/* Left: Mobile hamburger (no breadcrumbs) */}
-              <div className="flex items-center gap-3">
+              {/* Left: Mobile hamburger + Page Header Title/Subtitle */}
+              <div className="flex items-center gap-3 min-w-0">
                 <button
                   type="button"
                   onClick={() => setIsMobileOpen(true)}
-                  className="md:hidden p-2 rounded-xl border border-slate-200 text-slate-600 hover:text-slate-900 hover:bg-slate-100 cursor-pointer active:scale-95 transition-all"
+                  className="md:hidden p-2 rounded-xl border border-slate-200 text-slate-600 hover:text-slate-900 hover:bg-slate-100 cursor-pointer active:scale-95 transition-all shrink-0"
                   aria-label="Open sidebar"
                 >
                   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 12h16M4 18h16" />
                   </svg>
                 </button>
+
+                <div className="min-w-0">
+                  <h1 className="text-sm sm:text-[22px] font-black text-slate-900 tracking-normal leading-tight truncate">
+                    {pageHeaderInfo.title}
+                  </h1>
+                  {/* <p className="text-[11px] text-slate-500 truncate hidden xl:block leading-none mt-1 max-w-xl">
+                    {pageHeaderInfo.description}
+                  </p> */}
+                </div>
               </div>
 
               {/* Right: Live Connection Telemetry Badges */}
@@ -114,7 +227,7 @@ export default function TerminalLayout({
                 {kiteStatus?.is_connected ? (
                   <Link
                     href="/profile"
-                    className="flex items-center gap-2 text-xs bg-emerald-50 hover:bg-emerald-100/80 border border-emerald-200/80 rounded-full px-3 py-1 text-emerald-800 font-mono transition-colors"
+                    className="flex items-center gap-2 text-xs bg-emerald-50 hover:bg-emerald-100/80 border border-emerald-200/80 rounded-full px-3 py-1 text-emerald-800 font-mono transition-colors shrink-0"
                   >
                     <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                     <span className="font-semibold">Kite: {kiteStatus.user_id}</span>
@@ -122,22 +235,58 @@ export default function TerminalLayout({
                 ) : (
                   <Link
                     href="/profile"
-                    className="flex items-center gap-2 text-xs bg-amber-50 hover:bg-amber-100/80 border border-amber-200/80 rounded-full px-3 py-1 text-amber-800 font-mono transition-colors"
+                    className="flex items-center gap-2 text-xs bg-amber-50 hover:bg-amber-100/80 border border-amber-200/80 rounded-full px-3 py-1 text-amber-800 font-mono transition-colors shrink-0"
                   >
                     <span className="w-2 h-2 rounded-full bg-amber-500" />
                     <span className="font-semibold">Kite Disconnected</span>
                   </Link>
                 )}
 
-                <div className="hidden sm:flex items-center gap-2 text-xs bg-slate-100 border border-slate-200/80 rounded-full px-3 py-1 text-slate-600 font-mono">
-                  <span>NSE Cash 08:30 AM</span>
-                </div>
+                {marketCountdown && (
+                  <div
+                    className={`flex items-center gap-1.5 text-xs rounded-full px-3 py-1 font-mono transition-colors shrink-0 border ${
+                      marketCountdown.isUrgent
+                        ? "bg-rose-50 text-rose-800 border-rose-300 font-bold animate-pulse"
+                        : marketCountdown.isLive
+                        ? "bg-slate-100/90 text-slate-800 border-slate-200/90 font-semibold"
+                        : "bg-slate-50 text-slate-500 border-slate-200/80"
+                    }`}
+                    title="NSE Trading Session: 09:15 - 15:30 IST"
+                  >
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        marketCountdown.isUrgent
+                          ? "bg-rose-500 animate-ping"
+                          : marketCountdown.isLive
+                          ? "bg-emerald-500 animate-pulse"
+                          : "bg-slate-400"
+                      }`}
+                    />
+                    <svg
+                      className={`w-3.5 h-3.5 ${
+                        marketCountdown.isUrgent
+                          ? "text-rose-600"
+                          : marketCountdown.isLive
+                          ? "text-slate-600"
+                          : "text-slate-400"
+                      }`}
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                    >
+                      <circle cx="12" cy="12" r="9" />
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 7v5l3 2" />
+                    </svg>
+                    <span>{marketCountdown.label}</span>
+                  </div>
+                )}
               </div>
             </div>
           </header>
 
           {/* Page Body */}
-          <main className="flex-1 px-4 sm:px-6 lg:px-8 py-6 sm:py-8 max-w-7xl w-full mx-auto">
+          <main className="flex-1 px-2 sm:px-2 lg:px-2 py-6 sm:py-8 max-w-7xl w-full mx-auto">
             {children}
           </main>
         </div>

@@ -3,31 +3,40 @@
 import React, { useEffect } from "react";
 import Link from "next/link";
 import { useTradingStore } from "@/store/useTradingStore";
+import { useEngineWebSocket } from "@/hooks/useEngineWebSocket";
 import { getKiteLoginURL } from "@/lib/api";
-import { DashboardOverviewSkeleton } from "@/components/ui/Skeleton";
 import { toast } from "sonner";
+import { DashboardOverviewSkeleton } from "@/components/ui/Skeleton";
+import { StockRankData, decodeReasonFlags } from "@/lib/types";
 
 export default function DashboardOverviewPage() {
   const {
     kiteStatus,
+    kiteProfile,
     universe,
     isKiteLoading,
     isUniverseLoading,
     fetchKiteStatus,
+    fetchKiteProfile,
     fetchUniverse,
   } = useTradingStore();
+
+  // Connect to 1.0s real-time engine stream for telemetry and teaser signals
+  const { snapshot, isConnected } = useEngineWebSocket();
 
   useEffect(() => {
     fetchKiteStatus();
     fetchUniverse();
-  }, [fetchKiteStatus, fetchUniverse]);
+    fetchKiteProfile();
+  }, [fetchKiteStatus, fetchUniverse, fetchKiteProfile]);
 
   const handleConnectKite = async () => {
     try {
       const loginUrl = await getKiteLoginURL();
       window.location.href = loginUrl;
     } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : "Failed to retrieve Kite login URL");
+      const message = err instanceof Error ? err.message : "Failed to obtain Kite login URL";
+      toast.error(message);
     }
   };
 
@@ -36,75 +45,29 @@ export default function DashboardOverviewPage() {
     return <DashboardOverviewSkeleton />;
   }
 
-  const isKiteConnected = kiteStatus?.is_connected;
-  const totalStocks = universe?.total_stocks ?? 0;
-  const lastScanDate = universe?.scan_date ? new Date(universe.scan_date).toLocaleTimeString("en-IN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: true,
-  }) : "08:30 AM IST";
+  const isKiteConnected = kiteStatus?.is_connected ?? false;
+  const totalStocks = universe?.total_stocks ?? 213;
+  const lastScanDate = universe?.scan_date ?? "Today";
+
+  // Extract #1 Top Bullish and #1 Top Bearish from engine snapshot for preview
+  const topBullish: StockRankData | undefined = snapshot?.top_bullish?.[0];
+  const topBearish: StockRankData | undefined = snapshot?.top_bearish?.[0];
 
   return (
     <div className="space-y-6">
-      {/* =========================================================================
-          1. Hero / Engine Readiness Banner
-          ========================================================================= */}
-      <div className="bg-white border border-slate-200/90 rounded-3xl p-6 sm:p-8 shadow-xs relative overflow-hidden">
-        <div className="absolute top-0 right-0 w-80 h-80 bg-gradient-to-bl from-emerald-50 via-teal-50/40 to-transparent rounded-full blur-2xl pointer-events-none -mr-20 -mt-20" />
-
-        <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
-          <div>
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-mono font-bold bg-emerald-50 text-emerald-800 border border-emerald-200/80 mb-3">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              <span>Phase 1 • Scanner & Kite Auth Active</span>
-            </div>
-
-            <h1 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
-              Trading Engine Overview
-            </h1>
-            <p className="text-xs sm:text-sm text-slate-600 max-w-2xl mt-1.5 leading-relaxed">
-              Automated high-liquidity National Stock Exchange (NSE) cash equities scanner. Filtered strictly from active F&O underlying contracts for intraday execution.
-            </p>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3 shrink-0">
-            <Link
-              href="/universe"
-              className="text-xs font-bold px-4 py-2.5 rounded-2xl bg-slate-900 hover:bg-slate-800 text-white transition-all shadow-xs active:scale-[0.98] flex items-center gap-2"
-            >
-              <span>View Stock Universe</span>
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M14 5l7 7m0 0l-7 7m7-7H3" />
-              </svg>
-            </Link>
-
-            <Link
-              href="/profile"
-              className="text-xs font-bold px-4 py-2.5 rounded-2xl bg-slate-100 hover:bg-slate-200/80 border border-slate-200 text-slate-800 transition-all active:scale-[0.98]"
-            >
-              Zerodha Account
-            </Link>
-          </div>
-        </div>
-      </div>
 
       {/* =========================================================================
-          2. Core System Readiness Bento Cards
+          2. Core Platform Telemetry (3 Key Status Cards)
           ========================================================================= */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-        {/* Card 1: Zerodha Kite Connect State */}
-        <div className="bg-white border border-slate-200/90 rounded-3xl p-6 shadow-xs flex flex-col justify-between">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+        {/* Card 1: Zerodha Kite Connect */}
+        <div className="bg-white border border-slate-200/90 rounded-3xl p-6 shadow-xs flex flex-col justify-between hover:border-slate-300 transition-colors">
           <div>
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-mono font-semibold uppercase tracking-wider text-slate-400">
-                Broker Session
+                Broker Connection
               </span>
-              {isKiteLoading ? (
-                <span className="text-[10px] font-mono bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">
-                  Checking...
-                </span>
-              ) : isKiteConnected ? (
+              {isKiteConnected ? (
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-50 text-emerald-800 border border-emerald-300/60 font-mono">
                   <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                   CONNECTED
@@ -138,7 +101,7 @@ export default function DashboardOverviewPage() {
                 href="/profile"
                 className="text-xs font-bold text-emerald-700 hover:text-emerald-800 flex items-center gap-1 transition-colors"
               >
-                <span>View Funds & Margins</span>
+                <span>View Funds &amp; Margins</span>
                 <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M9 5l7 7-7 7" />
                 </svg>
@@ -160,7 +123,7 @@ export default function DashboardOverviewPage() {
         </div>
 
         {/* Card 2: 08:30 AM Stock Universe */}
-        <div className="bg-white border border-slate-200/90 rounded-3xl p-6 shadow-xs flex flex-col justify-between">
+        <div className="bg-white border border-slate-200/90 rounded-3xl p-6 shadow-xs flex flex-col justify-between hover:border-slate-300 transition-colors">
           <div>
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-mono font-semibold uppercase tracking-wider text-slate-400">
@@ -194,72 +157,372 @@ export default function DashboardOverviewPage() {
           </div>
         </div>
 
-        {/* Card 3: Execution Engine Specifications */}
-        <div className="bg-white border border-slate-200/90 rounded-3xl p-6 shadow-xs flex flex-col justify-between">
+        {/* Card 3: Quant Engine Actor */}
+        <div className="bg-white border border-slate-200/90 rounded-3xl p-6 shadow-xs flex flex-col justify-between hover:border-slate-300 transition-colors">
           <div>
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-mono font-semibold uppercase tracking-wider text-slate-400">
-                Strategy Config
+                Quant Engine Status
               </span>
-              <span className="text-[10px] font-mono font-bold bg-slate-100 text-slate-700 px-2 py-0.5 rounded-md">
-                INTRADAY ONLY
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-50 text-emerald-800 border border-emerald-300/60 font-mono">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                {isConnected ? "STREAMING" : "STANDBY"}
               </span>
             </div>
 
             <div className="text-xl font-black text-slate-900 mt-3 tracking-tight">
-              NSE Cash Equities
+              Single-Writer Actor
             </div>
 
-            <div className="mt-2 space-y-1.5 text-xs text-slate-500 font-mono">
-              <div className="flex items-center justify-between">
-                <span>Trading Segment:</span>
-                <strong className="text-slate-800">NSE EQ</strong>
-              </div>
-              <div className="flex items-center justify-between">
-                <span>Product Mode:</span>
-                <strong className="text-slate-800">MIS (5x Leverage)</strong>
-              </div>
-              <div className="flex items-center justify-between">
-                <span>Execution Window:</span>
-                <strong className="text-slate-800">09:15 - 15:15 IST</strong>
-              </div>
-            </div>
+            <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+              Lock-free [512]StockMetrics layout streaming 1.0s unified snapshots with Time-of-Day RVOL and anti-spoof depth.
+            </p>
           </div>
 
           <div className="mt-5 pt-4 border-t border-slate-100 flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-600">Zero Overnight Risk</span>
-            <span className="text-[10px] font-mono text-slate-400">Engine V1</span>
+            <Link
+              href="/leaderboard"
+              className="text-xs font-bold text-emerald-700 hover:text-emerald-800 flex items-center gap-1 transition-colors"
+            >
+              <span>View Leaderboard</span>
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M9 5l7 7-7 7" />
+              </svg>
+            </Link>
+            <span className="text-[10px] font-mono text-slate-400">1.0s Cadence</span>
           </div>
         </div>
       </div>
 
       {/* =========================================================================
-          3. Quick Action & Pipeline Roadmap Banner
+          3. Live Market Pulse & Index Regime Snapshot
           ========================================================================= */}
-      <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 text-white rounded-3xl p-6 sm:p-7 shadow-sm">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+      {snapshot?.market_pulse && (
+        <div className="bg-white border border-slate-200/90 rounded-3xl p-5 sm:p-6 shadow-xs">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              {/* <div className="w-10 h-10 rounded-2xl bg-slate-900 text-white flex items-center justify-center font-black font-mono text-sm shrink-0">
+                MP
+              </div> */}
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-mono font-bold text-slate-900 uppercase tracking-wider">
+                    Market Pulse &amp; Breadth
+                  </span>
+                  <span
+                    className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full ${
+                      snapshot.market_pulse.market_regime === "BULLISH_EXPANSION"
+                        ? "bg-emerald-50 text-emerald-800 border border-emerald-300"
+                        : snapshot.market_pulse.market_regime === "BEARISH_EXPANSION"
+                        ? "bg-rose-50 text-rose-800 border border-rose-300"
+                        : "bg-amber-50 text-amber-800 border border-amber-300"
+                    }`}
+                  >
+                    {snapshot.market_pulse.market_regime.replace("_", " ")}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Index momentum and breadth ratio across all 213 tracked NSE F&amp;O cash equities.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-4 sm:gap-6 shrink-0 font-mono text-xs">
+              <div>
+                <span className="text-[10px] text-slate-400 block uppercase">Nifty 50</span>
+                <span className="font-bold text-slate-900">
+                  {snapshot.market_pulse.nifty_ltp > 0
+                    ? `₹${snapshot.market_pulse.nifty_ltp.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`
+                    : "—"}
+                </span>
+                <span
+                  className={`ml-1.5 font-semibold text-[11px] ${
+                    snapshot.market_pulse.nifty_change_percent >= 0 ? "text-emerald-700" : "text-rose-700"
+                  }`}
+                >
+                  {snapshot.market_pulse.nifty_change_percent >= 0 ? "+" : ""}
+                  {snapshot.market_pulse.nifty_change_percent.toFixed(2)}%
+                </span>
+              </div>
+
+              <div className="h-7 w-px bg-slate-200" />
+
+              <div>
+                <span className="text-[10px] text-slate-400 block uppercase">Bank Nifty</span>
+                <span className="font-bold text-slate-900">
+                  {snapshot.market_pulse.banknifty_ltp > 0
+                    ? `₹${snapshot.market_pulse.banknifty_ltp.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`
+                    : "—"}
+                </span>
+                <span
+                  className={`ml-1.5 font-semibold text-[11px] ${
+                    snapshot.market_pulse.banknifty_change_percent >= 0 ? "text-emerald-700" : "text-rose-700"
+                  }`}
+                >
+                  {snapshot.market_pulse.banknifty_change_percent >= 0 ? "+" : ""}
+                  {snapshot.market_pulse.banknifty_change_percent.toFixed(2)}%
+                </span>
+              </div>
+
+              <div className="h-7 w-px bg-slate-200" />
+
+              <div>
+                <span className="text-[10px] text-slate-400 block uppercase">Breadth &gt; VWAP</span>
+                <span className="font-bold text-slate-900">
+                  {(snapshot.market_pulse.breadth_above_vwap * 100).toFixed(0)}%
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          4. Top Signal Outliers Teaser (Leaderboard Sneak Peek)
+          ========================================================================= */}
+      <div className="bg-white border border-slate-200/90 rounded-3xl p-6 shadow-xs">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5">
           <div>
-            <h3 className="text-base sm:text-lg font-bold">
-              Algo Trading Execution Pipeline
-            </h3>
-            <p className="text-xs text-slate-400 mt-1 max-w-xl leading-relaxed">
-              <strong>Phase 1 Active:</strong> Daily Kite Authentication &amp; 08:30 AM Universal Instrument Scanner. Strategy signals, order placement, and live position risk management will activate in upcoming phases.
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-mono font-bold text-slate-900 uppercase tracking-wider">
+                High-Probability Signal Teaser
+              </span>
+              <span className="text-[10px] font-mono font-bold bg-slate-100 text-slate-700 px-2 py-0.5 rounded-md">
+                EV ≥ +0.25R
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Top statistical directional candidates ranked by Composite Relative Strength and anti-spoof depth.
             </p>
           </div>
 
-          <div className="flex items-center gap-3 shrink-0">
-            <Link
-              href="/universe"
-              className="text-xs font-bold px-4 py-2.5 rounded-xl bg-white text-slate-900 hover:bg-slate-100 transition-all active:scale-95"
-            >
-              Open Scanner
-            </Link>
+          <Link
+            href="/leaderboard"
+            className="text-xs font-bold text-emerald-700 hover:text-emerald-800 flex items-center gap-1 transition-colors self-start sm:self-auto"
+          >
+            <span>View All Ranked Stocks</span>
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M9 5l7 7-7 7" />
+            </svg>
+          </Link>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Bullish Teaser Card */}
+          <div className="border border-emerald-200/90 bg-emerald-50/30 rounded-2xl p-4 sm:p-5 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center justify-between">
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-emerald-100/80 text-emerald-900 border border-emerald-300">
+                  TOP BULLISH (LONG)
+                </span>
+                <span className="text-[11px] font-mono font-bold text-emerald-800">
+                  {topBullish ? `EV: +${topBullish.ev.toFixed(2)}R` : "Scanning..."}
+                </span>
+              </div>
+
+              {topBullish ? (
+                <div className="mt-3">
+                  <div className="flex items-baseline justify-between">
+                    <div>
+                      <h4 className="text-lg font-black text-slate-900 font-mono tracking-tight">
+                        {topBullish.symbol}
+                      </h4>
+                      <span className="text-[11px] font-mono text-slate-500">
+                        {topBullish.sector}
+                      </span>
+                    </div>
+                    <div className="text-right font-mono">
+                      <div className="text-base font-black text-slate-900">
+                        ₹{topBullish.ltp.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+                      </div>
+                      <div className="text-xs font-bold text-emerald-700">
+                        +{topBullish.change_percent.toFixed(2)}%
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    {decodeReasonFlags(topBullish.reasons).map((b, i) => (
+                      <span
+                        key={i}
+                        className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-emerald-100/90 text-emerald-900 border border-emerald-200"
+                      >
+                        {b.label}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500 mt-4 leading-relaxed font-mono">
+                  Scanning order book tape for institutional bullish push-off confluences...
+                </p>
+              )}
+            </div>
+
+            <div className="mt-4 pt-3 border-t border-emerald-200/60 flex items-center justify-between text-xs font-mono">
+              <span className="text-slate-500">Win Rate Target:</span>
+              <strong className="text-emerald-800 font-bold">
+                {topBullish ? `${(topBullish.p_win * 100).toFixed(0)}%` : "60% - 70%"}
+              </strong>
+            </div>
+          </div>
+
+          {/* Bearish Teaser Card */}
+          <div className="border border-rose-200/90 bg-rose-50/30 rounded-2xl p-4 sm:p-5 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center justify-between">
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-rose-100/80 text-rose-900 border border-rose-300">
+                  TOP BEARISH (SHORT)
+                </span>
+                <span className="text-[11px] font-mono font-bold text-rose-800">
+                  {topBearish ? `EV: +${topBearish.ev.toFixed(2)}R` : "Scanning..."}
+                </span>
+              </div>
+
+              {topBearish ? (
+                <div className="mt-3">
+                  <div className="flex items-baseline justify-between">
+                    <div>
+                      <h4 className="text-lg font-black text-slate-900 font-mono tracking-tight">
+                        {topBearish.symbol}
+                      </h4>
+                      <span className="text-[11px] font-mono text-slate-500">
+                        {topBearish.sector}
+                      </span>
+                    </div>
+                    <div className="text-right font-mono">
+                      <div className="text-base font-black text-slate-900">
+                        ₹{topBearish.ltp.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+                      </div>
+                      <div className="text-xs font-bold text-rose-700">
+                        {topBearish.change_percent.toFixed(2)}%
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    {decodeReasonFlags(topBearish.reasons).map((b, i) => (
+                      <span
+                        key={i}
+                        className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-rose-100/90 text-rose-900 border border-rose-200"
+                      >
+                        {b.label}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500 mt-4 leading-relaxed font-mono">
+                  Scanning order book tape for institutional bearish breakdown confluences...
+                </p>
+              )}
+            </div>
+
+            <div className="mt-4 pt-3 border-t border-rose-200/60 flex items-center justify-between text-xs font-mono">
+              <span className="text-slate-500">Win Rate Target:</span>
+              <strong className="text-rose-800 font-bold">
+                {topBearish ? `${(topBearish.p_win * 100).toFixed(0)}%` : "60% - 70%"}
+              </strong>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* =========================================================================
+          5. Account Margins & Execution Guardrails
+          ========================================================================= */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+        {/* Card A: Account Margins (When connected) */}
+        <div className="bg-white border border-slate-200/90 rounded-3xl p-6 shadow-xs flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-mono font-semibold uppercase tracking-wider text-slate-400">
+                Capital &amp; Buying Power
+              </span>
+              <span className="text-[10px] font-mono font-bold bg-slate-100 text-slate-700 px-2 py-0.5 rounded-md">
+                EQUITY SEGMENT
+              </span>
+            </div>
+
+            {kiteProfile?.equity_margin ? (
+              <div className="mt-4 space-y-2.5 font-mono text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500">Available Cash:</span>
+                  <strong className="text-slate-900 font-bold text-sm">
+                    ₹{kiteProfile.equity_margin.available_cash.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+                  </strong>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500">Utilized Margin:</span>
+                  <strong className="text-slate-900 font-bold">
+                    ₹{kiteProfile.equity_margin.utilised_debits.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+                  </strong>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500">Collateral Liquid:</span>
+                  <strong className="text-slate-900 font-bold">
+                    ₹{kiteProfile.equity_margin.collateral.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+                  </strong>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-4 text-xs text-slate-500 leading-relaxed font-mono">
+                {isKiteConnected
+                  ? "Loading live margin balances from Zerodha Kite..."
+                  : "Login to Zerodha Kite to view live buying power and intraday margin allocation."}
+              </div>
+            )}
+          </div>
+
+          <div className="mt-5 pt-4 border-t border-slate-100 flex items-center justify-between">
             <Link
               href="/profile"
-              className="text-xs font-bold px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-all active:scale-95"
+              className="text-xs font-bold text-emerald-700 hover:text-emerald-800 flex items-center gap-1 transition-colors"
             >
-              Kite Profile
+              <span>Detailed Account Margins</span>
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M9 5l7 7-7 7" />
+              </svg>
             </Link>
+            <span className="text-[10px] font-mono text-slate-400">MIS 5x Buying Power</span>
+          </div>
+        </div>
+
+        {/* Card B: Strategy Execution Guardrails */}
+        <div className="bg-white border border-slate-200/90 rounded-3xl p-6 shadow-xs flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-mono font-semibold uppercase tracking-wider text-slate-400">
+                Strategy Guardrails
+              </span>
+              <span className="text-[10px] font-mono font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded-md">
+                SAFETY LAYER
+              </span>
+            </div>
+
+            <div className="mt-4 space-y-2 text-xs font-mono text-slate-600">
+              <div className="flex items-center justify-between">
+                <span>Trading Segment:</span>
+                <strong className="text-slate-900 font-bold">NSE EQ (Cash Only)</strong>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>Execution Mode:</span>
+                <strong className="text-slate-900 font-bold">MIS Intraday (5x)</strong>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>Execution Window:</span>
+                <strong className="text-slate-900 font-bold">09:15 - 15:15 IST</strong>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>Overnight Position Risk:</span>
+                <strong className="text-emerald-700 font-bold">0.00% (Strict Square-off)</strong>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-5 pt-4 border-t border-slate-100 flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-600">Phase 2 Ranking Active</span>
+            <span className="text-[10px] font-mono text-slate-400">Engine V2.4 Pro</span>
           </div>
         </div>
       </div>

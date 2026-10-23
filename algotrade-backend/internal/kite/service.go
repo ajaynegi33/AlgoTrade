@@ -205,6 +205,17 @@ func (s *Service) GetStatus() StatusResponse {
 	}
 }
 
+// GetSession returns a copy of the active session info, or nil if no active session
+func (s *Service) GetSession() *SessionInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.session == nil || isSessionExpired(s.session.CreatedAt) {
+		return nil
+	}
+	cp := *s.session
+	return &cp
+}
+
 // GetClient returns the underlying initialized KiteConnect client
 func (s *Service) GetClient() *kiteconnect.Client {
 	s.mu.RLock()

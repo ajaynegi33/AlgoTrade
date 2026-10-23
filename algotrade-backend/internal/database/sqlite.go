@@ -117,6 +117,51 @@ func runMigrations(db *sql.DB) error {
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_scanned_stocks_date ON scanned_stocks(scan_date);`,
+		`CREATE TABLE IF NOT EXISTS sector_metadata (
+			tradingsymbol TEXT PRIMARY KEY,
+			sector_name TEXT NOT NULL,
+			sector_token INTEGER NOT NULL DEFAULT 0,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE TABLE IF NOT EXISTS historical_tod_baselines (
+			instrument_token INTEGER NOT NULL,
+			slot_idx INTEGER NOT NULL,
+			median_volume INTEGER NOT NULL,
+			atr14 REAL NOT NULL,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (instrument_token, slot_idx)
+		);`,
+		`CREATE TABLE IF NOT EXISTS historical_5m_bars (
+			instrument_token INTEGER NOT NULL,
+			bar_time DATETIME NOT NULL,
+			open REAL NOT NULL,
+			high REAL NOT NULL,
+			low REAL NOT NULL,
+			close REAL NOT NULL,
+			volume INTEGER NOT NULL,
+			PRIMARY KEY (instrument_token, bar_time)
+		);`,
+		`CREATE TABLE IF NOT EXISTS probability_calibration_matrix (
+			factor_key TEXT PRIMARY KEY,
+			win_weight REAL NOT NULL,
+			sample_count INTEGER NOT NULL DEFAULT 0,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE TABLE IF NOT EXISTS engine_signals (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			signal_time DATETIME NOT NULL,
+			instrument_token INTEGER NOT NULL,
+			tradingsymbol TEXT NOT NULL,
+			score REAL NOT NULL,
+			ev REAL NOT NULL,
+			p_win REAL NOT NULL,
+			ltp REAL NOT NULL,
+			vwap REAL NOT NULL,
+			stop_proxy REAL NOT NULL,
+			target_proxy REAL NOT NULL,
+			reasons INTEGER NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_engine_signals_time ON engine_signals(signal_time);`,
 	}
 
 	for _, query := range queries {

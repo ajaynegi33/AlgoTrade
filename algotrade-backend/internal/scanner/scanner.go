@@ -69,7 +69,7 @@ func (s *Service) RunScan(force bool) (*UniverseSummary, error) {
 	// If not forcing, check if we already have today's scanned universe
 	if !force {
 		existing, err := s.GetUniverse(todayIST)
-		if err == nil && existing.TotalStocks > 0 {
+		if err == nil && existing.ScanDate == todayIST && existing.TotalStocks >= 150 {
 			slog.Info("Using cached stock universe for today", "date", todayIST, "stocks_count", existing.TotalStocks)
 			return existing, nil
 		}
@@ -96,8 +96,8 @@ func (s *Service) RunScan(force bool) (*UniverseSummary, error) {
 			instrument_token, tradingsymbol, name, exchange, segment, instrument_type,
 			lot_size, tick_size, last_price, scan_date, updated_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(tradingsymbol) DO UPDATE SET
-			instrument_token = excluded.instrument_token,
+		ON CONFLICT(instrument_token) DO UPDATE SET
+			tradingsymbol = excluded.tradingsymbol,
 			name = excluded.name,
 			lot_size = excluded.lot_size,
 			tick_size = excluded.tick_size,
@@ -201,7 +201,8 @@ func (s *Service) GetUniverse(date string) (*UniverseSummary, error) {
 	}
 
 	if len(stocks) == 0 {
-		return nil, fmt.Errorf("no scanned stocks found for date %s", date)
+		// If requested date has no scanned stocks, fallback to latest cached scan
+		return s.fallbackUniverse()
 	}
 
 	return &UniverseSummary{

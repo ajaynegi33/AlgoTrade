@@ -43,9 +43,45 @@ func TestScannerDatabasePersistence(t *testing.T) {
 
 	service := NewService(db, nil)
 
-	// Verify querying nonexistent date returns error
+	// Verify querying nonexistent date returns error when table is empty
 	_, err = service.GetUniverse("2099-01-01")
 	if err == nil {
-		t.Fatal("Expected error when querying nonexistent date")
+		t.Fatal("Expected error when querying nonexistent date on empty db")
+	}
+
+	// Insert a baseline stock for 2026-10-22
+	_, err = db.Exec(`
+		INSERT INTO scanned_stocks (instrument_token, tradingsymbol, name, exchange, segment, instrument_type, lot_size, tick_size, last_price, scan_date)
+		VALUES (4774913, 'ICICIPRULI', 'ICICI PRU LIFE', 'NSE', 'NSE', 'EQ', 1, 0.05, 550.0, '2026-10-22')
+	`)
+	if err != nil {
+		t.Fatalf("Failed to insert initial stock: %v", err)
+	}
+
+	// Verify querying a nonexistent date now returns the fallback universe
+	fb, err := service.GetUniverse("2099-01-01")
+	if err != nil {
+		t.Fatalf("Expected fallback universe, got error: %v", err)
+	}
+	if fb.TotalStocks != 1 || fb.Stocks[0].Tradingsymbol != "ICICIPRULI" {
+		t.Fatalf("Unexpected fallback stocks: %+v", fb.Stocks)
+	}
+
+	// Test Upsert with symbol rename (ICICIPRULI -> ICICILIFE with same token)
+	_, err = db.Exec(`
+		INSERT INTO scanned_stocks (instrument_token, tradingsymbol, name, exchange, segment, instrument_type, lot_size, tick_size, last_price, scan_date)
+		VALUES (4774913, 'ICICILIFE', 'ICICI LIFE INSURANCE', 'NSE', 'NSE', 'EQ', 1, 0.05, 560.0, '2026-10-23')
+		ON CONFLICT(instrument_token) DO UPDATE SET
+			tradingsymbol = excluded.tradingsymbol,
+			name = excluded.name,
+			scan_date = excluded.scan_date;
+	`)
+	if err != nil {
+		t.Fatalf("Token-based upsert failed on symbol rename: %v", err)
+	}
+
+	u23, err := service.GetUniverse("2026-10-23")
+	if err != nil || u23.Stocks[0].Tradingsymbol != "ICICILIFE" {
+		t.Fatalf("Expected updated symbol ICICILIFE, got: %+v, err: %v", u23, err)
 	}
 }

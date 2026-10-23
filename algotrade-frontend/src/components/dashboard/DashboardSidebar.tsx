@@ -44,6 +44,7 @@ export default function DashboardSidebar({
   const displayEmail = kiteProfile?.email || user?.email;
 
   const isDashboardActive = pathname === "/dashboard";
+  const isLeaderboardActive = pathname.startsWith("/leaderboard");
   const isUniverseActive = pathname.startsWith("/universe");
   const isProfileActive = pathname.startsWith("/profile");
 
@@ -71,7 +72,7 @@ export default function DashboardSidebar({
       <aside
         className={`fixed md:sticky top-0 left-0 z-50 h-screen bg-white border-r border-slate-200/90 flex flex-col justify-between shrink-0 select-none transition-[width,transform] duration-250 ease-[cubic-bezier(0.23,1,0.32,1)] ${
           isMobileOpen ? "translate-x-0 w-72 shadow-2xl" : "-translate-x-full md:translate-x-0"
-        } ${isCollapsed ? "md:w-20" : "md:w-64"}`}
+        } ${isCollapsed ? "md:w-20" : "md:w-50"}`}
       >
         {/* Floating Circular Toggle Button on the Border */}
         <button
@@ -79,7 +80,7 @@ export default function DashboardSidebar({
           onClick={onToggleCollapse}
           title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
           aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          className="hidden md:flex absolute -right-3.5 top-7 z-30 w-7 h-7 rounded-full bg-white border border-slate-200/90 shadow-2xs hover:shadow-xs items-center justify-center text-slate-500 hover:text-slate-900 transition-all hover:scale-105 active:scale-95 cursor-pointer"
+          className="hidden md:flex absolute -right-3.5 top-16 z-30 w-7 h-7 rounded-full bg-white border border-slate-200/90 shadow-2xs hover:shadow-xs items-center justify-center text-slate-500 hover:text-slate-900 transition-all hover:scale-105 active:scale-95 cursor-pointer"
         >
           <svg
             className={`w-3.5 h-3.5 transition-transform duration-250 ease-[cubic-bezier(0.23,1,0.32,1)] ${
@@ -146,7 +147,7 @@ export default function DashboardSidebar({
             href="/dashboard"
             onClick={onCloseMobile}
             title="Dashboard Overview"
-            className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-2xl transition-all group cursor-pointer active:scale-[0.98] ${
+            className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl transition-all group cursor-pointer active:scale-[0.98] ${
               isDashboardActive
                 ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-500/20 shadow-2xs"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 font-medium"
@@ -168,6 +169,42 @@ export default function DashboardSidebar({
               }`}
             >
               Dashboard
+            </span>
+          </Link>
+          
+          {/* Quantitative Leaderboard */}
+          <Link
+            href="/leaderboard"
+            onClick={onCloseMobile}
+            title="Quantitative Leaderboard & Screener"
+            className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-2xl transition-all group cursor-pointer active:scale-[0.98] ${
+              isLeaderboardActive
+                ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-500/20 shadow-2xs"
+                : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 font-medium"
+            } ${isCollapsed ? "md:justify-center md:px-0" : ""}`}
+          >
+            <svg
+              className={`w-5 h-5 shrink-0 transition-colors ${
+                isLeaderboardActive ? "text-emerald-700" : "text-slate-500 group-hover:text-slate-900"
+              }`}
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M16 8v8m-4-5v5m-4-2v2m-2 4h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+              />
+            </svg>
+
+            <span
+              className={`text-xs font-semibold whitespace-nowrap overflow-hidden transition-all duration-150 ${
+                isCollapsed ? "md:opacity-0 md:w-0 md:hidden" : "opacity-100"
+              }`}
+            >
+              Leaderboard
             </span>
           </Link>
 

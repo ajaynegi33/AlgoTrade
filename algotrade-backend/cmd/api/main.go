@@ -13,10 +13,12 @@ import (
 	"github.com/ajaynegi33/AlgoTrade/internal/auth"
 	"github.com/ajaynegi33/AlgoTrade/internal/config"
 	"github.com/ajaynegi33/AlgoTrade/internal/database"
+	"github.com/ajaynegi33/AlgoTrade/internal/engine"
 	"github.com/ajaynegi33/AlgoTrade/internal/kite"
 	"github.com/ajaynegi33/AlgoTrade/internal/response"
 	"github.com/ajaynegi33/AlgoTrade/internal/scanner"
 	"github.com/ajaynegi33/AlgoTrade/internal/user"
+	"github.com/ajaynegi33/AlgoTrade/internal/ws"
 )
 
 func main() {
@@ -65,6 +67,26 @@ func main() {
 	scannerService := scanner.NewService(db, kiteService)
 	scannerHandler := scanner.NewHandler(scannerService)
 
+	// Initialize Kite Ticker WebSocket Client (Single shared broker connection)
+	tickerClient := kite.NewTickerClient(kiteService)
+	tickerClient.Start()
+	defer tickerClient.Stop()
+
+	// Initialize Kite Historical Rate-Limited Service (2.5 req/s)
+	histService := kite.NewHistoricalService(db, kiteService)
+
+	// Initialize Dedicated Client WebSocket Hub
+	wsHub := ws.NewClientHub()
+
+	// Initialize Single-Writer Quant Engine Actor
+	engineActor := engine.NewActor(db, tickerClient, histService, wsHub, scannerService)
+	if err := engineActor.Start(); err != nil {
+		slog.Error("Failed to start Engine Actor", "error", err)
+	}
+	defer engineActor.Stop()
+
+	engineHandler := engine.NewHandler(engineActor, wsHub)
+
 	// Initialize Handlers
 	authHandler := auth.NewHandler(cfg, userStore)
 	userHandler := user.NewHandler(userStore)
@@ -99,6 +121,11 @@ func main() {
 	// Stock Universe & 08:30 AM Scanner Routes
 	mux.HandleFunc("GET /api/scanner/universe", scannerHandler.GetUniverse)
 	mux.Handle("POST /api/scanner/run", requireAuth(http.HandlerFunc(scannerHandler.RunScan)))
+
+	// Real-Time Engine & WebSocket Stream Routes
+	mux.HandleFunc("GET /ws/live", wsHub.ServeWS)
+	mux.HandleFunc("GET /api/engine/status", engineHandler.GetStatus)
+	mux.HandleFunc("GET /api/engine/historical-status", engineHandler.GetHistoricalStatus)
 
 	// Deferred non-blocking initial scan check on startup
 	go func() {
