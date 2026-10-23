@@ -45,3 +45,20 @@ func (h *Handler) GetHistoricalStatus(w http.ResponseWriter, r *http.Request) {
 		"error":     errMsg,
 	})
 }
+
+// GetStockDetail handles GET /api/stocks/{symbol}
+func (h *Handler) GetStockDetail(w http.ResponseWriter, r *http.Request) {
+	symbol := r.PathValue("symbol")
+	if symbol == "" {
+		response.Error(w, http.StatusBadRequest, "INVALID_SYMBOL", "Stock symbol is required")
+		return
+	}
+
+	detail, found := h.actor.GetStockDetail(symbol)
+	if !found {
+		response.Error(w, http.StatusNotFound, "STOCK_NOT_FOUND", "Stock not found in tracked F&O universe")
+		return
+	}
+
+	response.Success(w, http.StatusOK, detail)
+}

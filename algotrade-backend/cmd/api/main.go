@@ -126,6 +126,7 @@ func main() {
 	mux.HandleFunc("GET /ws/live", wsHub.ServeWS)
 	mux.HandleFunc("GET /api/engine/status", engineHandler.GetStatus)
 	mux.HandleFunc("GET /api/engine/historical-status", engineHandler.GetHistoricalStatus)
+	mux.HandleFunc("GET /api/stocks/{symbol}", engineHandler.GetStockDetail)
 
 	// Deferred non-blocking initial scan check on startup
 	go func() {

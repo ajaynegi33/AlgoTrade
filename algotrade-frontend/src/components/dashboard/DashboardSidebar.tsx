@@ -44,6 +44,7 @@ export default function DashboardSidebar({
   const displayEmail = kiteProfile?.email || user?.email;
 
   const isDashboardActive = pathname === "/dashboard";
+  const isSearchActive = pathname.startsWith("/search");
   const isLeaderboardActive = pathname.startsWith("/leaderboard");
   const isUniverseActive = pathname.startsWith("/universe");
   const isProfileActive = pathname.startsWith("/profile");
@@ -169,6 +170,39 @@ export default function DashboardSidebar({
               }`}
             >
               Dashboard
+            </span>
+          </Link>
+
+          {/* Search & Outliers Hub */}
+          <Link
+            href="/search"
+            onClick={onCloseMobile}
+            title="Search & Market Outliers"
+            className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-2xl transition-all group cursor-pointer active:scale-[0.98] ${
+              isSearchActive
+                ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-500/20 shadow-2xs"
+                : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 font-medium"
+            } ${isCollapsed ? "md:justify-center md:px-0" : ""}`}
+          >
+            <svg
+              className={`w-5 h-5 shrink-0 transition-colors ${
+                isSearchActive ? "text-emerald-700" : "text-slate-500 group-hover:text-slate-900"
+              }`}
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <circle cx="11" cy="11" r="8" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35" />
+            </svg>
+
+            <span
+              className={`text-xs font-semibold whitespace-nowrap overflow-hidden transition-all duration-150 ${
+                isCollapsed ? "md:opacity-0 md:w-0 md:hidden" : "opacity-100"
+              }`}
+            >
+              Search
             </span>
           </Link>
           

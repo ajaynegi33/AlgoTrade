@@ -13,7 +13,7 @@ func TestStockMetricsAlignment(t *testing.T) {
 	if size%8 != 0 {
 		t.Fatalf("StockMetrics size (%d bytes) is not divisible by 8! Contains unaligned padding.", size)
 	}
-	if size != 3856 {
+	if size != 3976 {
 		t.Logf("StockMetrics size: %d bytes (aligned to 8-byte boundary)", size)
 	}
 
@@ -160,3 +160,48 @@ func TestSectorBankIndexMapping(t *testing.T) {
 		t.Errorf("Expected +1.0%% change, got %f", secChg)
 	}
 }
+
+func TestGetStockDetail_ETERNAL(t *testing.T) {
+	actor := NewActor(nil, nil, nil, nil, nil)
+	idx := actor.addStock(1304833, "ETERNAL", 1, 0.05)
+	s := &actor.stocks[idx]
+	s.LTP = 316.60
+	s.PrevClose = 304.45
+	s.ExchangeVWAP = 311.20
+	s.BidLevels[0] = DepthLevel{Price: 325.80, Qty: 184583, Orders: 20}
+	s.AskLevels[0] = DepthLevel{Price: 306.90, Qty: 4547, Orders: 2}
+
+	// 1. Exact match lookup
+	detail, found := actor.GetStockDetail("ETERNAL")
+	if !found || detail == nil {
+		t.Fatalf("Expected GetStockDetail(ETERNAL) to return true, got false")
+	}
+	if detail.Symbol != "ETERNAL" {
+		t.Errorf("Expected symbol ETERNAL, got %s", detail.Symbol)
+	}
+	if detail.Token != 1304833 {
+		t.Errorf("Expected token 1304833, got %d", detail.Token)
+	}
+	if detail.Bids[0].Price != 325.80 {
+		t.Errorf("Expected rounded Bid price 325.80, got %f", detail.Bids[0].Price)
+	}
+
+	// 2. Case invariance lookup
+	detailLower, foundLower := actor.GetStockDetail("eternal")
+	if !foundLower || detailLower == nil {
+		t.Fatalf("Expected GetStockDetail(eternal) to be case-insensitive, got false")
+	}
+
+	// 3. Whitespace invariance lookup
+	detailSpace, foundSpace := actor.GetStockDetail("  ETERNAL  ")
+	if !foundSpace || detailSpace == nil {
+		t.Fatalf("Expected GetStockDetail('  ETERNAL  ') to handle whitespace, got false")
+	}
+
+	// 4. Non-existent symbol lookup
+	_, foundMissing := actor.GetStockDetail("INVALID_XYZ")
+	if foundMissing {
+		t.Errorf("Expected GetStockDetail(INVALID_XYZ) to return false, got true")
+	}
+}
+

@@ -8,6 +8,7 @@ import {
   KiteStatusData,
   KiteUserProfileData,
   UniverseSummaryData,
+  StockDetailData,
 } from "./types";
 
 const API_BASE_URL =
@@ -300,5 +301,29 @@ export async function triggerUniverseScan(): Promise<UniverseSummaryData> {
     last_updated: res.last_updated,
     stocks: res.universe,
   };
+}
+
+export async function getStockDetail(symbol: string): Promise<StockDetailData> {
+  const cleanSymbol = encodeURIComponent(symbol.trim().toUpperCase());
+  const res = await fetch(`${API_BASE_URL}/api/stocks/${cleanSymbol}`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new ApiError(`Stock ${symbol} not found or engine offline`, "STOCK_DETAIL_ERROR", res.status);
+  }
+  const json: ApiResponse<StockDetailData> | StockDetailData = await res.json();
+  const stockData: StockDetailData | undefined =
+    "success" in json && json.success && json.data
+      ? json.data
+      : "symbol" in json && json.symbol
+      ? (json as StockDetailData)
+      : undefined;
+
+  if (!stockData) {
+    const errorMsg = ("error" in json && json.error?.message) || `Failed to fetch stock ${symbol}`;
+    const errorCode = ("error" in json && json.error?.code) || "STOCK_DETAIL_ERROR";
+    throw new ApiError(errorMsg, errorCode);
+  }
+  return stockData;
 }
 

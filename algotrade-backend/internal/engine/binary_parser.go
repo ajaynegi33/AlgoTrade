@@ -20,6 +20,8 @@ type ParsedTick struct {
 	RawBuyerRatio float32
 	ExchangeTime  int64
 	IsIndex       bool
+	BidLevels     [5]DepthLevel
+	AskLevels     [5]DepthLevel
 }
 
 // ParseBinaryFrame unpacks a multi-packet binary frame from Zerodha Kite Ticker.
@@ -106,9 +108,24 @@ func parseEquityPacket(pkt []byte) ParsedTick {
 	// 5-Level Market Depth (Bids: 64..123, Asks: 124..183)
 	// Weighted Anti-Spoof: Levels 1-2 (Top of Book) @ 60%, Levels 3-5 (Outer Book) @ 40%
 	var bidTop2, bidRest3, askTop2, askRest3 uint64
+	var bidLevels [5]DepthLevel
+	var askLevels [5]DepthLevel
+
 	for lvl := 0; lvl < 5; lvl++ {
-		bQty := uint64(binary.BigEndian.Uint32(pkt[64+(lvl*12) : 68+(lvl*12)]))
-		aQty := uint64(binary.BigEndian.Uint32(pkt[124+(lvl*12) : 128+(lvl*12)]))
+		bOff := 64 + (lvl * 12)
+		bQtyU32 := binary.BigEndian.Uint32(pkt[bOff : bOff+4])
+		bPrice := float32(int32(binary.BigEndian.Uint32(pkt[bOff+4:bOff+8]))) / 100.0
+		bOrders := binary.BigEndian.Uint16(pkt[bOff+8 : bOff+10])
+		bidLevels[lvl] = DepthLevel{Price: bPrice, Qty: bQtyU32, Orders: bOrders}
+
+		aOff := 124 + (lvl * 12)
+		aQtyU32 := binary.BigEndian.Uint32(pkt[aOff : aOff+4])
+		aPrice := float32(int32(binary.BigEndian.Uint32(pkt[aOff+4:aOff+8]))) / 100.0
+		aOrders := binary.BigEndian.Uint16(pkt[aOff+8 : aOff+10])
+		askLevels[lvl] = DepthLevel{Price: aPrice, Qty: aQtyU32, Orders: aOrders}
+
+		bQty := uint64(bQtyU32)
+		aQty := uint64(aQtyU32)
 		if lvl < 2 {
 			bidTop2 += bQty
 			askTop2 += aQty
@@ -125,8 +142,8 @@ func parseEquityPacket(pkt []byte) ParsedTick {
 		rawRatio = float32(wBid / tot)
 	}
 
-	bid1Price := float32(int32(binary.BigEndian.Uint32(pkt[68:72]))) / 100.0
-	ask1Price := float32(int32(binary.BigEndian.Uint32(pkt[128:132]))) / 100.0
+	bid1Price := bidLevels[0].Price
+	ask1Price := askLevels[0].Price
 
 	return ParsedTick{
 		Token:         token,
@@ -142,5 +159,7 @@ func parseEquityPacket(pkt []byte) ParsedTick {
 		RawBuyerRatio: rawRatio,
 		ExchangeTime:  exchTime,
 		IsIndex:       false,
+		BidLevels:     bidLevels,
+		AskLevels:     askLevels,
 	}
 }

@@ -190,3 +190,65 @@ export function decodeReasonFlags(reasons: number): ReasonBadge[] {
   return badges;
 }
 
+export interface DepthLevelData {
+  price: number;
+  qty: number;
+  orders: number;
+}
+
+export interface SessionBarData {
+  timestamp: number;
+  time: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface StockDetailData {
+  symbol: string;
+  token: number;
+  sector: string;
+  sector_id: number;
+  lot_size: number;
+  tick_size: number;
+  is_tradeable: boolean;
+  ltp: number;
+  open: number;
+  high: number;
+  low: number;
+  prev_close: number;
+  change: number;
+  change_percent: number;
+  vwap: number;
+  vwap_distance: number;
+  vwap_distance_pct: number;
+  orh: number;
+  orl: number;
+  has_or15m: boolean;
+  clv: number;
+  atr14: number;
+  adx14: number;
+  volume: number;
+  rvol_session: number;
+  rvol_pace_5m: number;
+  bullish_score: number;
+  bearish_score: number;
+  composite_rs: number;
+  buyer_ratio: number;
+  aggressor_buy_ratio: number;
+  ev: number;
+  p_win: number;
+  stop_proxy: number;
+  target_proxy: number;
+  reasons: string[];
+  bids: DepthLevelData[];
+  asks: DepthLevelData[];
+  total_bid_qty: number;
+  total_ask_qty: number;
+  anti_spoof_ratio: number;
+  bars: SessionBarData[];
+  last_updated: number;
+}
+

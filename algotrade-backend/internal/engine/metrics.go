@@ -42,9 +42,17 @@ type OHLCVBar struct {
 	Timestamp int64   // 8 bytes (Exchange epoch seconds)
 }
 
+// DepthLevel represents a single tier in the 5-level market depth book (12 bytes)
+type DepthLevel struct {
+	Price  float32 // Price level in ₹
+	Qty    uint32  // Cumulative shares queued at this tier
+	Orders uint16  // Number of resting orders at this tier
+	_pad   uint16  // Explicit 2-byte alignment padding (12 bytes total)
+}
+
 // StockMetrics holds real-time quantitative state for a single stock.
 // Strict descending alignment layout: Zero internal compiler padding holes.
-// Total struct size: Exactly 3,856 bytes (divisible by 8).
+// Total struct size: Exactly 3,976 bytes (divisible by 8).
 type StockMetrics struct {
 	// -------------------------------------------------------------------------
 	// 1. Eight-Byte Types (Composite Arrays, float64, uint64, int64)
@@ -52,6 +60,10 @@ type StockMetrics struct {
 	// SessionBars: 75 five-minute bars (09:15 to 15:30 IST).
 	// 75 * 48 bytes = 3,600 bytes. Divisible by 8.
 	SessionBars       [75]OHLCVBar
+
+	// 5-Level Market Depth: 5 Bids (60B) + 5 Asks (60B) = 120 bytes. Divisible by 8.
+	BidLevels         [5]DepthLevel
+	AskLevels         [5]DepthLevel
 
 	LTP               float64 // Last Traded Price (₹)
 	ExchangeVWAP      float64 // Official Exchange VWAP (from bytes 12-15)
@@ -115,7 +127,7 @@ type StockMetrics struct {
 	// 32 - 27 = 5 bytes padding.
 	// -------------------------------------------------------------------------
 	_ [5]byte
-} // Total struct size: 3,792 + 32 + 32 = 3,856 bytes. Exact multiple of 8!
+} // Total struct size: 3,792 + 120 + 32 + 32 = 3,976 bytes. Exact multiple of 8!
 
 // SymbolString returns the null-trimmed string representation of the symbol
 func (s *StockMetrics) SymbolString() string {

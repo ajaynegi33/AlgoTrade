@@ -1,10 +1,11 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, Suspense } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import AuthGuard from "@/components/AuthGuard";
 import DashboardSidebar from "@/components/dashboard/DashboardSidebar";
+import { GlobalNavbarSearch } from "@/components/dashboard/GlobalNavbarSearch";
 import { useAuth } from "@/context/AuthContext";
 import { useTradingStore } from "@/store/useTradingStore";
 import { toast } from "sonner";
@@ -15,44 +16,47 @@ interface MarketCountdownState {
   isUrgent: boolean;
 }
 
+function TerminalHeaderTitle() {
+  const pathname = usePathname();
+
+  const title = useMemo(() => {
+    if (pathname.startsWith("/search/")) {
+      const sym = pathname.replace("/search/", "").toUpperCase();
+      return `${sym} Quant Cockpit`;
+    }
+    if (pathname.startsWith("/search")) {
+      return "Search & Market Outliers";
+    }
+    if (pathname.startsWith("/leaderboard")) {
+      return "Quantitative Leaderboard";
+    }
+    if (pathname.startsWith("/universe")) {
+      return "Stock Universe Scanner";
+    }
+    if (pathname.startsWith("/profile")) {
+      return "Kite Profile & Margins";
+    }
+    return "Trading Command Center";
+  }, [pathname]);
+
+  return (
+    <h1 className="text-sm sm:text-[22px] font-black text-slate-900 tracking-normal leading-tight truncate">
+      {title}
+    </h1>
+  );
+}
+
 export default function TerminalLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  const pathname = usePathname();
   const { user, logout } = useAuth();
   const { kiteStatus, fetchKiteStatus } = useTradingStore();
 
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isMobileOpen, setIsMobileOpen] = useState(false);
   const [marketCountdown, setMarketCountdown] = useState<MarketCountdownState | null>(null);
-
-  const pageHeaderInfo = useMemo(() => {
-    if (pathname.startsWith("/leaderboard")) {
-      return {
-        title: "Quantitative Leaderboard",
-        description:
-          "Real-time institutional ranking across 213 NSE F&O cash stocks with VWAP sweet spots, anti-spoof depth, relative strength, and pre-trade expected value (EV ≥ +0.25R).",
-      };
-    }
-    if (pathname.startsWith("/universe")) {
-      return {
-        title: "Stock Universe Scanner",
-        description: "08:30 AM NSE F&O Cash Equity master universe & high-liquidity filters.",
-      };
-    }
-    if (pathname.startsWith("/profile")) {
-      return {
-        title: "Kite Profile & Margins",
-        description: "Zerodha account credentials, live margins, and fund balances.",
-      };
-    }
-    return {
-      title: "Trading Command Center",
-      description: "Executive platform telemetry, market regime, and quant signals.",
-    };
-  }, [pathname]);
 
   // Load saved sidebar collapsed preference from localStorage
   useEffect(() => {
@@ -185,14 +189,16 @@ export default function TerminalLayout({
     <AuthGuard>
       <div className="min-h-screen bg-slate-50 text-slate-900 flex selection:bg-emerald-500/20 selection:text-emerald-900">
         {/* Collapsible Desktop & Mobile Drawer Sidenavbar */}
-        <DashboardSidebar
-          isCollapsed={isCollapsed}
-          onToggleCollapse={handleToggleCollapse}
-          isMobileOpen={isMobileOpen}
-          onCloseMobile={() => setIsMobileOpen(false)}
-          user={user}
-          onLogout={handleLogout}
-        />
+        <Suspense fallback={<div className="w-64 bg-white border-r border-slate-200/90 h-screen hidden md:block shrink-0" />}>
+          <DashboardSidebar
+            isCollapsed={isCollapsed}
+            onToggleCollapse={handleToggleCollapse}
+            isMobileOpen={isMobileOpen}
+            onCloseMobile={() => setIsMobileOpen(false)}
+            user={user}
+            onLogout={handleLogout}
+          />
+        </Suspense>
 
         {/* Main Terminal Container */}
         <div className="flex-1 flex flex-col min-w-0 overflow-y-auto">
@@ -213,13 +219,15 @@ export default function TerminalLayout({
                 </button>
 
                 <div className="min-w-0">
-                  <h1 className="text-sm sm:text-[22px] font-black text-slate-900 tracking-normal leading-tight truncate">
-                    {pageHeaderInfo.title}
-                  </h1>
-                  {/* <p className="text-[11px] text-slate-500 truncate hidden xl:block leading-none mt-1 max-w-xl">
-                    {pageHeaderInfo.description}
-                  </p> */}
+                  <Suspense fallback={<h1 className="text-sm sm:text-[22px] font-black text-slate-900 tracking-normal leading-tight">AlgoTrade</h1>}>
+                    <TerminalHeaderTitle />
+                  </Suspense>
                 </div>
+              </div>
+
+              {/* Center: Global Navbar Search */}
+              <div className="hidden md:flex flex-1 justify-center px-2 lg:px-4 max-w-lg lg:max-w-xl mx-auto">
+                <GlobalNavbarSearch />
               </div>
 
               {/* Right: Live Connection Telemetry Badges */}
@@ -287,7 +295,9 @@ export default function TerminalLayout({
 
           {/* Page Body */}
           <main className="flex-1 px-2 sm:px-2 lg:px-2 py-6 sm:py-8 max-w-7xl w-full mx-auto">
-            {children}
+            <Suspense fallback={null}>
+              {children}
+            </Suspense>
           </main>
         </div>
       </div>
