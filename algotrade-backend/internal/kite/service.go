@@ -1,10 +1,20 @@
 package kite
 
 import (
+	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,9 +56,14 @@ type EquityMargins struct {
 	Net            float64 `json:"net"`
 	AvailableCash  float64 `json:"available_cash"`
 	Collateral     float64 `json:"collateral"`
+	AdHocMargin    float64 `json:"adhoc_margin"`
+	IntradayPayin  float64 `json:"intraday_payin"`
 	OpeningBalance float64 `json:"opening_balance"`
 	LiveBalance    float64 `json:"live_balance"`
 	UtilisedDebits float64 `json:"utilised_debits"`
+	UtilisedPayout float64 `json:"utilised_payout"`
+	M2MRealised    float64 `json:"m2m_realised"`
+	M2MUnrealised  float64 `json:"m2m_unrealised"`
 }
 
 // UserProfileData represents the detailed authenticated Zerodha profile & funds
@@ -69,22 +84,43 @@ type UserProfileData struct {
 }
 
 type Service struct {
-	cfg     *config.Config
-	db      *sql.DB
-	client  *kiteconnect.Client
-	session *SessionInfo
-	mu      sync.RWMutex
+	cfg             *config.Config
+	db              *sql.DB
+	client          *kiteconnect.Client
+	httpClient      *http.Client
+	session         *SessionInfo
+	onAuthenticated []func()
+	mu              sync.RWMutex
 }
 
 // NewService instantiates the Kite service and attempts to restore existing sessions from SQLite
 func NewService(cfg *config.Config, db *sql.DB) *Service {
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   3 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          64,
+		MaxIdleConnsPerHost:   32,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   3 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	httpClient := &http.Client{
+		Transport: transport,
+		Timeout:   7 * time.Second,
+	}
+
 	s := &Service{
-		cfg: cfg,
-		db:  db,
+		cfg:        cfg,
+		db:         db,
+		httpClient: httpClient,
 	}
 
 	if cfg.IsKiteConfigured() {
 		s.client = kiteconnect.New(cfg.KiteAPIKey)
+		s.client.SetHTTPClient(httpClient)
 		// Attempt session restoration in background or synchronously
 		if err := s.restoreSession(); err != nil {
 			slog.Info("Kite session not restored", "reason", err.Error())
@@ -94,6 +130,29 @@ func NewService(cfg *config.Config, db *sql.DB) *Service {
 	}
 
 	return s
+}
+
+// RegisterOnAuthenticated registers a callback invoked whenever a Kite session becomes active
+func (s *Service) RegisterOnAuthenticated(fn func()) {
+	if fn == nil {
+		return
+	}
+	s.mu.Lock()
+	s.onAuthenticated = append(s.onAuthenticated, fn)
+	hasActive := s.session != nil && s.session.AccessToken != "" && !isSessionExpired(s.session.CreatedAt)
+	s.mu.Unlock()
+
+	if hasActive {
+		go fn()
+	}
+}
+
+func (s *Service) notifyAuthenticatedLocked() {
+	for _, fn := range s.onAuthenticated {
+		if fn != nil {
+			go fn()
+		}
+	}
 }
 
 // GetLoginURL returns the official Kite Connect OAuth login URL
@@ -160,6 +219,7 @@ func (s *Service) GenerateSession(requestToken string) (*SessionInfo, error) {
 
 	s.session = session
 	s.client.SetAccessToken(session.AccessToken)
+	s.notifyAuthenticatedLocked()
 
 	slog.Info("Zerodha Kite session authenticated and persisted successfully",
 		"user_id", session.UserID,
@@ -261,15 +321,144 @@ func (s *Service) GetProfile() (*UserProfileData, error) {
 			Net:            margins.Equity.Net,
 			AvailableCash:  margins.Equity.Available.Cash,
 			Collateral:     margins.Equity.Available.Collateral,
+			AdHocMargin:    margins.Equity.Available.AdHocMargin,
+			IntradayPayin:  margins.Equity.Available.IntradayPayin,
 			OpeningBalance: margins.Equity.Available.OpeningBalance,
 			LiveBalance:    margins.Equity.Available.LiveBalance,
 			UtilisedDebits: margins.Equity.Used.Debits,
+			UtilisedPayout: margins.Equity.Used.Payout,
+			M2MRealised:    margins.Equity.Used.M2MRealised,
+			M2MUnrealised:  margins.Equity.Used.M2MUnrealised,
 		}
 	} else {
 		slog.Warn("Failed to fetch equity margins from kite", "error", err)
 	}
 
 	return res, nil
+}
+
+// GetEquityMargins fetches live Zerodha equity margins directly
+func (s *Service) GetEquityMargins() (*EquityMargins, error) {
+	s.mu.RLock()
+	client := s.client
+	session := s.session
+	configured := s.cfg.IsKiteConfigured()
+	s.mu.RUnlock()
+
+	if !configured || client == nil || session == nil || session.AccessToken == "" || isSessionExpired(session.CreatedAt) {
+		return nil, ErrNoSession
+	}
+
+	margins, err := client.GetUserMargins()
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch equity margins: %w", err)
+	}
+
+	return &EquityMargins{
+		Net:            margins.Equity.Net,
+		AvailableCash:  margins.Equity.Available.Cash,
+		Collateral:     margins.Equity.Available.Collateral,
+		AdHocMargin:    margins.Equity.Available.AdHocMargin,
+		IntradayPayin:  margins.Equity.Available.IntradayPayin,
+		OpeningBalance: margins.Equity.Available.OpeningBalance,
+		LiveBalance:    margins.Equity.Available.LiveBalance,
+		UtilisedDebits: margins.Equity.Used.Debits,
+		UtilisedPayout: margins.Equity.Used.Payout,
+		M2MRealised:    margins.Equity.Used.M2MRealised,
+		M2MUnrealised:  margins.Equity.Used.M2MUnrealised,
+	}, nil
+}
+
+// RawModifyOrderPUT executes a direct PUT /orders/{variety}/{order_id} bypassing gokiteconnect's
+// omitempty struct tags so price=0.00 and trigger_price=0.00 are explicitly sent when mutating SL to MARKET,
+// and attaches market_protection=-1 for MARKET orders as required by Zerodha OMS.
+func (s *Service) RawModifyOrderPUT(
+	ctx context.Context,
+	variety, orderID, orderType string,
+	qty int,
+	price, triggerPrice float64,
+) (string, error) {
+	session := s.GetSession()
+	if session == nil || session.AccessToken == "" {
+		return "", ErrNoSession
+	}
+	if variety == "" {
+		variety = "regular"
+	}
+	if orderID == "" {
+		return "", errors.New("order_id cannot be empty")
+	}
+	if qty <= 0 {
+		return "", fmt.Errorf("invalid order modification quantity: %d", qty)
+	}
+
+	form := url.Values{}
+	form.Set("order_type", orderType)
+	form.Set("quantity", strconv.Itoa(qty))
+	form.Set("price", fmt.Sprintf("%.2f", price))
+	form.Set("trigger_price", fmt.Sprintf("%.2f", triggerPrice))
+	form.Set("validity", "DAY")
+	if orderType == "MARKET" {
+		form.Set("market_protection", "-1")
+	}
+
+	endpoint := fmt.Sprintf("https://api.kite.trade/orders/%s/%s", url.PathEscape(variety), url.PathEscape(orderID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("failed to build modify request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Kite-Version", "3")
+	req.Header.Set("Authorization", fmt.Sprintf("token %s:%s", session.APIKey, session.AccessToken))
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("kite modify PUT network error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 65536))
+	if err != nil {
+		return "", fmt.Errorf("failed to read modify response body: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("kite PUT /orders/%s/%s failed (HTTP %d): %s", variety, orderID, resp.StatusCode, string(body))
+	}
+
+	var envelope struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+		Data    struct {
+			OrderID string `json:"order_id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return "", fmt.Errorf("failed to decode kite modify response: %w", err)
+	}
+	if envelope.Status != "success" && envelope.Data.OrderID == "" {
+		return "", fmt.Errorf("kite modify rejected: %s", envelope.Message)
+	}
+	if envelope.Data.OrderID != "" {
+		return envelope.Data.OrderID, nil
+	}
+	return orderID, nil
+}
+
+// HasAPISecret returns true when a Kite API secret is configured for postback SHA-256 verification
+func (s *Service) HasAPISecret() bool {
+	return s != nil && s.cfg != nil && strings.TrimSpace(s.cfg.KiteAPISecret) != ""
+}
+
+// VerifyPostbackChecksum validates Zerodha's SHA-256(order_id + order_timestamp + api_secret) webhook signature
+func (s *Service) VerifyPostbackChecksum(orderID, orderTimestamp, checksum string) bool {
+	if orderID == "" || orderTimestamp == "" || checksum == "" || s.cfg == nil || s.cfg.KiteAPISecret == "" {
+		return false
+	}
+	raw := orderID + orderTimestamp + s.cfg.KiteAPISecret
+	sum := sha256.Sum256([]byte(raw))
+	expected := hex.EncodeToString(sum[:])
+	return strings.EqualFold(expected, strings.TrimSpace(checksum))
 }
 
 // restoreSession reads SQLite for an existing session and checks its IST validity

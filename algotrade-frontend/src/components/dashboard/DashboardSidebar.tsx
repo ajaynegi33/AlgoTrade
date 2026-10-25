@@ -44,6 +44,7 @@ export default function DashboardSidebar({
   const displayEmail = kiteProfile?.email || user?.email;
 
   const isDashboardActive = pathname === "/dashboard";
+  const isTradesActive = pathname.startsWith("/trades");
   const isSearchActive = pathname.startsWith("/search");
   const isLeaderboardActive = pathname.startsWith("/leaderboard");
   const isUniverseActive = pathname.startsWith("/universe");
@@ -143,11 +144,11 @@ export default function DashboardSidebar({
             Middle Section: Navigation Links (Real Next.js Links)
             ======================================================================= */}
         <nav className="flex-1 px-3 py-4 space-y-1.5 overflow-y-auto">
-          {/* Dashboard Overview */}
+          {/* 1. Autonomous Execution Desk */}
           <Link
             href="/dashboard"
             onClick={onCloseMobile}
-            title="Dashboard Overview"
+            title="Autonomous Execution Desk"
             className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl transition-all group cursor-pointer active:scale-[0.98] ${
               isDashboardActive
                 ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-500/20 shadow-2xs"
@@ -169,32 +170,35 @@ export default function DashboardSidebar({
                 isCollapsed ? "md:opacity-0 md:w-0 md:hidden" : "opacity-100"
               }`}
             >
-              Dashboard
+              Execution Desk
             </span>
           </Link>
 
-          {/* Search & Outliers Hub */}
+          {/* 2. Trade History, Tax Audit & Engine Analytics */}
           <Link
-            href="/search"
+            href="/trades"
             onClick={onCloseMobile}
-            title="Search & Market Outliers"
+            title="Trade History, Tax Audit & Engine Analytics"
             className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-2xl transition-all group cursor-pointer active:scale-[0.98] ${
-              isSearchActive
+              isTradesActive
                 ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-500/20 shadow-2xs"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 font-medium"
             } ${isCollapsed ? "md:justify-center md:px-0" : ""}`}
           >
             <svg
               className={`w-5 h-5 shrink-0 transition-colors ${
-                isSearchActive ? "text-emerald-700" : "text-slate-500 group-hover:text-slate-900"
+                isTradesActive ? "text-emerald-700" : "text-slate-500 group-hover:text-slate-900"
               }`}
               viewBox="0 0 24 24"
               fill="none"
               stroke="currentColor"
               strokeWidth="2"
             >
-              <circle cx="11" cy="11" r="8" />
-              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35" />
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+              />
             </svg>
 
             <span
@@ -202,15 +206,15 @@ export default function DashboardSidebar({
                 isCollapsed ? "md:opacity-0 md:w-0 md:hidden" : "opacity-100"
               }`}
             >
-              Search
+              Trade &amp; Tax Ledger
             </span>
           </Link>
-          
-          {/* Quantitative Leaderboard */}
+
+          {/* 3. Live Rank Matrix */}
           <Link
             href="/leaderboard"
             onClick={onCloseMobile}
-            title="Quantitative Leaderboard & Screener"
+            title="213-Stock Quantitative Rank Matrix"
             className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-2xl transition-all group cursor-pointer active:scale-[0.98] ${
               isLeaderboardActive
                 ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-500/20 shadow-2xs"
@@ -238,15 +242,48 @@ export default function DashboardSidebar({
                 isCollapsed ? "md:opacity-0 md:w-0 md:hidden" : "opacity-100"
               }`}
             >
-              Leaderboard
+              Live Rank Matrix
             </span>
           </Link>
 
-          {/* Stock Universe (F&O Cash Equities) */}
+          {/* 4. Outlier Screener */}
+          <Link
+            href="/search"
+            onClick={onCloseMobile}
+            title="Outlier Screener & Stock Deep-Dive"
+            className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-2xl transition-all group cursor-pointer active:scale-[0.98] ${
+              isSearchActive
+                ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-500/20 shadow-2xs"
+                : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 font-medium"
+            } ${isCollapsed ? "md:justify-center md:px-0" : ""}`}
+          >
+            <svg
+              className={`w-5 h-5 shrink-0 transition-colors ${
+                isSearchActive ? "text-emerald-700" : "text-slate-500 group-hover:text-slate-900"
+              }`}
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <circle cx="11" cy="11" r="8" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35" />
+            </svg>
+
+            <span
+              className={`text-xs font-semibold whitespace-nowrap overflow-hidden transition-all duration-150 ${
+                isCollapsed ? "md:opacity-0 md:w-0 md:hidden" : "opacity-100"
+              }`}
+            >
+              Outlier Screener
+            </span>
+          </Link>
+
+          {/* 5. F&O Universe */}
           <Link
             href="/universe"
             onClick={onCloseMobile}
-            title="Stock Universe & Scanner"
+            title="NSE F&O Master Universe Scanner"
             className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-2xl transition-all group cursor-pointer active:scale-[0.98] ${
               isUniverseActive
                 ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-500/20 shadow-2xs"
@@ -274,7 +311,7 @@ export default function DashboardSidebar({
                 isCollapsed ? "md:opacity-0 md:w-0 md:hidden" : "opacity-100"
               }`}
             >
-              Stock Universe
+              F&amp;O Universe
             </span>
           </Link>
         </nav>

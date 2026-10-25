@@ -101,17 +101,21 @@ export function MarketPulseBanner({ pulse }: MarketPulseBannerProps) {
         <div className="mt-2 flex items-center">
           <span
             className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-mono font-black border ${
-              regime === "BULLISH_EXPANSION"
+              regime === "BULLISH_EXPANSION" || regime === "V_RECOVERY_BULLISH"
                 ? "bg-emerald-50 text-emerald-900 border-emerald-300"
-                : regime === "BEARISH_EXPANSION"
+                : regime === "BEARISH_EXPANSION" || regime === "FLASH_SHOCK" || regime === "INTRADAY_DISTRIBUTION"
                 ? "bg-rose-50 text-rose-900 border-rose-300"
                 : "bg-slate-100 text-slate-800 border-slate-200"
             }`}
           >
             <span className="text-xs">
-              {regime === "BULLISH_EXPANSION" ? "▲" : regime === "BEARISH_EXPANSION" ? "▼" : "◆"}
+              {regime === "BULLISH_EXPANSION" || regime === "V_RECOVERY_BULLISH"
+                ? "▲"
+                : regime === "BEARISH_EXPANSION" || regime === "FLASH_SHOCK" || regime === "INTRADAY_DISTRIBUTION"
+                ? "▼"
+                : "◆"}
             </span>
-            <span>{regime.replace("_", " ")}</span>
+            <span>{regime.replace(/_/g, " ")}</span>
           </span>
         </div>
       </div>

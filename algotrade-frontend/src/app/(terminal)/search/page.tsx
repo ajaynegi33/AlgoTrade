@@ -36,7 +36,7 @@ export default function SearchHubPage() {
         bearish_score: 50,
         rvol_session: 1.0,
         rvol_pace_5m: 1.0,
-        composite_rs: 50,
+        composite_rs: 0,
         buyer_ratio: 0.5,
         aggressor_buy_ratio: 0.5,
         ev: 0.25,
@@ -92,7 +92,7 @@ export default function SearchHubPage() {
     } else if (activeCategory === "SWEET_SPOT") {
       list = list.filter((s) => (s.reasons & 1) !== 0 || s.ev >= 0.30).sort((a, b) => b.ev - a.ev);
     } else if (activeCategory === "HIGH_RS") {
-      list = list.filter((s) => s.composite_rs >= 60).sort((a, b) => b.composite_rs - a.composite_rs);
+      list = list.filter((s) => s.composite_rs >= 0.75).sort((a, b) => b.composite_rs - a.composite_rs);
     }
 
     // Apply text search

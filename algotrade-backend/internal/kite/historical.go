@@ -128,13 +128,21 @@ func (h *HistoricalService) computeBaselines(candles []kiteconnect.HistoricalDat
 			slotVolumes[slot] = append(slotVolumes[slot], uint64(c.Volume))
 		}
 
-		// Calculate True Range for ATR
-		if i > 0 {
-			prevClose := candles[i-1].Close
-			tr1 := c.High - c.Low
-			tr2 := math.Abs(c.High - prevClose)
-			tr3 := math.Abs(c.Low - prevClose)
-			tr := math.Max(tr1, math.Max(tr2, tr3))
+		// Calculate True Range for 5-minute intraday ATR14.
+		// Falsification Guard (Bug #8): On slot 0 (09:15 AM opening bar) or across calendar days,
+		// candles[i-1].Close is yesterday's 15:25 PM close. Including |High - prevClose| or |Low - prevClose|
+		// would inject the entire overnight gap into 5-minute bar volatility, inflating ATR14 by 2x-4x all morning.
+		tr := c.High - c.Low
+		if i > 0 && slot > 0 {
+			prevIST := candles[i-1].Date.Time.In(time.FixedZone("IST", 5*3600+1800))
+			if istTime.YearDay() == prevIST.YearDay() && istTime.Year() == prevIST.Year() {
+				prevClose := candles[i-1].Close
+				tr2 := math.Abs(c.High - prevClose)
+				tr3 := math.Abs(c.Low - prevClose)
+				tr = math.Max(tr, math.Max(tr2, tr3))
+			}
+		}
+		if tr >= 0 {
 			trueRanges = append(trueRanges, tr)
 		}
 	}

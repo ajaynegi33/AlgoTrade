@@ -89,10 +89,11 @@ type StockMetrics struct {
 	BarBuyVolume      uint64  // Aggressor volume lifting the Ask in current 5m bar
 	BarSellVolume     uint64  // Aggressor volume hitting the Bid in current 5m bar
 	LastUpdatedUnix   int64   // Exchange timestamp of last tick (epoch seconds)
-	// Subtotal Group 1: 3,600 + (24 fields * 8B) = 3,792 bytes (divisible by 8)
+	RollingPeak       float64 // Continuous time-decaying (tau=20s) price peak for shock velocity
+	// Subtotal Group 1: 3,600 + (25 fields * 8B) = 3,800 bytes (divisible by 8)
 
 	// -------------------------------------------------------------------------
-	// 2. Four-Byte Types (uint32, float32) - 8 fields * 4B = 32 bytes (divisible by 8)
+	// 2. Four-Byte Types (uint32, float32) - 10 fields * 4B = 40 bytes (divisible by 8)
 	// -------------------------------------------------------------------------
 	InstrumentToken    uint32
 	LotSize            uint32
@@ -101,7 +102,9 @@ type StockMetrics struct {
 	TickSize           float32 // 0.05 or 0.01 (needed by CLV range guard)
 	SmoothedBuyerRatio float32 // Top-of-book EMA buyer depth ratio (0.0 to 1.0)
 	AggressorBuyRatio  float32 // BarBuyVolume / (BarBuyVolume + BarSellVolume)
-	_pad4              uint32  // Explicit 4-byte padding to align Group 2 to 32 bytes
+	MISLeverage        float32 // Cached Zerodha MIS leverage (e.g. 5.0x for 20% VaR)
+	FastAggressorEMA   float32 // Fast alpha=0.25 tick-delta aggressor EMA for <1s shock detection
+	_pad4              uint32  // Explicit 4-byte padding to align Group 2 to 40 bytes
 
 	// -------------------------------------------------------------------------
 	// 3. Two-Byte Types (uint16, ReasonFlag) - 2 fields * 2B = 4 bytes

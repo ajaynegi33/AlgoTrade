@@ -27,6 +27,40 @@ type BarFlushItem struct {
 	Bar   OHLCVBar
 }
 
+// PositionTickListener is the lock-free O(1) hot-path interface for active position workers
+type PositionTickListener interface {
+	OnTickHotPath(s *StockMetrics, inMacroShock bool)
+}
+
+// ExecutionHook is invoked once per second inside the Actor loop with zero lock contention
+type ExecutionHook interface {
+	OnSecondTick(
+		stocks *[maxTrackedStocks]StockMetrics,
+		activeIndices []uint16,
+		bullishSorted []uint16,
+		leaderMap map[uint8]bool,
+		pulse MarketPulseDTO,
+		inMacroShock bool,
+	) *ExecutionStateDTO
+}
+
+type detailReq struct {
+	symbol string
+	reply  chan detailResp
+}
+
+type detailResp struct {
+	dto   *StockDetailDTO
+	found bool
+}
+
+type registerWorkerReq struct {
+	token  uint32
+	symbol string
+	worker PositionTickListener
+	reply  chan uint16
+}
+
 // Actor is the high-performance Single-Writer Actor goroutine
 type Actor struct {
 	db             *sql.DB
@@ -37,6 +71,8 @@ type Actor struct {
 
 	// Pure Actor Memory: Owned exclusively by the actor goroutine (zero mutexes in hot loop)
 	stocks         [maxTrackedStocks]StockMetrics
+	slotBaselines  [maxTrackedStocks][75]kite.SlotBaseline
+	workers        [maxTrackedStocks]PositionTickListener
 	tokenMap       map[uint32]uint16
 	symbolMap      map[string]uint16
 	activeIndices  []uint16
@@ -46,6 +82,15 @@ type Actor struct {
 	hasNifty       bool
 	hasBankNifty   bool
 
+	prevBreadth    float64
+	breadthHist    [6]float64 // Rolling 5-second breadth ring for shock velocity
+	breadthHistIdx uint8
+	macroShockExp  int64 // Unix epoch when FLASH_SHOCK cooldown expires
+	inMacroShock   atomic.Bool
+
+	execHook       ExecutionHook
+	detailReqChan  chan detailReq
+	workerReqChan  chan registerWorkerReq
 	barFlushChan   chan BarFlushItem
 	today0915Epoch int64
 	ticksProcessed atomic.Uint64
@@ -74,10 +119,48 @@ func NewActor(
 		symbolMap:      make(map[string]uint16, maxTrackedStocks),
 		activeIndices:  make([]uint16, 0, maxTrackedStocks),
 		sectorIndices:  make(map[uint8]uint16, 16),
+		detailReqChan:  make(chan detailReq, 64),
+		workerReqChan:  make(chan registerWorkerReq, 64),
 		barFlushChan:   make(chan BarFlushItem, 4096),
 		ctx:            ctx,
 		cancel:         cancel,
 	}
+}
+
+// SetExecutionHook wires the Phase 2 Execution Manager into the Actor's 1s loop
+func (a *Actor) SetExecutionHook(hook ExecutionHook) {
+	a.execHook = hook
+}
+
+// BindPositionWorker registers or unregisters a PositionWorker on the O(1) hot path (thread-safe via Actor loop)
+func (a *Actor) BindPositionWorker(token uint32, symbol string, worker PositionTickListener) uint16 {
+	if !a.isRunning.Load() {
+		idx, ok := a.tokenMap[token]
+		if !ok && worker != nil {
+			idx = a.addStock(token, symbol, scanner.SectorNifty50, 0.05)
+		}
+		if int(idx) < maxTrackedStocks {
+			a.workers[idx] = worker
+		}
+		return idx
+	}
+	reply := make(chan uint16, 1)
+	select {
+	case a.workerReqChan <- registerWorkerReq{token: token, symbol: symbol, worker: worker, reply: reply}:
+		select {
+		case idx := <-reply:
+			return idx
+		case <-time.After(2 * time.Second):
+			return 0
+		}
+	case <-a.ctx.Done():
+		return 0
+	}
+}
+
+// IsInMacroShock returns true if Nifty 50 is currently in a FLASH_SHOCK state
+func (a *Actor) IsInMacroShock() bool {
+	return a.inMacroShock.Load()
 }
 
 // Start boots the actor goroutine and background SQLite writer
@@ -115,6 +198,14 @@ func (a *Actor) Stop() {
 // GetStats returns actor performance stats
 func (a *Actor) GetStats() (trackedCount int, ticksProcessed uint64) {
 	return len(a.activeIndices), a.ticksProcessed.Load()
+}
+
+// GetStockPtrByIndex returns a pointer to the pre-allocated StockMetrics slot for crash-recovery rehydration
+func (a *Actor) GetStockPtrByIndex(idx uint16) *StockMetrics {
+	if int(idx) >= len(a.stocks) {
+		return nil
+	}
+	return &a.stocks[idx]
 }
 
 func (a *Actor) initTodayEpoch() {
@@ -157,6 +248,11 @@ func (a *Actor) seedUniverse() error {
 				idx := a.addStock(uint32(st.InstrumentToken), st.Tradingsymbol, secID, tickSize)
 				a.stocks[idx].LotSize = uint32(st.LotSize)
 				a.stocks[idx].PrevClose = st.LastPrice
+				if st.MISLeverage > 0 {
+					a.stocks[idx].MISLeverage = float32(st.MISLeverage)
+				} else {
+					a.stocks[idx].MISLeverage = 5.0
+				}
 				a.stocks[idx].IsTradeable = true
 			}
 		}
@@ -199,6 +295,10 @@ func (a *Actor) addStock(token uint32, symbol string, sectorID uint8, tickSize f
 	s.ActiveIndex = nextIdx
 	s.SmoothedBuyerRatio = 0.50
 	s.AggressorBuyRatio = 0.50
+	s.FastAggressorEMA = 0.50
+	if s.MISLeverage <= 0 {
+		s.MISLeverage = 5.0
+	}
 
 	// Initialize bar 0
 	s.SessionBars[0] = OHLCVBar{Timestamp: a.today0915Epoch}
@@ -216,9 +316,14 @@ func (a *Actor) seedBaselinesAsync() {
 		s := &a.stocks[idx]
 		profile, err := a.histClient.SeedStockBaselines(s.InstrumentToken, s.PrevClose)
 		if err == nil && profile != nil {
+			a.slotBaselines[idx] = profile.Slots
+			curSlot := s.CurrentBarIdx
+			if curSlot >= 75 {
+				curSlot = 74
+			}
 			s.ATR14 = profile.ATR14
-			s.BaselineSlotVolume = profile.Slots[0].MedianVolume
-			s.BaselineCumVolume = profile.Slots[0].MedianCumVol
+			s.BaselineSlotVolume = profile.Slots[curSlot].MedianVolume
+			s.BaselineCumVolume = profile.Slots[curSlot].MedianCumVol
 			s.IsWarm = true
 		}
 	}
@@ -246,6 +351,25 @@ func (a *Actor) runLoop() {
 
 		case <-periodic1s.C:
 			a.computeAndBroadcastSnapshot()
+
+		case req := <-a.detailReqChan:
+			dto, found := a.getStockDetailInternal(req.symbol)
+			req.reply <- detailResp{dto: dto, found: found}
+
+		case wReq := <-a.workerReqChan:
+			idx, exists := a.tokenMap[wReq.token]
+			if !exists && wReq.worker != nil {
+				secID, _, _ := scanner.ResolveSector(a.db, wReq.symbol)
+				idx = a.addStock(wReq.token, wReq.symbol, secID, 0.05)
+				a.stocks[idx].IsTradeable = true
+				if a.tickerClient != nil {
+					_ = a.tickerClient.Subscribe([]uint32{wReq.token})
+				}
+			}
+			if int(idx) < maxTrackedStocks {
+				a.workers[idx] = wReq.worker
+			}
+			wReq.reply <- idx
 		}
 	}
 }
@@ -259,7 +383,29 @@ func (a *Actor) processTick(tick *ParsedTick) {
 	a.ticksProcessed.Add(1)
 	stock := &a.stocks[idx]
 
-	// Micro-Bug 1 Fix: First-tick baseline seeding & delta safety
+	// Ensure today0915Epoch rolls over cleanly if server stays up across calendar days
+	if tick.ExchangeTime > a.today0915Epoch+64800 {
+		tIST := time.Unix(tick.ExchangeTime, 0).In(istZone)
+		y, m, d := tIST.Date()
+		newEpoch := time.Date(y, m, d, 9, 15, 0, 0, istZone).Unix()
+		if newEpoch > a.today0915Epoch {
+			a.today0915Epoch = newEpoch
+			// Reset all tracked stocks' intraday session state for the new trading day
+			for _, sIdx := range a.activeIndices {
+				st := &a.stocks[sIdx]
+				st.LastUpdatedUnix = 0
+				st.CurrentBarIdx = 0
+				st.PullbackCount = 0
+				st.WasExtended = false
+				st.BarStartVolume = 0
+				st.BarBuyVolume = 0
+				st.BarSellVolume = 0
+				st.SessionBars = [75]OHLCVBar{}
+			}
+		}
+	}
+
+	// First-tick baseline seeding & bar slot initialization
 	if stock.LastUpdatedUnix == 0 {
 		stock.Volume = tick.Volume
 		stock.BarStartVolume = tick.Volume
@@ -268,13 +414,59 @@ func (a *Actor) processTick(tick *ParsedTick) {
 		stock.BidLevels = tick.BidLevels
 		stock.AskLevels = tick.AskLevels
 		stock.LTP = tick.LTP
+		stock.RollingPeak = tick.LTP
 		stock.Open = tick.Open
 		stock.High = tick.High
 		stock.Low = tick.Low
-		stock.PrevClose = tick.PrevClose
-		stock.ExchangeVWAP = tick.VWAP
+		if tick.PrevClose > 0 {
+			stock.PrevClose = tick.PrevClose
+		}
+		if tick.IsIndex {
+			if tick.Open > 0 {
+				stock.ExchangeVWAP = tick.Open
+			} else {
+				stock.ExchangeVWAP = tick.LTP
+			}
+		} else {
+			stock.ExchangeVWAP = tick.VWAP
+		}
 		stock.LastUpdatedUnix = tick.ExchangeTime
+
+		barIdx := (tick.ExchangeTime - a.today0915Epoch) / 300
+		if barIdx < 0 {
+			barIdx = 0
+		} else if barIdx >= 75 {
+			barIdx = 74
+		}
+		stock.CurrentBarIdx = uint8(barIdx)
+		stock.SessionBars[barIdx] = OHLCVBar{
+			Open:      tick.LTP,
+			High:      tick.LTP,
+			Low:       tick.LTP,
+			Close:     tick.LTP,
+			Volume:    0,
+			Timestamp: a.today0915Epoch + barIdx*300,
+		}
+		if stock.IsWarm {
+			stock.BaselineSlotVolume = a.slotBaselines[idx][barIdx].MedianVolume
+			stock.BaselineCumVolume = a.slotBaselines[idx][barIdx].MedianCumVol
+		}
+		if w := a.workers[idx]; w != nil {
+			w.OnTickHotPath(stock, a.inMacroShock.Load())
+		}
 		return
+	}
+
+	// Update continuous time-decaying RollingPeak (tau = 20s) before overwriting LastUpdatedUnix
+	dt := float64(tick.ExchangeTime - stock.LastUpdatedUnix)
+	if dt < 0 {
+		dt = 0
+	}
+	if tick.LTP >= stock.RollingPeak || stock.RollingPeak <= 0 {
+		stock.RollingPeak = tick.LTP
+	} else if dt > 0 {
+		decay := math.Exp(-dt / 20.0)
+		stock.RollingPeak = tick.LTP + (stock.RollingPeak-tick.LTP)*decay
 	}
 
 	// Prevent out-of-order ticks from underflowing uint64
@@ -283,13 +475,13 @@ func (a *Actor) processTick(tick *ParsedTick) {
 		tickDeltaVol = tick.Volume - stock.Volume
 	}
 
-	// Micro-Bug 2 Fix: Check 5-minute bar rollover (exchTime / 300)
+	// Check 5-minute bar rollover (exchTime / 300)
 	barIdx := (tick.ExchangeTime - a.today0915Epoch) / 300
 	if barIdx > int64(stock.CurrentBarIdx) && barIdx < 75 {
 		// Finalize old bar
 		oldIdx := stock.CurrentBarIdx
 		stock.SessionBars[oldIdx].Close = stock.LTP
-		if stock.SessionBars[oldIdx].Volume == 0 {
+		if stock.Volume >= stock.BarStartVolume {
 			stock.SessionBars[oldIdx].Volume = stock.Volume - stock.BarStartVolume
 		}
 
@@ -299,8 +491,12 @@ func (a *Actor) processTick(tick *ParsedTick) {
 		default:
 		}
 
-		// Advance to new bar
+		// Advance to new bar & update time-of-day slot baselines
 		stock.CurrentBarIdx = uint8(barIdx)
+		if stock.IsWarm {
+			stock.BaselineSlotVolume = a.slotBaselines[idx][barIdx].MedianVolume
+			stock.BaselineCumVolume = a.slotBaselines[idx][barIdx].MedianCumVol
+		}
 		stock.SessionBars[barIdx] = OHLCVBar{
 			Open:      tick.LTP,
 			High:      tick.LTP,
@@ -315,7 +511,7 @@ func (a *Actor) processTick(tick *ParsedTick) {
 		stock.BarSellVolume = stock.BarSellVolume >> 2
 	}
 
-	// Update current 5m bar High/Low/Close
+	// Update current 5m bar High/Low/Close/Volume
 	currBar := &stock.SessionBars[stock.CurrentBarIdx]
 	if currBar.Open == 0 {
 		currBar.Open = tick.LTP
@@ -327,10 +523,29 @@ func (a *Actor) processTick(tick *ParsedTick) {
 		currBar.Low = tick.LTP
 	}
 	currBar.Close = tick.LTP
+	if tick.Volume >= stock.BarStartVolume {
+		currBar.Volume = tick.Volume - stock.BarStartVolume
+	}
+
+	// Save previous quotes BEFORE overwriting scalar fields so Lee-Ready Quote & Tick rules are exact
+	prevLTP := stock.LTP
+	prevBid1 := stock.Bid1Price
+	prevAsk1 := stock.Ask1Price
 
 	// Update stock scalar quotes
 	stock.LTP = tick.LTP
-	if tick.VWAP > 0 {
+	if tick.IsIndex {
+		// Indices do not transmit exchange VWAP; maintain synthetic intraday anchor so Nifty > VWAP works
+		if stock.ExchangeVWAP <= 0 {
+			if tick.Open > 0 {
+				stock.ExchangeVWAP = tick.Open
+			} else {
+				stock.ExchangeVWAP = tick.LTP
+			}
+		} else {
+			stock.ExchangeVWAP = 0.995*stock.ExchangeVWAP + 0.005*tick.LTP
+		}
+	} else if tick.VWAP > 0 {
 		stock.ExchangeVWAP = tick.VWAP
 	}
 	if tick.Open > 0 {
@@ -354,31 +569,30 @@ func (a *Actor) processTick(tick *ParsedTick) {
 		stock.BidLevels = tick.BidLevels
 		stock.AskLevels = tick.AskLevels
 
-		// Dual-alpha EMA Smoothing & Lee-Ready Aggressor Flow
+		// Dual-alpha EMA Smoothing & Lee-Ready Aggressor Flow using prevAsk1/prevBid1/prevLTP
 		var alpha float32 = 0.03
 		if tickDeltaVol > 0 {
 			alpha = 0.20
-
-			// 1. Quote Rule: Compare LTP against previous quotes
-			if tick.LTP >= float64(stock.Ask1Price) && stock.Ask1Price > 0 {
-				stock.BarBuyVolume += tickDeltaVol
-			} else if tick.LTP <= float64(stock.Bid1Price) && stock.Bid1Price > 0 {
-				stock.BarSellVolume += tickDeltaVol
+			var isBuyTick bool
+			if tick.LTP >= float64(prevAsk1) && prevAsk1 > 0 {
+				isBuyTick = true
+			} else if tick.LTP <= float64(prevBid1) && prevBid1 > 0 {
+				isBuyTick = false
 			} else {
-				// Midpoint check
-				midpoint := float64(stock.Bid1Price+stock.Ask1Price) / 2.0
-				if tick.LTP > midpoint {
-					stock.BarBuyVolume += tickDeltaVol
-				} else if tick.LTP < midpoint {
-					stock.BarSellVolume += tickDeltaVol
+				midpoint := float64(prevBid1+prevAsk1) / 2.0
+				if prevBid1 > 0 && prevAsk1 > 0 && tick.LTP != midpoint {
+					isBuyTick = tick.LTP > midpoint
 				} else {
-					// Tick rule fallback
-					if tick.LTP >= stock.LTP {
-						stock.BarBuyVolume += tickDeltaVol
-					} else {
-						stock.BarSellVolume += tickDeltaVol
-					}
+					isBuyTick = tick.LTP >= prevLTP
 				}
+			}
+
+			if isBuyTick {
+				stock.BarBuyVolume += tickDeltaVol
+				stock.FastAggressorEMA = 0.25*1.0 + 0.75*stock.FastAggressorEMA
+			} else {
+				stock.BarSellVolume += tickDeltaVol
+				stock.FastAggressorEMA = 0.25*0.0 + 0.75*stock.FastAggressorEMA
 			}
 		}
 
@@ -398,51 +612,113 @@ func (a *Actor) processTick(tick *ParsedTick) {
 			stock.PullbackCount++
 			stock.WasExtended = false
 		}
+	} else if a.hasNifty && idx == a.niftyIdx && stock.RollingPeak > 0 {
+		// Instantaneous Nifty 50 Flash Shock detector (-0.18% drop from 20s RollingPeak)
+		dropPct := ((stock.LTP - stock.RollingPeak) / stock.RollingPeak) * 100.0
+		if dropPct <= -0.18 {
+			a.macroShockExp = tick.ExchangeTime + 180
+			a.inMacroShock.Store(true)
+		}
+	}
+
+	// O(1) lock-free hot-path dispatch to active PositionWorker if bound
+	if w := a.workers[idx]; w != nil {
+		w.OnTickHotPath(stock, a.inMacroShock.Load())
 	}
 }
 
 func (a *Actor) computeAndBroadcastSnapshot() {
-	if a.wsHub == nil || a.wsHub.ClientCount() == 0 {
-		return // Zero connected clients: zero JSON allocations
-	}
+	nowUnix := time.Now().Unix()
 
 	// 1. Calculate Market Breadth (% > VWAP)
-	var aboveVWAPCount int
-	totalActive := len(a.activeIndices)
+	var aboveVWAPCount, activeQuotedCount int
 	for _, idx := range a.activeIndices {
 		s := &a.stocks[idx]
-		if s.LTP > s.ExchangeVWAP && s.ExchangeVWAP > 0 {
-			aboveVWAPCount++
+		if s.LTP > 0 && s.ExchangeVWAP > 0 {
+			activeQuotedCount++
+			if s.LTP > s.ExchangeVWAP {
+				aboveVWAPCount++
+			}
 		}
 	}
 	var breadthRatio float64 = 0.5
-	if totalActive > 0 {
-		breadthRatio = float64(aboveVWAPCount) / float64(totalActive)
+	if activeQuotedCount > 0 {
+		breadthRatio = float64(aboveVWAPCount) / float64(activeQuotedCount)
 	}
 
-	// 2. Market Pulse & Regime Context
+	prevBreadth5s := a.breadthHist[a.breadthHistIdx]
+	if prevBreadth5s == 0 {
+		prevBreadth5s = breadthRatio
+	}
+	a.breadthHist[a.breadthHistIdx] = breadthRatio
+	a.breadthHistIdx = (a.breadthHistIdx + 1) % 6
+	breadthDrop5s := breadthRatio - prevBreadth5s
+
+	// 2. Market Pulse & Multi-Horizon Dynamic Regime Context
 	var niftyLTP, niftyChg, bankLTP, bankChg float64
+	var niftyIntradayRet, niftyDayCLV, niftyVel15m, niftyShockDrop float64
+	niftyDayCLV = 0.50
 	var niftyStock *StockMetrics
 	if a.hasNifty {
 		niftyStock = &a.stocks[a.niftyIdx]
 		niftyLTP = niftyStock.LTP
-		if niftyStock.PrevClose > 0 {
+		if niftyStock.PrevClose > 0 && niftyLTP > 0 {
 			niftyChg = ((niftyLTP - niftyStock.PrevClose) / niftyStock.PrevClose) * 100.0
+		}
+		if niftyStock.Open > 0 && niftyLTP > 0 {
+			niftyIntradayRet = ((niftyLTP - niftyStock.Open) / niftyStock.Open) * 100.0
+		}
+		if niftyStock.High > niftyStock.Low && niftyLTP > 0 {
+			niftyDayCLV = (niftyLTP - niftyStock.Low) / (niftyStock.High - niftyStock.Low)
+		}
+		lookback3 := 0
+		if niftyStock.CurrentBarIdx >= 3 {
+			lookback3 = int(niftyStock.CurrentBarIdx) - 3
+		}
+		ref15m := niftyStock.SessionBars[lookback3].Close
+		if ref15m <= 0 {
+			ref15m = niftyStock.Open
+		}
+		if ref15m > 0 && niftyLTP > 0 {
+			niftyVel15m = ((niftyLTP - ref15m) / ref15m) * 100.0
+		}
+		if niftyStock.RollingPeak > 0 && niftyLTP > 0 {
+			niftyShockDrop = ((niftyLTP - niftyStock.RollingPeak) / niftyStock.RollingPeak) * 100.0
 		}
 	}
 	if a.hasBankNifty {
 		b := &a.stocks[a.bankNiftyIdx]
 		bankLTP = b.LTP
-		if b.PrevClose > 0 {
+		if b.PrevClose > 0 && bankLTP > 0 {
 			bankChg = ((bankLTP - b.PrevClose) / b.PrevClose) * 100.0
 		}
 	}
 
+	// Update FLASH_SHOCK state
+	if niftyShockDrop <= -0.18 || (breadthDrop5s <= -0.12 && niftyVel15m <= -0.20) {
+		a.macroShockExp = nowUnix + 180
+		a.inMacroShock.Store(true)
+	} else if a.inMacroShock.Load() {
+		if nowUnix >= a.macroShockExp || (niftyVel15m >= 0.05 && breadthRatio >= 0.52) {
+			a.inMacroShock.Store(false)
+		}
+	}
+
+	// 6-State Dynamic Intraday Regime Classification
 	regime := "SIDEWAYS_CHOP"
-	if breadthRatio >= 0.60 && niftyChg > 0.30 {
-		regime = "BULLISH_EXPANSION"
-	} else if breadthRatio <= 0.40 && niftyChg < -0.30 {
+	switch {
+	case a.inMacroShock.Load():
+		regime = "FLASH_SHOCK"
+	case niftyDayCLV < 0.35 && niftyVel15m <= -0.18 && breadthRatio < 0.48:
+		// Gap-up rollover / afternoon institutional distribution
+		regime = "INTRADAY_DISTRIBUTION"
+	case breadthRatio <= 0.42 && (niftyIntradayRet < -0.20 || niftyChg < -0.35) && niftyDayCLV < 0.40:
 		regime = "BEARISH_EXPANSION"
+	case niftyChg < 0 && niftyIntradayRet >= 0.25 && niftyDayCLV >= 0.65 && breadthRatio >= 0.58 && niftyVel15m >= 0.10:
+		// Gap-down followed by strong intraday DII/FII V-recovery
+		regime = "V_RECOVERY_BULLISH"
+	case breadthRatio >= 0.58 && (niftyIntradayRet >= 0.15 || niftyChg >= 0.25) && niftyDayCLV >= 0.55:
+		regime = "BULLISH_EXPANSION"
 	}
 
 	// 3. Compute Sector Performance & Identify Leaders
@@ -571,6 +847,26 @@ func (a *Actor) computeAndBroadcastSnapshot() {
 		return 0
 	})
 
+	pulseDTO := MarketPulseDTO{
+		MarketState:            "OPEN",
+		NiftyLTP:               niftyLTP,
+		NiftyChangePercent:     niftyChg,
+		BankNiftyLTP:           bankLTP,
+		BankNiftyChangePercent: bankChg,
+		BreadthAboveVWAP:       math.Round(breadthRatio*1000.0) / 10.0,
+		MarketRegime:           regime,
+	}
+
+	// Invoke Phase 2 Autonomous Execution Engine every 1.0s (even when 0 browser tabs are open!)
+	var execState *ExecutionStateDTO
+	if a.execHook != nil {
+		execState = a.execHook.OnSecondTick(&a.stocks, a.activeIndices, bullishSorted, leaderMap, pulseDTO, a.inMacroShock.Load())
+	}
+
+	if a.wsHub == nil || a.wsHub.ClientCount() == 0 {
+		return // Zero connected clients: skip DTO allocations & WebSocket broadcast
+	}
+
 	// Bearish Sort for Top 5 Bearish Outliers
 	bearishSorted := make([]uint16, len(a.activeIndices))
 	copy(bearishSorted, a.activeIndices)
@@ -615,22 +911,15 @@ func (a *Actor) computeAndBroadcastSnapshot() {
 	histHealthy, histErr := a.histClient.IsHealthy()
 
 	snapshot := RankedSnapshot{
-		Timestamp:        time.Now().Unix(),
+		Timestamp:        nowUnix,
 		HistoricalActive: histHealthy,
 		HistoricalError:  histErr,
-		MarketPulse: MarketPulseDTO{
-			MarketState:            "OPEN",
-			NiftyLTP:               niftyLTP,
-			NiftyChangePercent:     niftyChg,
-			BankNiftyLTP:           bankLTP,
-			BankNiftyChangePercent: bankChg,
-			BreadthAboveVWAP:       math.Round(breadthRatio * 1000.0) / 10.0,
-			MarketRegime:           regime,
-		},
-		Sectors:    sectorDTOs,
-		TopBullish: topBullish,
-		TopBearish: topBearish,
-		AllStocks:  allStocks,
+		MarketPulse:      pulseDTO,
+		Sectors:          sectorDTOs,
+		TopBullish:       topBullish,
+		TopBearish:       topBearish,
+		AllStocks:        allStocks,
+		Execution:        execState,
 	}
 
 	a.wsHub.Broadcast(snapshot)
@@ -707,8 +996,26 @@ func (a *Actor) sqliteBarWriter() {
 	}
 }
 
-// GetStockDetail returns the full quantitative and order book state for a specific stock
+// GetStockDetail returns the full quantitative and order book state for a specific stock (serialized via Actor loop)
 func (a *Actor) GetStockDetail(symbol string) (*StockDetailDTO, bool) {
+	if !a.isRunning.Load() {
+		return a.getStockDetailInternal(symbol)
+	}
+	reply := make(chan detailResp, 1)
+	select {
+	case a.detailReqChan <- detailReq{symbol: symbol, reply: reply}:
+		select {
+		case res := <-reply:
+			return res.dto, res.found
+		case <-time.After(2 * time.Second):
+			return nil, false
+		}
+	case <-a.ctx.Done():
+		return nil, false
+	}
+}
+
+func (a *Actor) getStockDetailInternal(symbol string) (*StockDetailDTO, bool) {
 	upperSym := strings.ToUpper(strings.TrimSpace(symbol))
 
 	targetIdx, found := a.symbolMap[upperSym]
@@ -870,6 +1177,15 @@ func (a *Actor) GetStockDetail(symbol string) (*StockDetailDTO, bool) {
 	}
 	if s.Reasons&PenaltyLowVolume != 0 {
 		reasonsList = append(reasonsList, "Penalty: Dry Volume (<1.0x RVOL)")
+	}
+	if s.Reasons&PenaltyPullbackRedBar != 0 {
+		reasonsList = append(reasonsList, "Penalty: Red Pullback Bar Unreclaimed")
+	}
+	if s.Reasons&PenaltyExhaustedTrend != 0 {
+		reasonsList = append(reasonsList, "Penalty: 3rd+ Late-Stage Pullback")
+	}
+	if s.Reasons&PenaltyIcebergSell != 0 {
+		reasonsList = append(reasonsList, "Penalty: Iceberg Sell Distribution")
 	}
 
 	dto := &StockDetailDTO{

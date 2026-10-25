@@ -223,9 +223,9 @@ export function StockFalsificationGrid({ stock }: StockFalsificationGridProps) {
         {/* 5. Composite Relative Strength */}
         <SignalCard
           title="Composite RS"
-          value={`${stock.composite_rs.toFixed(1)}/100`}
-          subtext={stock.composite_rs >= 65 ? "OUTPERFORMING" : stock.composite_rs <= 35 ? "UNDERPERFORMING" : "MARKET IN-LINE"}
-          statusColor={stock.composite_rs >= 65 ? "emerald" : stock.composite_rs <= 35 ? "rose" : "slate"}
+          value={`${stock.composite_rs >= 0 ? "+" : ""}${stock.composite_rs.toFixed(2)}%`}
+          subtext={stock.composite_rs >= 0.50 ? "OUTPERFORMING" : stock.composite_rs <= -0.50 ? "UNDERPERFORMING" : "MARKET IN-LINE"}
+          statusColor={stock.composite_rs >= 0.50 ? "emerald" : stock.composite_rs <= -0.50 ? "rose" : "slate"}
           formula="RS = Weighted(Delta_Stock - Delta_Sector) vs Nifty 50"
           rationale="Evaluates whether the equity is exhibiting true alpha divergence or simply drifting with broad index tide."
           falsificationRule="If sector falls -2% and stock also drops -2%, RS is zero. The stock lacks independent buyer sponsorship."

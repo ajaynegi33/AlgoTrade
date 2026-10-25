@@ -1,12 +1,106 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, memo } from "react";
 import { StockRankData, decodeReasonFlags } from "@/lib/types";
 
 interface FullRankedTableProps {
   stocks: StockRankData[];
   selectedSectorId?: number | null;
 }
+
+const RankedStockRow = memo(
+  function RankedStockRow({ s }: { s: StockRankData }) {
+    const badges = decodeReasonFlags(s.reasons);
+    const isUp = s.change_percent >= 0;
+
+    return (
+      <tr className="hover:bg-slate-50/80 transition-colors group">
+        <td className="py-2.5 px-3.5 text-center font-bold text-slate-400 group-hover:text-slate-900">
+          #{s.rank}
+        </td>
+        <td className="py-2.5 px-3.5 font-bold text-slate-900 whitespace-nowrap">
+          {s.symbol}
+        </td>
+        <td className="py-2.5 px-3.5 text-slate-500 text-[11px] whitespace-nowrap">
+          {s.sector}
+        </td>
+        <td className="py-2.5 px-3.5 text-right font-black text-slate-900 whitespace-nowrap">
+          ₹{s.ltp.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+        </td>
+        <td className="py-2.5 px-3.5 text-right font-bold whitespace-nowrap">
+          <span
+            className={`px-2 py-0.5 rounded-md ${
+              isUp ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"
+            }`}
+          >
+            {isUp ? "+" : ""}
+            {s.change_percent.toFixed(2)}%
+          </span>
+        </td>
+        <td className="py-2.5 px-3.5 text-right text-slate-600 whitespace-nowrap">
+          ₹{s.vwap.toFixed(2)}
+        </td>
+        <td className="py-2.5 px-3.5 text-right font-bold whitespace-nowrap">
+          <span className={s.rvol_session >= 1.8 ? "text-emerald-700" : "text-slate-600"}>
+            {s.rvol_session.toFixed(1)}x
+          </span>
+        </td>
+        <td className="py-2.5 px-3.5 text-right font-bold whitespace-nowrap">
+          <span className={s.composite_rs >= 0 ? "text-emerald-700" : "text-rose-700"}>
+            {s.composite_rs >= 0 ? "+" : ""}
+            {s.composite_rs.toFixed(2)}%
+          </span>
+        </td>
+        <td className="py-2.5 px-3.5 text-right whitespace-nowrap">
+          <span className={`font-bold ${s.buyer_ratio >= 0.58 ? "text-emerald-700" : "text-slate-700"}`}>
+            {(s.buyer_ratio * 100).toFixed(0)}%
+          </span>
+          <span className="text-[10px] text-slate-400 block">
+            Agg: {(s.aggressor_buy_ratio * 100).toFixed(0)}%
+          </span>
+        </td>
+        <td className="py-2.5 px-3.5 text-right whitespace-nowrap">
+          <span className={`font-bold ${s.ev >= 0.25 ? "text-emerald-700" : "text-slate-600"}`}>
+            {s.ev >= 0 ? "+" : ""}
+            {s.ev.toFixed(2)}R
+          </span>
+          <span className="text-[10px] text-slate-400 block">
+            {(s.p_win * 100).toFixed(0)}% win
+          </span>
+        </td>
+        <td className="py-2.5 px-3.5">
+          <div className="flex flex-wrap gap-1 max-w-xs">
+            {badges.map((b) => (
+              <span
+                key={b.label}
+                title={b.description}
+                className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                  b.type === "catalyst"
+                    ? "bg-emerald-50 text-emerald-800 border border-emerald-200/80"
+                    : "bg-rose-50 text-rose-800 border border-rose-200/80"
+                }`}
+              >
+                {b.label}
+              </span>
+            ))}
+          </div>
+        </td>
+      </tr>
+    );
+  },
+  (prev, next) =>
+    prev.s.rank === next.s.rank &&
+    prev.s.ltp === next.s.ltp &&
+    prev.s.change_percent === next.s.change_percent &&
+    prev.s.vwap === next.s.vwap &&
+    prev.s.rvol_session === next.s.rvol_session &&
+    prev.s.composite_rs === next.s.composite_rs &&
+    prev.s.buyer_ratio === next.s.buyer_ratio &&
+    prev.s.aggressor_buy_ratio === next.s.aggressor_buy_ratio &&
+    prev.s.ev === next.s.ev &&
+    prev.s.p_win === next.s.p_win &&
+    prev.s.reasons === next.s.reasons
+);
 
 export function FullRankedTable({ stocks, selectedSectorId }: FullRankedTableProps) {
   const [searchTerm, setSearchTerm] = useState("");
@@ -154,8 +248,15 @@ export function FullRankedTable({ stocks, selectedSectorId }: FullRankedTablePro
         </div>
       </div>
 
-      {/* Table */}
-      <div className="overflow-x-auto rounded-2xl border border-slate-200/90 scrollbar-thin scrollbar-thumb-slate-200">
+      {/* Table with CSS Content-Visibility Containment to isolate 1Hz layout recalculations */}
+      <div
+        className="overflow-x-auto rounded-2xl border border-slate-200/90 scrollbar-thin scrollbar-thumb-slate-200"
+        style={{
+          contentVisibility: "auto",
+          containIntrinsicSize: "auto 900px auto 1200px",
+          contain: "layout style paint",
+        }}
+      >
         <table className="w-full text-left border-collapse text-xs">
           <thead>
             <tr className="bg-slate-50/90 border-b border-slate-200 font-mono text-[11px] text-slate-500 font-bold uppercase tracking-wider">
@@ -180,104 +281,7 @@ export function FullRankedTable({ stocks, selectedSectorId }: FullRankedTablePro
                 </td>
               </tr>
             ) : (
-              filteredStocks.map((s) => {
-                const badges = decodeReasonFlags(s.reasons);
-                const isUp = s.change_percent >= 0;
-
-                return (
-                  <tr
-                    key={s.token}
-                    className="hover:bg-slate-50/80 transition-colors group"
-                  >
-                    {/* Rank */}
-                    <td className="py-2.5 px-3.5 text-center font-bold text-slate-400 group-hover:text-slate-900">
-                      #{s.rank}
-                    </td>
-
-                    {/* Symbol */}
-                    <td className="py-2.5 px-3.5 font-bold text-slate-900 whitespace-nowrap">
-                      {s.symbol}
-                    </td>
-
-                    {/* Sector */}
-                    <td className="py-2.5 px-3.5 text-slate-500 text-[11px] whitespace-nowrap">
-                      {s.sector}
-                    </td>
-
-                    {/* LTP */}
-                    <td className="py-2.5 px-3.5 text-right font-black text-slate-900 whitespace-nowrap">
-                      ₹{s.ltp.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
-                    </td>
-
-                    {/* Change % */}
-                    <td className="py-2.5 px-3.5 text-right font-bold whitespace-nowrap">
-                      <span className={`px-2 py-0.5 rounded-md ${
-                        isUp ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"
-                      }`}>
-                        {isUp ? "+" : ""}{s.change_percent.toFixed(2)}%
-                      </span>
-                    </td>
-
-                    {/* VWAP */}
-                    <td className="py-2.5 px-3.5 text-right text-slate-600 whitespace-nowrap">
-                      ₹{s.vwap.toFixed(2)}
-                    </td>
-
-                    {/* RVOL */}
-                    <td className="py-2.5 px-3.5 text-right font-bold whitespace-nowrap">
-                      <span className={s.rvol_session >= 1.8 ? "text-emerald-700" : "text-slate-600"}>
-                        {s.rvol_session.toFixed(1)}x
-                      </span>
-                    </td>
-
-                    {/* RS vs Nifty */}
-                    <td className="py-2.5 px-3.5 text-right font-bold whitespace-nowrap">
-                      <span className={s.composite_rs >= 0 ? "text-emerald-700" : "text-rose-700"}>
-                        {s.composite_rs >= 0 ? "+" : ""}{s.composite_rs.toFixed(2)}%
-                      </span>
-                    </td>
-
-                    {/* Buyer Flow */}
-                    <td className="py-2.5 px-3.5 text-right whitespace-nowrap">
-                      <span className={`font-bold ${s.buyer_ratio >= 0.58 ? "text-emerald-700" : "text-slate-700"}`}>
-                        {(s.buyer_ratio * 100).toFixed(0)}%
-                      </span>
-                      <span className="text-[10px] text-slate-400 block">
-                        Agg: {(s.aggressor_buy_ratio * 100).toFixed(0)}%
-                      </span>
-                    </td>
-
-                    {/* EV / PWin */}
-                    <td className="py-2.5 px-3.5 text-right whitespace-nowrap">
-                      <span className={`font-bold ${s.ev >= 0.25 ? "text-emerald-700" : "text-slate-600"}`}>
-                        {s.ev >= 0 ? "+" : ""}{s.ev.toFixed(2)}R
-                      </span>
-                      <span className="text-[10px] text-slate-400 block">
-                        {(s.p_win * 100).toFixed(0)}% win
-                      </span>
-                    </td>
-
-                    {/* Reason Badges */}
-                    <td className="py-2.5 px-3.5">
-                      <div className="flex flex-wrap gap-1 max-w-xs">
-                        {badges.map((b) => (
-                          <span
-                            key={b.label}
-                            title={b.description}
-                            className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                              b.type === "catalyst"
-                                ? "bg-emerald-50 text-emerald-800 border border-emerald-200/80"
-                                : "bg-rose-50 text-rose-800 border border-rose-200/80"
-                            }`}
-                          >
-                            {b.label}
-                          </span>
-                        ))}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })
+              filteredStocks.map((s) => <RankedStockRow key={s.token} s={s} />)
             )}
           </tbody>
         </table>

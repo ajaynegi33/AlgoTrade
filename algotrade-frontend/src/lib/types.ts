@@ -157,6 +157,255 @@ export interface RankedSnapshotData {
   top_bullish: StockRankData[];
   top_bearish: StockRankData[];
   all_stocks: StockRankData[];
+  execution?: ExecutionStateData;
+}
+
+// =========================================================================
+// Phase 2 Autonomous Execution Cockpit DTO Types
+// =========================================================================
+
+export interface MarketSessionItemData {
+  id: string;
+  name: string;
+  timezone: string;
+  local_time: string;
+  status: "OPEN" | "PRE_OPEN" | "LUNCH" | "CLOSED" | string;
+  status_label: string;
+  is_open: boolean;
+}
+
+export interface GlobalSessionClockData {
+  ist_time: string;
+  phase: string;
+  phase_label: string;
+  playbook_note: string;
+  tape_override_active: boolean;
+  allow_new_entries: boolean;
+  min_bullish_score: number;
+  min_rvol: number;
+  size_multiplier: number;
+  clocks: MarketSessionItemData[];
+}
+
+export interface CapitalSummaryData {
+  mode: "PAPER" | "LIVE" | string;
+  paper_capital: number;
+  net_equity: number;
+  free_margin: number;
+  blocked_margin: number;
+  realised_gross_pnl: number;
+  total_charges: number;
+  realised_net_pnl: number;
+  unrealised_pnl: number;
+  net_day_pnl: number;
+  risk_per_trade_pct: number;
+  current_risk_budget: number;
+  max_open_positions: number;
+  active_positions_count: number;
+}
+
+export interface DailyRiskData {
+  trading_date: string;
+  trades_taken: number;
+  wins: number;
+  losses: number;
+  win_rate_pct: number;
+  consecutive_losses: number;
+  peak_net_pnl: number;
+  circuit_breaker_locked: boolean;
+  lock_reason?: string;
+}
+
+export interface ActivePositionData {
+  position_id: string;
+  mode: string;
+  symbol: string;
+  instrument_token: number;
+  state: string;
+  pattern_type: string;
+  entry_price: number;
+  exit_price?: number;
+  ltp: number;
+  initial_stop: number;
+  current_stop: number;
+  shadow_stop: number;
+  breakeven_stop: number;
+  base_buffer: number;
+  high_water_mark: number;
+  one_r: number;
+  r_multiple: number;
+  mfe_r_multiple: number;
+  initial_qty: number;
+  remaining_qty: number;
+  mod_count: number;
+  max_mods: number;
+  current_gear: number;
+  gear_label: string;
+  tranche1_done: boolean;
+  unrealised_pnl: number;
+  realised_gross_pnl: number;
+  estimated_charges: number;
+  net_total_pnl: number;
+  exit_reason?: string;
+  opened_at: string;
+  closed_at?: string;
+}
+
+export interface CandidateGateDiagnosticData {
+  rank: number;
+  symbol: string;
+  sector: string;
+  ltp: number;
+  bullish_score: number;
+  composite_rvol: number;
+  ev: number;
+  regime_ok: boolean;
+  score_ok: boolean;
+  rvol_ok: boolean;
+  book_quality_ok: boolean;
+  pattern_matched: string;
+  sizing_approved: boolean;
+  overall_status: "READY" | "ACTIVE_OR_COOLDOWN" | "BLOCKED" | string;
+  blocking_reason: string;
+}
+
+export interface ExecutionStateData {
+  mode: "PAPER" | "LIVE" | string;
+  auto_execute: boolean;
+  macro_shock_active: boolean;
+  gate_status: string;
+  gate_reason: string;
+  capital: CapitalSummaryData;
+  daily_risk: DailyRiskData;
+  session_clock: GlobalSessionClockData;
+  active_positions: ActivePositionData[];
+  closed_positions: ActivePositionData[];
+  top_candidate_gates?: CandidateGateDiagnosticData[];
+}
+
+export interface TaxBreakdownData {
+  buy_brokerage: number;
+  sell_brokerage: number;
+  brokerage: number;
+  stt: number;
+  exchange_txn: number;
+  sebi_charges: number;
+  stamp_duty: number;
+  gst: number;
+  total_charges: number;
+}
+
+export interface TradeOrderLegData {
+  order_id: string;
+  position_id: string;
+  leg_type: "ENTRY" | "SCALE_OUT" | "SL" | "EMERGENCY_EXIT" | string;
+  transaction_type: "BUY" | "SELL" | string;
+  order_type: string;
+  quantity: number;
+  filled_quantity: number;
+  price: number;
+  trigger_price: number;
+  average_price: number;
+  status: string;
+  mod_count: number;
+  updated_at: string;
+}
+
+export interface TradeHistoryItemData {
+  position_id: string;
+  trading_date: string;
+  mode: "PAPER" | "LIVE" | string;
+  symbol: string;
+  company_name: string;
+  sector: string;
+  instrument_token: number;
+  state: string;
+  pattern_type: string;
+  purchase_time: string;
+  sell_time: string;
+  hold_duration_sec: number;
+  hold_duration_label: string;
+  quantity: number;
+  buy_price: number;
+  sell_price: number;
+  total_invested: number;
+  margin_blocked: number;
+  total_sell_value: number;
+  price_change_per_share: number;
+  gross_pnl: number;
+  taxes: TaxBreakdownData;
+  net_pnl_after_tax: number;
+  return_on_invested_pct: number;
+  return_on_margin_pct: number;
+  initial_stop: number;
+  final_stop: number;
+  breakeven_stop: number;
+  high_water_mark: number;
+  one_r: number;
+  realised_r_multiple: number;
+  peak_mfe_r: number;
+  r_capture_efficiency_pct: number;
+  mod_count: number;
+  final_gear: number;
+  tranche1_done: boolean;
+  exit_reason: string;
+  orders?: TradeOrderLegData[];
+}
+
+export interface PatternPerformanceData {
+  pattern_type: string;
+  trades: number;
+  wins: number;
+  win_rate_pct: number;
+  avg_r_multiple: number;
+  gross_pnl: number;
+  total_taxes: number;
+  net_pnl_after_tax: number;
+}
+
+export interface ExitReasonStatData {
+  exit_reason: string;
+  count: number;
+  avg_r_multiple: number;
+  gross_pnl: number;
+  total_taxes: number;
+  net_pnl_after_tax: number;
+}
+
+export interface TradeAnalyticsSummaryData {
+  total_trades: number;
+  wins: number;
+  losses: number;
+  breakeven_trades: number;
+  win_rate_pct: number;
+  total_invested_turnover: number;
+  total_sell_turnover: number;
+  total_margin_deployed: number;
+  gross_profit_rupees: number;
+  gross_loss_rupees: number;
+  realised_gross_pnl: number;
+  taxes: TaxBreakdownData;
+  tax_drag_pct_of_gross_win: number;
+  realised_net_pnl: number;
+  profit_factor: number;
+  expectancy_per_trade: number;
+  avg_r_multiple: number;
+  avg_win_r: number;
+  avg_loss_r: number;
+  avg_win_rupees: number;
+  avg_loss_rupees: number;
+  max_win_rupees: number;
+  max_loss_rupees: number;
+  avg_hold_duration_sec: number;
+  tranche1_scale_out_rate: number;
+  avg_r_capture_efficiency: number;
+  by_pattern: PatternPerformanceData[];
+  by_exit_reason: ExitReasonStatData[];
+}
+
+export interface TradeHistoryResponseData {
+  summary: TradeAnalyticsSummaryData;
+  trades: TradeHistoryItemData[];
 }
 
 export interface ReasonBadge {

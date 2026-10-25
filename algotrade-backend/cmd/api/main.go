@@ -14,6 +14,7 @@ import (
 	"github.com/ajaynegi33/AlgoTrade/internal/config"
 	"github.com/ajaynegi33/AlgoTrade/internal/database"
 	"github.com/ajaynegi33/AlgoTrade/internal/engine"
+	"github.com/ajaynegi33/AlgoTrade/internal/execution"
 	"github.com/ajaynegi33/AlgoTrade/internal/kite"
 	"github.com/ajaynegi33/AlgoTrade/internal/response"
 	"github.com/ajaynegi33/AlgoTrade/internal/scanner"
@@ -80,6 +81,12 @@ func main() {
 
 	// Initialize Single-Writer Quant Engine Actor
 	engineActor := engine.NewActor(db, tickerClient, histService, wsHub, scannerService)
+
+	// Initialize Phase 2 Autonomous Execution Manager & wire into Engine Actor
+	execManager := execution.NewManager(db, engineActor, kiteService, tickerClient)
+	defer execManager.Stop()
+	execHandler := execution.NewHandler(execManager)
+
 	if err := engineActor.Start(); err != nil {
 		slog.Error("Failed to start Engine Actor", "error", err)
 	}
@@ -127,6 +134,14 @@ func main() {
 	mux.HandleFunc("GET /api/engine/status", engineHandler.GetStatus)
 	mux.HandleFunc("GET /api/engine/historical-status", engineHandler.GetHistoricalStatus)
 	mux.HandleFunc("GET /api/stocks/{symbol}", engineHandler.GetStockDetail)
+
+	// Phase 2 Autonomous Execution & Risk Management Routes
+	mux.HandleFunc("GET /api/execution/state", execHandler.GetState)
+	mux.HandleFunc("GET /api/execution/history", execHandler.GetHistory)
+	mux.Handle("POST /api/execution/settings", requireAuth(http.HandlerFunc(execHandler.UpdateSettings)))
+	mux.Handle("POST /api/execution/paper-capital", requireAuth(http.HandlerFunc(execHandler.UpdatePaperCapital)))
+	mux.Handle("POST /api/execution/flatten", requireAuth(http.HandlerFunc(execHandler.Flatten)))
+	mux.HandleFunc("POST /api/kite/postback", execHandler.HandleKitePostback)
 
 	// Deferred non-blocking initial scan check on startup
 	go func() {

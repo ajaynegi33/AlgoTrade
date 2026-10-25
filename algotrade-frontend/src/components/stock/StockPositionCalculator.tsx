@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { StockDetailData } from "@/lib/types";
+import { useTradingStore } from "@/store/useTradingStore";
 import { toast } from "sonner";
 
 interface StockPositionCalculatorProps {
@@ -9,9 +10,27 @@ interface StockPositionCalculatorProps {
 }
 
 export function StockPositionCalculator({ stock }: StockPositionCalculatorProps) {
-  const [maxRiskBudget, setMaxRiskBudget] = useState<number>(5000);
+  const { executionState, fetchExecutionState } = useTradingStore();
+  const [maxRiskBudget, setMaxRiskBudget] = useState<number>(
+    executionState?.capital?.current_risk_budget
+      ? Math.max(10, Math.round(executionState.capital.current_risk_budget))
+      : 750
+  );
+  const [hasUserEditedRisk, setHasUserEditedRisk] = useState(false);
   const [stopMode, setStopMode] = useState<"ORL" | "VWAP" | "DAY_LOW" | "CUSTOM">("VWAP");
   const [customStop, setCustomStop] = useState<number>(stock.stop_proxy || stock.ltp * 0.99);
+
+  useEffect(() => {
+    if (!executionState) {
+      fetchExecutionState();
+    }
+  }, [executionState, fetchExecutionState]);
+
+  useEffect(() => {
+    if (!hasUserEditedRisk && executionState?.capital?.current_risk_budget) {
+      setMaxRiskBudget(Math.max(10, Math.round(executionState.capital.current_risk_budget)));
+    }
+  }, [executionState?.capital?.current_risk_budget, hasUserEditedRisk]);
 
   // Suggested stop loss based on selected mode
   const effectiveStop = useMemo(() => {
@@ -38,8 +57,7 @@ export function StockPositionCalculator({ stock }: StockPositionCalculatorProps)
   }, [maxRiskBudget, riskPerShare]);
 
   const lotSize = stock.lot_size || 1;
-  const recommendedLots = Math.max(1, Math.floor(calculatedShares / lotSize));
-  const finalShares = recommendedLots * lotSize;
+  const finalShares = Math.max(1, calculatedShares);
   const actualRisk = finalShares * riskPerShare;
 
   const target1_5R = entryPrice + 1.5 * riskPerShare;
@@ -114,8 +132,11 @@ export function StockPositionCalculator({ stock }: StockPositionCalculatorProps)
               <input
                 type="number"
                 value={maxRiskBudget}
-                onChange={(e) => setMaxRiskBudget(Math.max(500, Number(e.target.value)))}
-                step="500"
+                onChange={(e) => {
+                  setHasUserEditedRisk(true);
+                  setMaxRiskBudget(Math.max(10, Number(e.target.value)));
+                }}
+                step="50"
                 className="w-full pl-7 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
               />
             </div>
@@ -220,8 +241,8 @@ export function StockPositionCalculator({ stock }: StockPositionCalculatorProps)
               </div>
 
               <div className="flex items-center justify-between pb-2 border-b border-slate-200/60">
-                <span className="text-slate-600">F&amp;O Lot Size</span>
-                <span className="font-bold text-slate-900">{lotSize} shares/lot</span>
+                <span className="text-slate-600">Cash Lot Granularity</span>
+                <span className="font-bold text-slate-900">1 share (F&amp;O Ref: {lotSize})</span>
               </div>
             </div>
           </div>
@@ -230,7 +251,7 @@ export function StockPositionCalculator({ stock }: StockPositionCalculatorProps)
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-slate-900">Recommended Order:</span>
               <span className="text-sm font-black text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200">
-                {finalShares.toLocaleString("en-IN")} Shares ({recommendedLots} Lots)
+                {finalShares.toLocaleString("en-IN")} Shares
               </span>
             </div>
             <span className="text-[10px] text-slate-400 block text-right mt-1">

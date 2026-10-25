@@ -94,11 +94,20 @@ function StockDetailContent() {
     const liveMatch = snapshot.all_stocks.find((s) => s.symbol.toUpperCase() === symbol);
     if (!liveMatch) return baseStock;
 
+    const vwapDist = liveMatch.vwap > 0 ? liveMatch.ltp - liveMatch.vwap : baseStock.vwap_distance;
+    const vwapDistPct = liveMatch.vwap > 0 ? ((liveMatch.ltp - liveMatch.vwap) / liveMatch.vwap) * 100 : baseStock.vwap_distance_pct;
+    const liveChange = baseStock.prev_close > 0 ? liveMatch.ltp - baseStock.prev_close : baseStock.change;
+
     return {
       ...baseStock,
       ltp: liveMatch.ltp,
+      change: liveChange,
       change_percent: liveMatch.change_percent,
       vwap: liveMatch.vwap,
+      vwap_distance: vwapDist,
+      vwap_distance_pct: vwapDistPct,
+      bullish_score: liveMatch.bullish_score,
+      bearish_score: liveMatch.bearish_score,
       rvol_session: liveMatch.rvol_session,
       rvol_pace_5m: liveMatch.rvol_pace_5m,
       composite_rs: liveMatch.composite_rs,

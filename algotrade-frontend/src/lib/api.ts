@@ -9,6 +9,8 @@ import {
   KiteUserProfileData,
   UniverseSummaryData,
   StockDetailData,
+  ExecutionStateData,
+  TradeHistoryResponseData,
 } from "./types";
 
 const API_BASE_URL =
@@ -326,4 +328,84 @@ export async function getStockDetail(symbol: string): Promise<StockDetailData> {
   }
   return stockData;
 }
+
+// =========================================================================
+// Phase 2 Autonomous Execution API Calls
+// =========================================================================
+
+export async function getExecutionState(): Promise<ExecutionStateData> {
+  const res = await fetch(`${API_BASE_URL}/api/execution/state`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new ApiError("Failed to fetch execution state", "EXECUTION_STATE_ERROR", res.status);
+  }
+  const json: ApiResponse<ExecutionStateData> = await res.json();
+  if (!json.success || !json.data) {
+    throw new ApiError(json.error?.message || "Failed to fetch execution state", json.error?.code || "EXECUTION_ERROR");
+  }
+  return json.data;
+}
+
+export async function updateExecutionSettings(payload: {
+  mode?: "PAPER" | "LIVE";
+  auto_execute?: boolean;
+  paper_capital?: number;
+  risk_per_trade_pct?: number;
+  max_open_positions?: number;
+}): Promise<ExecutionStateData> {
+  return fetchWithAuth<ExecutionStateData>("/api/execution/settings", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updatePaperCapital(paperCapital: number): Promise<ExecutionStateData> {
+  return fetchWithAuth<ExecutionStateData>("/api/execution/paper-capital", {
+    method: "POST",
+    body: JSON.stringify({ paper_capital: paperCapital }),
+  });
+}
+
+export async function flattenExecutionPosition(payload: {
+  position_id?: string;
+  all?: boolean;
+}): Promise<{ flattened_count: number; state: ExecutionStateData }> {
+  return fetchWithAuth<{ flattened_count: number; state: ExecutionStateData }>("/api/execution/flatten", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getTradeHistory(params?: {
+  mode?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+}): Promise<TradeHistoryResponseData> {
+  const query = new URLSearchParams();
+  if (params?.mode && params.mode !== "ALL") query.set("mode", params.mode);
+  if (params?.from) query.set("from", params.from);
+  if (params?.to) query.set("to", params.to);
+  if (params?.limit) query.set("limit", String(params.limit));
+
+  const qs = query.toString();
+  const endpoint = `/api/execution/history${qs ? `?${qs}` : ""}`;
+  const res = await fetch(`${API_BASE_URL}${endpoint}`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new ApiError("Failed to fetch trade history", "TRADE_HISTORY_ERROR", res.status);
+  }
+  const json: ApiResponse<TradeHistoryResponseData> = await res.json();
+  if (!json.success || !json.data) {
+    throw new ApiError(
+      json.error?.message || "Failed to fetch trade history",
+      json.error?.code || "TRADE_HISTORY_ERROR"
+    );
+  }
+  return json.data;
+}
+
+
 

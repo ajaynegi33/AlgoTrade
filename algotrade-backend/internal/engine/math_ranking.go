@@ -259,11 +259,29 @@ func CalculateBullishScore(
 		reasons |= ReasonHighEV
 	}
 
-	// 12. Composite Bullish Rank Score (0 to 100)
-	score = (0.35 * sVWAP) +
-		(0.25 * math.Min(100.0, compositeRVOL*40.0)) +
-		(0.20 * math.Min(100.0, math.Max(0.0, (stock.CompositeRS+3.0)*16.6))) +
-		(0.20 * math.Min(100.0, math.Max(0.0, (ev+0.5)*50.0)))
+	// 12. 5-Factor Institutional Composite Bullish Rank Score (0 to 100)
+	// Falsification Fix (Bug B4): Directly weight Anti-Spoof Order Flow (sFlow) and Logistic RVOL (sRVOL)
+	// alongside sVWAP, sRS, and sEV to maximize 60%–70% Long-Only Intraday Win Rate.
+	sRVOL := math.Min(100.0, 105.0/(1.0+math.Exp(-1.65*(compositeRVOL-2.0))))
+	sRS := math.Min(100.0, math.Max(0.0, 50.0+48.4*math.Tanh(0.65*stock.CompositeRS)))
+
+	effectiveOBI := float64(stock.SmoothedBuyerRatio)
+	if effectiveOBI <= 0 {
+		effectiveOBI = 0.50
+	}
+	effectiveAgg := float64(stock.AggressorBuyRatio)
+	if stock.FastAggressorEMA > 0 {
+		effectiveAgg = 0.60*float64(stock.FastAggressorEMA) + 0.40*float64(stock.AggressorBuyRatio)
+	}
+	flowComposite := 0.40*effectiveOBI + 0.60*effectiveAgg
+	sFlow := math.Min(100.0, math.Max(0.0, (flowComposite-0.35)*200.0))
+	sEV := math.Min(100.0, math.Max(0.0, (ev+0.40)*55.0))
+
+	score = (0.26 * sVWAP) +
+		(0.22 * sRVOL) +
+		(0.18 * sRS) +
+		(0.20 * sFlow) +
+		(0.14 * sEV)
 
 	if reasons&PenaltyWideSpread != 0 || reasons&PenaltyBelowPrevClose != 0 {
 		score *= 0.60
@@ -331,12 +349,15 @@ func CalculateBearishScore(
 	stopProxy := math.Max(stock.ExchangeVWAP+0.25*atrSafe, currBar.High+0.15*atrSafe)
 	oneR := math.Max(stopProxy-stock.LTP, 0.5*atrSafe)
 
+	// Dual-Horizon RVOL (consistent with CalculateBullishScore so midday 5m breakdown surges are captured)
+	compositeRVOL := math.Max(stock.RVOLSession, 0.85*stock.RVOLPace5m)
+
 	roomToLow := stock.LTP - stock.Low
 	var targetProxy float64
 	if roomToLow >= 1.8*oneR {
 		targetProxy = stock.Low + 0.10*atrSafe
 	} else {
-		if stock.RVOLSession >= 1.8 && aggressorSellRatio >= 0.58 {
+		if compositeRVOL >= 1.8 && aggressorSellRatio >= 0.58 {
 			targetProxy = math.Min(stock.Low, stock.LTP) - 1.8*atrSafe
 		} else {
 			targetProxy = stock.Low
@@ -350,7 +371,7 @@ func CalculateBearishScore(
 	if aggressorSellRatio >= 0.58 && stock.SmoothedBuyerRatio <= 0.42 {
 		pWin += 0.07
 	}
-	if stock.RVOLSession >= 1.8 {
+	if compositeRVOL >= 1.8 {
 		pWin += 0.06
 	}
 	if xBear >= 0.0 && xBear <= 0.50 && invertedCLV >= 0.60 {
@@ -361,11 +382,24 @@ func CalculateBearishScore(
 	rTarget := math.Max(0.1, (stock.LTP-targetProxy)/oneR)
 	ev = (pWin * rTarget) - ((1.0 - pWin) * 1.0) - 0.05
 
-	score = (0.35 * sVWAPBear) +
-		(0.25 * math.Min(100.0, stock.RVOLSession*40.0)) +
-		(0.20 * math.Min(100.0, math.Max(0.0, (-stock.CompositeRS+3.0)*16.6))) +
-		(0.20 * math.Min(100.0, math.Max(0.0, (ev+0.5)*50.0)))
+	sRVOLBear := math.Min(100.0, 105.0/(1.0+math.Exp(-1.65*(compositeRVOL-2.0))))
+	sRSBear := math.Min(100.0, math.Max(0.0, 50.0+48.4*math.Tanh(0.65*(-stock.CompositeRS))))
+	effOBIBear := float64(stock.SmoothedBuyerRatio)
+	if effOBIBear <= 0 {
+		effOBIBear = 0.50
+	}
+	sellerOBI := 1.0 - effOBIBear
+	bearFlowComp := 0.40*sellerOBI + 0.60*float64(aggressorSellRatio)
+	sFlowBear := math.Min(100.0, math.Max(0.0, (bearFlowComp-0.35)*200.0))
+	sEVBear := math.Min(100.0, math.Max(0.0, (ev+0.40)*55.0))
+
+	score = (0.26 * sVWAPBear) +
+		(0.22 * sRVOLBear) +
+		(0.18 * sRSBear) +
+		(0.20 * sFlowBear) +
+		(0.14 * sEVBear)
 
 	stock.BearishScore = score
+	stock.Reasons |= (reasons & (ReasonBearishBreakdown | ReasonSectorLagging))
 	return score, ev, pWin, reasons
 }

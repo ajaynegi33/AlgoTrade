@@ -47,6 +47,10 @@ type TickerClient struct {
 	reconnectCount   atomic.Uint64
 	lastPacketEpoch  atomic.Int64
 
+	callbackMu       sync.RWMutex
+	onOrderUpdate    func([]byte)
+	onReconnect      func()
+
 	ctx              context.Context
 	cancel           context.CancelFunc
 }
@@ -86,6 +90,20 @@ func (t *TickerClient) Stop() {
 // SubscribeRaw returns the receive-only channel for raw binary frames
 func (t *TickerClient) SubscribeRaw() <-chan []byte {
 	return t.rawChan
+}
+
+// SetOrderUpdateHandler registers a listener for JSON text frames (order postbacks) from Kite Ticker
+func (t *TickerClient) SetOrderUpdateHandler(fn func([]byte)) {
+	t.callbackMu.Lock()
+	t.onOrderUpdate = fn
+	t.callbackMu.Unlock()
+}
+
+// SetReconnectHandler registers a listener invoked whenever Kite Ticker reconnects after a drop
+func (t *TickerClient) SetReconnectHandler(fn func()) {
+	t.callbackMu.Lock()
+	t.onReconnect = fn
+	t.callbackMu.Unlock()
 }
 
 // IsConnected returns current connection status
@@ -233,6 +251,15 @@ func (t *TickerClient) connectAndListen(session *SessionInfo) error {
 		}
 	}
 
+	if t.reconnectCount.Load() > 0 {
+		t.callbackMu.RLock()
+		reconnFn := t.onReconnect
+		t.callbackMu.RUnlock()
+		if reconnFn != nil {
+			go reconnFn()
+		}
+	}
+
 	// Read pump
 	conn.SetReadLimit(65536)
 	_ = conn.SetReadDeadline(time.Now().Add(readWait))
@@ -254,7 +281,7 @@ func (t *TickerClient) connectAndListen(session *SessionInfo) error {
 
 		_ = conn.SetReadDeadline(time.Now().Add(readWait))
 
-		if msgType == websocket.BinaryMessage {
+		if msgType == websocket.BinaryMessage && len(message) > 2 {
 			t.packetsReceived.Add(1)
 			t.lastPacketEpoch.Store(time.Now().Unix())
 
@@ -263,6 +290,15 @@ func (t *TickerClient) connectAndListen(session *SessionInfo) error {
 			case t.rawChan <- message:
 			default:
 				// Channel buffer full: drop frame to never block the reader
+			}
+		} else if msgType == websocket.TextMessage && len(message) > 0 {
+			t.callbackMu.RLock()
+			orderFn := t.onOrderUpdate
+			t.callbackMu.RUnlock()
+			if orderFn != nil {
+				msgCopy := make([]byte, len(message))
+				copy(msgCopy, message)
+				go orderFn(msgCopy)
 			}
 		}
 	}

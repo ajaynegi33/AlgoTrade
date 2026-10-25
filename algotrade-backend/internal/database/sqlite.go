@@ -13,8 +13,9 @@ import (
 )
 
 var (
-	dbInstance *sql.DB
-	dbMutex    sync.RWMutex
+	dbInstance     *sql.DB
+	readDBInstance *sql.DB
+	dbMutex        sync.RWMutex
 )
 
 // Init sets up the universal SQLite database connection with WAL mode and runs table migrations.
@@ -62,12 +63,23 @@ func Init(dbPath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to run database migrations: %w", err)
 	}
 
+	// Open dedicated concurrent read pool on WAL database
+	roDB, roErr := sql.Open("sqlite", connStr)
+	if roErr == nil {
+		roDB.SetMaxOpenConns(8)
+		roDB.SetMaxIdleConns(4)
+		roDB.SetConnMaxLifetime(time.Hour)
+		readDBInstance = roDB
+	} else {
+		readDBInstance = db
+	}
+
 	dbInstance = db
 	slog.Info("Universal SQLite database initialized successfully", "path", dbPath, "mode", "WAL")
 	return dbInstance, nil
 }
 
-// GetDB returns the active SQLite database instance. Panics if Init() has not been called.
+// GetDB returns the active SQLite write database instance. Panics if Init() has not been called.
 func GetDB() *sql.DB {
 	dbMutex.RLock()
 	defer dbMutex.RUnlock()
@@ -78,11 +90,26 @@ func GetDB() *sql.DB {
 	return dbInstance
 }
 
+// GetReadDB returns the concurrent read pool (up to 8 connections in WAL mode).
+func GetReadDB() *sql.DB {
+	dbMutex.RLock()
+	defer dbMutex.RUnlock()
+
+	if readDBInstance != nil {
+		return readDBInstance
+	}
+	return dbInstance
+}
+
 // Close closes the database connection.
 func Close() error {
 	dbMutex.Lock()
 	defer dbMutex.Unlock()
 
+	if readDBInstance != nil && readDBInstance != dbInstance {
+		_ = readDBInstance.Close()
+		readDBInstance = nil
+	}
 	if dbInstance != nil {
 		err := dbInstance.Close()
 		dbInstance = nil
@@ -162,6 +189,83 @@ func runMigrations(db *sql.DB) error {
 			reasons INTEGER NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_engine_signals_time ON engine_signals(signal_time);`,
+		`CREATE TABLE IF NOT EXISTS execution_settings (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			mode TEXT NOT NULL DEFAULT 'PAPER',
+			auto_execute INTEGER NOT NULL DEFAULT 0,
+			paper_capital REAL NOT NULL DEFAULT 100000.0,
+			risk_per_trade_pct REAL NOT NULL DEFAULT 0.005,
+			max_open_positions INTEGER NOT NULL DEFAULT 4,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`INSERT OR IGNORE INTO execution_settings (id, mode, auto_execute, paper_capital, risk_per_trade_pct, max_open_positions)
+		 VALUES (1, 'PAPER', 0, 100000.0, 0.005, 4);`,
+		`CREATE TABLE IF NOT EXISTS positions (
+			position_id TEXT PRIMARY KEY,
+			trading_date TEXT NOT NULL,
+			mode TEXT NOT NULL,
+			symbol TEXT NOT NULL,
+			instrument_token INTEGER NOT NULL,
+			state TEXT NOT NULL,
+			pattern_type TEXT NOT NULL,
+			entry_order_id TEXT NOT NULL DEFAULT '',
+			sl_order_id TEXT NOT NULL DEFAULT '',
+			scale_out_order_id TEXT NOT NULL DEFAULT '',
+			entry_price REAL NOT NULL DEFAULT 0,
+			initial_stop REAL NOT NULL DEFAULT 0,
+			current_stop REAL NOT NULL DEFAULT 0,
+			shadow_stop REAL NOT NULL DEFAULT 0,
+			breakeven_stop REAL NOT NULL DEFAULT 0,
+			base_buffer REAL NOT NULL DEFAULT 0,
+			high_water_mark REAL NOT NULL DEFAULT 0,
+			one_r REAL NOT NULL DEFAULT 0,
+			initial_qty INTEGER NOT NULL DEFAULT 0,
+			filled_entry_qty INTEGER NOT NULL DEFAULT 0,
+			filled_exit_qty INTEGER NOT NULL DEFAULT 0,
+			mod_count INTEGER NOT NULL DEFAULT 0,
+			current_gear INTEGER NOT NULL DEFAULT 1,
+			tranche1_done INTEGER NOT NULL DEFAULT 0,
+			realised_gross_pnl REAL NOT NULL DEFAULT 0,
+			total_charges REAL NOT NULL DEFAULT 0,
+			realised_net_pnl REAL NOT NULL DEFAULT 0,
+			exit_reason TEXT NOT NULL DEFAULT '',
+			opened_at DATETIME NOT NULL,
+			closed_at DATETIME
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_positions_date_mode ON positions(trading_date, mode);`,
+		`CREATE TABLE IF NOT EXISTS orders (
+			order_id TEXT PRIMARY KEY,
+			position_id TEXT NOT NULL,
+			leg_type TEXT NOT NULL,
+			symbol TEXT NOT NULL,
+			transaction_type TEXT NOT NULL,
+			order_type TEXT NOT NULL,
+			quantity INTEGER NOT NULL,
+			filled_quantity INTEGER NOT NULL DEFAULT 0,
+			price REAL NOT NULL DEFAULT 0,
+			trigger_price REAL NOT NULL DEFAULT 0,
+			average_price REAL NOT NULL DEFAULT 0,
+			status TEXT NOT NULL,
+			status_message TEXT NOT NULL DEFAULT '',
+			mod_count INTEGER NOT NULL DEFAULT 0,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_orders_position ON orders(position_id);`,
+		`CREATE TABLE IF NOT EXISTS daily_risk_ledger (
+			trading_date TEXT NOT NULL,
+			mode TEXT NOT NULL,
+			trades_taken INTEGER NOT NULL DEFAULT 0,
+			wins INTEGER NOT NULL DEFAULT 0,
+			losses INTEGER NOT NULL DEFAULT 0,
+			consecutive_losses INTEGER NOT NULL DEFAULT 0,
+			realised_gross_pnl REAL NOT NULL DEFAULT 0,
+			total_charges REAL NOT NULL DEFAULT 0,
+			realised_net_pnl REAL NOT NULL DEFAULT 0,
+			peak_net_pnl REAL NOT NULL DEFAULT 0,
+			circuit_breaker_locked INTEGER NOT NULL DEFAULT 0,
+			lock_reason TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (trading_date, mode)
+		);`,
 	}
 
 	for _, query := range queries {
@@ -169,6 +273,10 @@ func runMigrations(db *sql.DB) error {
 			return fmt.Errorf("migration query failed: %w (query: %s)", err, query)
 		}
 	}
+
+	// Idempotent column migrations
+	_, _ = db.Exec(`ALTER TABLE scanned_stocks ADD COLUMN mis_leverage REAL NOT NULL DEFAULT 5.0;`)
+	_, _ = db.Exec(`ALTER TABLE positions ADD COLUMN exit_price REAL NOT NULL DEFAULT 0.0;`)
 
 	return nil
 }

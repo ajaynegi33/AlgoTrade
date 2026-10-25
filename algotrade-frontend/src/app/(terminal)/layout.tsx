@@ -8,7 +8,17 @@ import DashboardSidebar from "@/components/dashboard/DashboardSidebar";
 import { GlobalNavbarSearch } from "@/components/dashboard/GlobalNavbarSearch";
 import { useAuth } from "@/context/AuthContext";
 import { useTradingStore } from "@/store/useTradingStore";
+import { useEngineWebSocket } from "@/hooks/useEngineWebSocket";
 import { toast } from "sonner";
+
+const MARKET_FLAG_MAP: Record<string, { flag: string; short: string }> = {
+  NSE: { flag: "🇮🇳", short: "NSE" },
+  TOKYO: { flag: "🇯🇵", short: "Tokyo" },
+  SHANGHAI: { flag: "🇨🇳", short: "Shanghai" },
+  FRANKFURT: { flag: "🇩🇪", short: "Frankfurt" },
+  LONDON: { flag: "🇬🇧", short: "London" },
+  NEW_YORK: { flag: "🇺🇸", short: "New York" },
+};
 
 interface MarketCountdownState {
   label: string;
@@ -20,23 +30,26 @@ function TerminalHeaderTitle() {
   const pathname = usePathname();
 
   const title = useMemo(() => {
+    if (pathname.startsWith("/trades")) {
+      return "Trade History, Tax Audit & Engine Analytics";
+    }
     if (pathname.startsWith("/search/")) {
       const sym = pathname.replace("/search/", "").toUpperCase();
       return `${sym} Quant Cockpit`;
     }
     if (pathname.startsWith("/search")) {
-      return "Search & Market Outliers";
+      return "Outlier Screener & Stock Deep-Dive";
     }
     if (pathname.startsWith("/leaderboard")) {
-      return "Quantitative Leaderboard";
+      return "213-Stock Quantitative Rank Matrix";
     }
     if (pathname.startsWith("/universe")) {
-      return "Stock Universe Scanner";
+      return "NSE F&O Master Universe Scanner";
     }
     if (pathname.startsWith("/profile")) {
-      return "Kite Profile & Margins";
+      return "Zerodha Kite Broker & Margin Ledger";
     }
-    return "Trading Command Center";
+    return "Autonomous Execution Desk";
   }, [pathname]);
 
   return (
@@ -52,7 +65,16 @@ export default function TerminalLayout({
   children: React.ReactNode;
 }) {
   const { user, logout } = useAuth();
-  const { kiteStatus, fetchKiteStatus } = useTradingStore();
+  const kiteStatus = useTradingStore((s) => s.kiteStatus);
+  const fetchKiteStatus = useTradingStore((s) => s.fetchKiteStatus);
+  const executionState = useTradingStore((s) => s.executionState);
+
+  // Mount persistent singleton WebSocket at layout root so route navigation never drops the stream
+  const { snapshot } = useEngineWebSocket();
+  const clocks =
+    snapshot?.execution?.session_clock?.clocks ??
+    executionState?.session_clock?.clocks ??
+    [];
 
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isMobileOpen, setIsMobileOpen] = useState(false);
@@ -231,7 +253,7 @@ export default function TerminalLayout({
               </div>
 
               {/* Right: Live Connection Telemetry Badges */}
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2.5">
                 {kiteStatus?.is_connected ? (
                   <Link
                     href="/profile"
@@ -291,6 +313,59 @@ export default function TerminalLayout({
                 )}
               </div>
             </div>
+
+            {/* Persistent Global Market Sessions Strip — Shows Which Country Markets Are Currently Open Across Every Page */}
+            {clocks.length > 0 && (
+              <div className="px-4 sm:px-6 lg:px-8 py-1.5 bg-slate-50/90 border-t border-slate-200/60 flex items-center justify-between gap-3 overflow-x-auto scrollbar-none font-mono text-[11px]">
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Global Markets:
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    {clocks.map((c) => {
+                      const meta = MARKET_FLAG_MAP[c.id] || { flag: "🌐", short: c.id };
+                      return (
+                        <span
+                          key={c.id}
+                          title={`${c.name} (${c.local_time}) — ${c.status_label}`}
+                          className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[10px] transition-colors shrink-0 ${
+                            c.is_open
+                              ? "bg-emerald-50 text-emerald-900 border-emerald-300 font-bold"
+                              : c.status === "PRE_OPEN" || c.status === "LUNCH"
+                              ? "bg-amber-50 text-amber-800 border-amber-200 font-semibold"
+                              : "bg-white text-slate-400 border-slate-200/80"
+                          }`}
+                        >
+                          <span>{meta.flag}</span>
+                          <span>{meta.short}</span>
+                          <span
+                            className={`w-1.5 h-1.5 rounded-full ${
+                              c.is_open
+                                ? "bg-emerald-500 animate-pulse"
+                                : c.status === "PRE_OPEN" || c.status === "LUNCH"
+                                ? "bg-amber-500"
+                                : "bg-slate-300"
+                            }`}
+                          />
+                          <span className="hidden xl:inline text-[9px] opacity-80">
+                            {c.is_open ? "OPEN" : c.status === "LUNCH" ? "LUNCH" : "CLOSED"}
+                          </span>
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {snapshot?.execution?.session_clock?.phase_label && (
+                  <div className="hidden lg:flex items-center gap-2 text-[10px] text-slate-500 shrink-0">
+                    <span>Playbook:</span>
+                    <strong className="text-slate-800">
+                      {snapshot.execution.session_clock.phase_label}
+                    </strong>
+                  </div>
+                )}
+              </div>
+            )}
           </header>
 
           {/* Page Body */}
