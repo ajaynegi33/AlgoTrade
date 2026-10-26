@@ -48,3 +48,5 @@ Kite Docs
 *.db-wal
 *.db-shm
 algotrade-backend/data/
+
+algotradebackend/AlgoTrade-key.pem
