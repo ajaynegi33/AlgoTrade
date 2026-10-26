@@ -67,14 +67,6 @@ type ExecutionBroker interface {
 	FetchOrders(ctx context.Context) ([]OrderUpdateEvent, error)
 }
 
-// computeSellSLLimitPrice calculates the protective limit price below triggerPrice for NSE SL (Stop-Loss Limit) orders
-func computeSellSLLimitPrice(triggerPrice, tickSize float64) float64 {
-	if tickSize <= 0 {
-		tickSize = 0.05
-	}
-	slippageBand := math.Max(4.0*tickSize, 0.0040*triggerPrice)
-	return RoundDownToTick(math.Max(tickSize, triggerPrice-slippageBand), tickSize)
-}
 
 // =========================================================================
 // 1. Live Zerodha Broker Adapter (ap-south-1 Optimized)

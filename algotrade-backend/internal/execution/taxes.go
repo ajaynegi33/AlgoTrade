@@ -87,24 +87,6 @@ func CalculatePositionTaxBreakdown(buyPrice, sellPrice float64, qty int, splitEx
 	}
 }
 
-// BreakevenTriggerPrice computes the exact SL trigger price (rounded up to TickSize)
-// on the remaining runner shares so that even if the runner stops out at Breakeven,
-// TotalCharges on the entire trade + a 0.15% / 2-tick cushion are 100% covered.
-func BreakevenTriggerPrice(entryPrice float64, initialQty, runnerQty int, tickSize float64) float64 {
-	if tickSize <= 0 {
-		tickSize = 0.05
-	}
-	if initialQty <= 0 {
-		initialQty = 1
-	}
-	if runnerQty <= 0 {
-		runnerQty = 1
-	}
-	taxes := CalculateRoundTripCharges(entryPrice, entryPrice, initialQty)
-	perShareTax := taxes.TotalCharges / float64(runnerQty)
-	minCushion := math.Max(perShareTax+2.0*tickSize, 0.0015*entryPrice)
-	return RoundUpToTick(entryPrice+minCushion, tickSize)
-}
 
 // RoundToTick rounds a price to the nearest valid exchange tick increment
 func RoundToTick(price, tickSize float64) float64 {

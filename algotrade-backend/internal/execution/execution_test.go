@@ -867,5 +867,59 @@ func TestPositionWorker_NotifyClosedIdempotent(t *testing.T) {
 	}
 }
 
+func TestDecoupledStopLossAndSizing(t *testing.T) {
+	// 1. Verify StopLoss Calculations
+	entryPrice := 500.0
+	signalLow := 496.0
+	atr := 4.0
+	tick := 0.05
+
+	spec, err := ComputeStopAndBufferSpec(entryPrice, signalLow, atr, tick)
+	if err != nil {
+		t.Fatalf("ComputeStopAndBufferSpec failed: %v", err)
+	}
+	if spec.InitialStop >= entryPrice {
+		t.Fatalf("initial stop %.2f must be below entry price %.2f", spec.InitialStop, entryPrice)
+	}
+	if spec.OneR <= 0 {
+		t.Fatalf("oneR %.2f must be positive", spec.OneR)
+	}
+
+	// Overextended check (> 1.25x DeltaMax)
+	_, overextErr := ComputeStopAndBufferSpec(500.0, 470.0, 4.0, 0.05)
+	if overextErr == nil {
+		t.Fatalf("expected error for overextended setup, got nil")
+	}
+
+	// BreakevenTriggerPrice check
+	bePrice := BreakevenTriggerPrice(500.0, 100, 50, 0.05)
+	if bePrice <= 500.0 {
+		t.Fatalf("breakeven trigger price %.2f must be above entry price 500.00 to cover taxes", bePrice)
+	}
+
+	// ComputeSellSLLimitPrice check
+	slLimit := ComputeSellSLLimitPrice(495.0, 0.05)
+	if slLimit >= 495.0 {
+		t.Fatalf("SL limit price %.2f must be strictly below trigger price 495.00", slLimit)
+	}
+
+	// 2. Verify Sizer Calculations & Risk Curve
+	if r := EffectiveRiskPerTradePct(10000.0, 0.005); r != 0.0125 {
+		t.Fatalf("expected 1.25%% risk for 10k account, got %.4f", r)
+	}
+	if r := EffectiveRiskPerTradePct(40000.0, 0.005); r != 0.0100 {
+		t.Fatalf("expected 1.00%% risk for 40k account, got %.4f", r)
+	}
+	if r := EffectiveRiskPerTradePct(150000.0, 0.005); r != 0.0075 {
+		t.Fatalf("expected 0.75%% risk for 150k account, got %.4f", r)
+	}
+	if r := EffectiveRiskPerTradePct(1000000.0, 0.005); r != 0.0050 {
+		t.Fatalf("expected 0.50%% risk for 10L account, got %.4f", r)
+	}
+	if r := EffectiveRiskPerTradePct(10000000.0, 0.005); r != 0.0035 {
+		t.Fatalf("expected 0.35%% risk for 1Cr account, got %.4f", r)
+	}
+}
+
 
 
