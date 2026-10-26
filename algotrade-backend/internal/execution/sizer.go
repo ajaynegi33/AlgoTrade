@@ -98,15 +98,7 @@ func EffectiveRiskPerTradePct(netEquity, configuredRiskPct float64) float64 {
 
 // ComputePositionSize evaluates the 4 institutional sizing constraints (Risk, Margin, Concentration, Liquidity)
 // from ₹500 to ₹10Cr+ accounts and enforces the Mandatory Net-Profitability Gate at +1.0R.
-func ComputePositionSize(
-	s *engine.StockMetrics,
-	signalBarLow float64,
-	netEquity float64,
-	freeMargin float64,
-	riskPerTradePct float64,
-	sessionSizeMult float64,
-	drawdownMult float64,
-) SizingDecision {
+func ComputePositionSize( s *engine.StockMetrics, signalBarLow float64, netEquity float64, freeMargin float64, riskPerTradePct float64, sessionSizeMult float64, drawdownMult float64 ) SizingDecision {
 	tickSize := float64(s.TickSize)
 	if tickSize <= 0 {
 		tickSize = 0.05

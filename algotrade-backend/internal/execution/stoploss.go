@@ -64,12 +64,7 @@ type StopAndBufferSpec struct {
 //  4. Base breathing buffer: 0.75x ATR bounded within [DeltaMin, DeltaMax].
 //  5. Signal candle low: raw stop = signalBarLow - 2 ticks.
 //  6. No-Chase Rule: if raw stop distance > 1.25 * DeltaMax, the setup is rejected.
-func ComputeStopAndBufferSpec(
-	entryPrice float64,
-	signalBarLow float64,
-	atr14 float64,
-	tickSize float64,
-) (StopAndBufferSpec, error) {
+func ComputeStopAndBufferSpec( entryPrice float64, signalBarLow float64, atr14 float64, tickSize float64 ) (StopAndBufferSpec, error) {
 	if entryPrice <= 0 {
 		return StopAndBufferSpec{}, fmt.Errorf("invalid entry price: %.2f", entryPrice)
 	}
