@@ -124,14 +124,12 @@ func main() {
 	// Protected User Routes
 	requireAuth := auth.AuthMiddleware(cfg.JWTSecret)
 	mux.Handle("GET /api/user/me", requireAuth(http.HandlerFunc(userHandler.GetProfile)))
-	mux.Handle("GET /api/user/profile", requireAuth(http.HandlerFunc(userHandler.GetProfile)))
 
 	// Zerodha Kite Connect Routes
 	mux.HandleFunc("GET /api/kite/status", kiteHandler.GetStatus)
 	mux.HandleFunc("GET /api/kite/login-url", kiteHandler.GetLoginURL)
 	mux.HandleFunc("GET /api/kite/callback", kiteHandler.HandleBrowserCallback) // Direct browser redirect from Zerodha
 	mux.HandleFunc("GET /api/kite/profile", kiteHandler.GetProfile)             // Real Zerodha profile & account margins
-	mux.Handle("POST /api/kite/callback", requireAuth(http.HandlerFunc(kiteHandler.HandleCallback)))
 
 	// Stock Universe & 08:30 AM Scanner Routes
 	mux.HandleFunc("GET /api/scanner/universe", scannerHandler.GetUniverse)

@@ -151,29 +151,6 @@ func (t *TickerClient) Subscribe(tokens []uint32) error {
 	return t.sendSubscribeAndMode(tokens)
 }
 
-// Unsubscribe removes instrument tokens and sends unsubscribe command
-func (t *TickerClient) Unsubscribe(tokens []uint32) error {
-	if len(tokens) == 0 {
-		return nil
-	}
-
-	t.tokensMu.Lock()
-	for _, tok := range tokens {
-		delete(t.subscribedTokens, tok)
-	}
-	t.tokensMu.Unlock()
-
-	if !t.isConnected.Load() {
-		return nil
-	}
-
-	payload := map[string]interface{}{
-		"a": "unsubscribe",
-		"v": tokens,
-	}
-	return t.writeJSON(payload)
-}
-
 func (t *TickerClient) connectionLoop() {
 	backoff := 1 * time.Second
 

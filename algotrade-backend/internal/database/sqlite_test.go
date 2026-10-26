@@ -19,10 +19,6 @@ func TestSQLiteInitAndMigrations(t *testing.T) {
 		t.Fatal("Expected non-nil db instance")
 	}
 
-	if GetDB() != db {
-		t.Fatal("GetDB() returned different instance")
-	}
-
 	// Verify tables exist
 	tables := []string{"kite_sessions", "scanned_stocks"}
 	for _, table := range tables {

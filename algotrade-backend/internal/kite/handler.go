@@ -1,7 +1,6 @@
 package kite
 
 import (
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -86,33 +85,3 @@ func (h *Handler) HandleBrowserCallback(w http.ResponseWriter, r *http.Request) 
 	http.Redirect(w, r, target, http.StatusFound)
 }
 
-type CallbackRequest struct {
-	RequestToken string `json:"request_token"`
-}
-
-// HandleCallback exchanges the request_token for an access_token via programmatic JSON POST
-func (h *Handler) HandleCallback(w http.ResponseWriter, r *http.Request) {
-	var req CallbackRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		response.Error(w, http.StatusBadRequest, "INVALID_REQUEST_BODY", "failed to parse json body")
-		return
-	}
-
-	if req.RequestToken == "" {
-		response.Error(w, http.StatusBadRequest, "MISSING_REQUEST_TOKEN", "request_token is required")
-		return
-	}
-
-	session, err := h.service.GenerateSession(req.RequestToken)
-	if err != nil {
-		response.Error(w, http.StatusUnauthorized, "KITE_AUTH_FAILED", err.Error())
-		return
-	}
-
-	response.Success(w, http.StatusOK, map[string]any{
-		"message":    "Kite authentication successful",
-		"user_id":    session.UserID,
-		"user_name":  session.UserName,
-		"login_time": session.LoginTime,
-	})
-}

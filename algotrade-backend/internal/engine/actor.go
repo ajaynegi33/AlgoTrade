@@ -87,7 +87,6 @@ type Actor struct {
 	hasNifty       bool
 	hasBankNifty   bool
 
-	prevBreadth    float64
 	breadthHist    [6]float64 // Rolling 5-second breadth ring for shock velocity
 	breadthHistIdx uint8
 	macroShockExp  int64 // Unix epoch when FLASH_SHOCK cooldown expires
@@ -168,11 +167,6 @@ func (a *Actor) BindPositionWorker(token uint32, symbol string, worker PositionT
 	case <-a.ctx.Done():
 		return 0
 	}
-}
-
-// IsInMacroShock returns true if Nifty 50 is currently in a FLASH_SHOCK state
-func (a *Actor) IsInMacroShock() bool {
-	return a.inMacroShock.Load()
 }
 
 // Start boots the actor goroutine and background SQLite writer

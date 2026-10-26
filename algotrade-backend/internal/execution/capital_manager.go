@@ -32,7 +32,6 @@ type CapitalManager struct {
 
 	settings          ExecutionSettings
 	tradingDate       string
-	liveNetEquity     float64
 	liveFreeMargin    float64
 	liveGrossBase     float64
 	lastLiveRefreshAt time.Time

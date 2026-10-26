@@ -57,7 +57,6 @@ type PositionWorker struct {
 	shadowStopBits       atomic.Uint64
 	proposedStopBits     atomic.Uint64
 	slBreachSinceUnix    atomic.Int64
-	decayBreachSinceUnix atomic.Int64
 	shadowBreachTicks    atomic.Uint32
 	lastModUnixMs        atomic.Int64
 

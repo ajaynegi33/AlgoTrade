@@ -7,7 +7,6 @@ import (
 
 // Sector ID enumeration (1 to 12)
 const (
-	SectorUnknown    uint8 = 0
 	SectorNifty50    uint8 = 1
 	SectorAuto       uint8 = 2
 	SectorBank       uint8 = 3
@@ -156,15 +155,6 @@ func ResolveSector(db *sql.DB, symbol string) (uint8, string, uint32) {
 	// Layer 3: NIFTY 50 fallback
 	nifty := SectorRegistry[SectorNifty50]
 	return nifty.ID, nifty.Name, nifty.Token
-}
-
-// GetAllSectorTokens returns a slice of all 12 Kite index instrument tokens
-func GetAllSectorTokens() []uint32 {
-	tokens := make([]uint32, 0, len(SectorRegistry))
-	for _, info := range SectorRegistry {
-		tokens = append(tokens, info.Token)
-	}
-	return tokens
 }
 
 // GetSectorName returns human-readable sector name for a given sector ID

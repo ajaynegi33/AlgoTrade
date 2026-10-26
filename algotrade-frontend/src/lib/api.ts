@@ -265,13 +265,6 @@ export async function getKiteLoginURL(): Promise<string> {
   return json.data.login_url;
 }
 
-export async function sendKiteCallback(requestToken: string): Promise<{ message: string; user_id: string; user_name: string; login_time: string }> {
-  return fetchWithAuth<{ message: string; user_id: string; user_name: string; login_time: string }>("/api/kite/callback", {
-    method: "POST",
-    body: JSON.stringify({ request_token: requestToken }),
-  });
-}
-
 export async function getStockUniverse(date?: string): Promise<UniverseSummaryData> {
   const endpoint = date ? `/api/scanner/universe?date=${encodeURIComponent(date)}` : "/api/scanner/universe";
   const res = await fetch(`${API_BASE_URL}${endpoint}`, {

@@ -70,44 +70,6 @@ export function DashboardOverviewSkeleton() {
 }
 
 /**
- * Pre-composed skeleton for the Stock Universe table
- */
-export function StockUniverseTableSkeleton() {
-  return (
-    <div className="divide-y divide-slate-100">
-      {[1, 2, 3, 4, 5, 6, 7].map((i) => (
-        <tr key={i} className="animate-pulse">
-          <td className="py-4 px-4">
-            <Skeleton className="h-4 w-20" />
-          </td>
-          <td className="py-4 px-4">
-            <Skeleton className="h-4 w-40" />
-          </td>
-          <td className="py-4 px-4">
-            <Skeleton className="h-5 w-12 rounded-md" />
-          </td>
-          <td className="py-4 px-4">
-            <Skeleton className="h-4 w-14" />
-          </td>
-          <td className="py-4 px-4">
-            <Skeleton className="h-4 w-10" />
-          </td>
-          <td className="py-4 px-4">
-            <Skeleton className="h-4 w-12" />
-          </td>
-          <td className="py-4 px-4">
-            <Skeleton className="h-5 w-12 rounded-md" />
-          </td>
-          <td className="py-4 px-4">
-            <Skeleton className="h-5 w-24 rounded-full" />
-          </td>
-        </tr>
-      ))}
-    </div>
-  );
-}
-
-/**
  * Pre-composed skeleton for the Zerodha Profile page
  */
 export function KiteProfileSkeleton() {

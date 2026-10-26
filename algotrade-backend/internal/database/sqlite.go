@@ -80,28 +80,6 @@ func Init(dbPath string) (*sql.DB, error) {
 	return dbInstance, nil
 }
 
-// GetDB returns the active SQLite write database instance. Panics if Init() has not been called.
-func GetDB() *sql.DB {
-	dbMutex.RLock()
-	defer dbMutex.RUnlock()
-
-	if dbInstance == nil {
-		panic("database.GetDB called before database.Init")
-	}
-	return dbInstance
-}
-
-// GetReadDB returns the concurrent read pool (up to 8 connections in WAL mode).
-func GetReadDB() *sql.DB {
-	dbMutex.RLock()
-	defer dbMutex.RUnlock()
-
-	if readDBInstance != nil {
-		return readDBInstance
-	}
-	return dbInstance
-}
-
 // Close closes the database connection.
 func Close() error {
 	dbMutex.Lock()

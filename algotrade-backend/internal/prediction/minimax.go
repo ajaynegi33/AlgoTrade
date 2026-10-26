@@ -48,8 +48,6 @@ func EvaluateMinimaxAlphaBeta(s *engine.StockMetrics, isBullish bool) MinimaxEva
 	// Ply 3: MAX second wave
 	// Ply 4: MIN terminal evaluation
 	alpha := -999.0
-	beta := 999.0
-	_ = beta
 
 	var predictedPath []string
 	var verdict string
