@@ -92,6 +92,12 @@ func main() {
 	}
 	defer engineActor.Stop()
 
+	
+	// Automatically re-seed historical baselines & scanned universe whenever Zerodha Kite OAuth succeeds
+	kiteService.RegisterOnAuthenticated(func() {
+		engineActor.OnKiteAuthenticated()
+	})
+
 	engineHandler := engine.NewHandler(engineActor, wsHub)
 
 	// Initialize Handlers

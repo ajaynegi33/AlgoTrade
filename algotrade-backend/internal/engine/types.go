@@ -152,6 +152,7 @@ type ActivePositionDTO struct {
 	NetTotalPnL      float64 `json:"net_total_pnl"`
 	ExitReason       string  `json:"exit_reason,omitempty"`
 	OpenedAt         string  `json:"opened_at"`
+	OpenedAtUnix     int64   `json:"opened_at_unix,omitempty"`
 	ClosedAt         string  `json:"closed_at,omitempty"`
 }
 

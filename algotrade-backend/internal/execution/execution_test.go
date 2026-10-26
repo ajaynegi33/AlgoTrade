@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 	"unsafe"
@@ -426,4 +427,290 @@ func TestPhase27_TradeHistoryAndTaxBreakdown(t *testing.T) {
 		t.Fatalf("unexpected summary metrics: %+v", hist.Summary)
 	}
 }
+
+func TestActivePositionsStableEntryOrder(t *testing.T) {
+	mgr := NewManager(nil, nil, nil, nil)
+	defer mgr.Stop()
+
+	baseTime := time.Date(2026, 10, 26, 9, 30, 0, 0, time.UTC)
+
+	// Create 3 active workers with strictly ordered OpenedAt timestamps (A -> B -> C)
+	wA := &PositionWorker{
+		PositionID:   "POS-INFY-1",
+		Symbol:       "INFY",
+		Mode:         "PAPER",
+		OpenedAt:     baseTime,
+		OpenedAtUnix: baseTime.Unix(),
+		EntryPrice:   1500.0,
+		InitialQty:   50,
+	}
+	wB := &PositionWorker{
+		PositionID:   "POS-TCS-2",
+		Symbol:       "TCS",
+		Mode:         "PAPER",
+		OpenedAt:     baseTime.Add(2 * time.Minute),
+		OpenedAtUnix: baseTime.Add(2 * time.Minute).Unix(),
+		EntryPrice:   3500.0,
+		InitialQty:   20,
+	}
+	wC := &PositionWorker{
+		PositionID:   "POS-RELIANCE-3",
+		Symbol:       "RELIANCE",
+		Mode:         "PAPER",
+		OpenedAt:     baseTime.Add(5 * time.Minute),
+		OpenedAtUnix: baseTime.Add(5 * time.Minute).Unix(),
+		EntryPrice:   2500.0,
+		InitialQty:   30,
+	}
+
+	mgr.mu.Lock()
+	mgr.activeWorkers[wB.PositionID] = wB
+	mgr.activeWorkers[wC.PositionID] = wC
+	mgr.activeWorkers[wA.PositionID] = wA
+	mgr.mu.Unlock()
+
+	var stocks [512]engine.StockMetrics
+	pulse := engine.MarketPulseDTO{MarketRegime: "BULLISH_TREND"}
+
+	// Simulate 25 consecutive engine snapshot ticks with fluctuating prices
+	for i := 0; i < 25; i++ {
+		// Update prices on each tick to ensure price volatility doesn't perturb order
+		wA.latestLTPBits.Store(math.Float64bits(1500.0 + float64(i)*0.5))
+		wB.latestLTPBits.Store(math.Float64bits(3500.0 - float64(i)*1.0))
+		wC.latestLTPBits.Store(math.Float64bits(2500.0 + float64(i)*2.0))
+
+		state := mgr.OnSecondTick(&stocks, nil, nil, nil, pulse, false)
+		if len(state.ActivePositions) != 3 {
+			t.Fatalf("iteration %d: expected 3 active positions, got %d", i, len(state.ActivePositions))
+		}
+
+		// Pos 0 MUST be wA (opened at 09:30:00)
+		if state.ActivePositions[0].PositionID != "POS-INFY-1" {
+			t.Fatalf("iteration %d: position 0 changed! expected POS-INFY-1, got %s", i, state.ActivePositions[0].PositionID)
+		}
+		// Pos 1 MUST be wB (opened at 09:32:00)
+		if state.ActivePositions[1].PositionID != "POS-TCS-2" {
+			t.Fatalf("iteration %d: position 1 changed! expected POS-TCS-2, got %s", i, state.ActivePositions[1].PositionID)
+		}
+		// Pos 2 MUST be wC (opened at 09:35:00)
+		if state.ActivePositions[2].PositionID != "POS-RELIANCE-3" {
+			t.Fatalf("iteration %d: position 2 changed! expected POS-RELIANCE-3, got %s", i, state.ActivePositions[2].PositionID)
+		}
+
+		if state.ActivePositions[0].OpenedAtUnix >= state.ActivePositions[1].OpenedAtUnix ||
+			state.ActivePositions[1].OpenedAtUnix >= state.ActivePositions[2].OpenedAtUnix {
+			t.Fatalf("iteration %d: OpenedAtUnix timestamps out of order: %+v", i, state.ActivePositions)
+		}
+	}
+}
+
+func TestSLGapThroughBreachAndFlatten(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var stock engine.StockMetrics
+	stock.InstrumentToken = 2010113
+	stock.SetSymbol("INOXWIND")
+	stock.LTP = 59.50
+	stock.TickSize = 0.05
+	stock.MISLeverage = 5.0
+	for i := 0; i < 5; i++ {
+		stock.AskLevels[i] = engine.DepthLevel{Price: float32(59.55 + float64(i)*0.05), Qty: 50000}
+		stock.BidLevels[i] = engine.DepthLevel{Price: float32(59.45 - float64(i)*0.05), Qty: 50000}
+	}
+
+	sizing := SizingDecision{
+		Approved:        true,
+		Quantity:        132,
+		DustFloorQty:    1,
+		EntryLimitPrice: 59.44,
+		BreakevenStop:   59.63,
+		StopSpec: StopAndBufferSpec{
+			BaseBuffer:   3.75,
+			InitialStop:  58.83,
+			OneR:         0.65,
+			SignalBarLow: 58.83,
+		},
+	}
+
+	var worker *PositionWorker
+	reconciler := NewOrderReconciler(nil, func(posID, legType string, ev OrderUpdateEvent, delta int) {
+		if worker != nil {
+			worker.OnOrderDelta(legType, ev, delta)
+		}
+	})
+	paper := NewPaperBroker(func(ev OrderUpdateEvent) {
+		reconciler.ProcessOrderEvent(ev)
+	})
+
+	closedCh := make(chan struct{}, 1)
+	worker = NewPositionWorker(ctx, WorkerConfig{
+		PositionID:  "POS-INOXWIND-84873",
+		TradingDate: "2026-10-26",
+		Mode:        "PAPER",
+		Symbol:      "INOXWIND",
+		Token:       2010113,
+		PatternType: "VWAP_PULLBACK_RECLAIM",
+		TickSize:    0.05,
+		MISLeverage: 5.0,
+		Sizing:      sizing,
+		Broker:      paper,
+		PaperBroker: paper,
+		Reconciler:  reconciler,
+		GetStockPtr: func() *engine.StockMetrics { return &stock },
+		OnClosed: func(w *PositionWorker) {
+			select {
+			case closedCh <- struct{}{}:
+			default:
+			}
+		},
+	})
+
+	if err := worker.Start(); err != nil {
+		t.Fatalf("worker.Start failed: %v", err)
+	}
+
+	// Wait for entry fill & initial SL placement
+	time.Sleep(100 * time.Millisecond)
+	if worker.RemainingQty() != 132 {
+		t.Fatalf("expected RemainingQty=132, got %d", worker.RemainingQty())
+	}
+
+	// Now simulate price falling directly to 58.81 (below initial stop 58.83)
+	stock.LTP = 58.81
+	stock.LastUpdatedUnix += 5
+	worker.OnTickHotPath(&stock, false)
+
+	select {
+	case <-closedCh:
+		t.Logf("Closed successfully! State: %s", worker.ToDTO().State)
+	case <-time.After(2 * time.Second):
+		dto := worker.ToDTO()
+		t.Fatalf("timed out waiting for position to close! Current state: %s, exitReason: %s, remaining: %d, modCount: %d",
+			dto.State, dto.ExitReason, dto.RemainingQty, dto.ModCount)
+	}
+}
+
+func TestPaperBrokerRehydrationAndTrigger(t *testing.T) {
+	var triggeredEvent OrderUpdateEvent
+	eventCh := make(chan OrderUpdateEvent, 1)
+
+	broker := NewPaperBroker(func(ev OrderUpdateEvent) {
+		eventCh <- ev
+	})
+
+	token := uint32(56321)
+	broker.SeedRestingOrder("PAPER-SL-101", "IEX", token, 112, 102.50, 102.30, 0, OrderStatusTrigPending)
+
+	stock := engine.StockMetrics{
+		InstrumentToken: token,
+		LTP:             102.40,
+		TickSize:        0.05,
+		Bid1Price:       102.35,
+	}
+	stock.BidLevels[0].Price = 102.35
+	stock.BidLevels[0].Qty = 500
+
+	broker.EvaluateTickForToken(&stock)
+
+	select {
+	case triggeredEvent = <-eventCh:
+		if triggeredEvent.Status != OrderStatusComplete {
+			t.Fatalf("expected triggered order to be COMPLETE, got %s", triggeredEvent.Status)
+		}
+		if triggeredEvent.FilledQuantity != 112 {
+			t.Fatalf("expected 112 filled, got %d", triggeredEvent.FilledQuantity)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("timed out waiting for rehydrated paper order to trigger")
+	}
+}
+
+func TestRehydratedEmergencyFlattenForceExit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	closedCh := make(chan struct{}, 1)
+	stock := engine.StockMetrics{
+		InstrumentToken: 2010113,
+		LTP:             58.80,
+		TickSize:        0.05,
+	}
+	stock.BidLevels[0].Price = 58.75
+	stock.BidLevels[0].Qty = 1000
+
+	var reconciler *OrderReconciler
+	broker := NewPaperBroker(func(ev OrderUpdateEvent) {
+		if reconciler != nil {
+			reconciler.ProcessOrderEvent(ev)
+		}
+	})
+
+	var worker *PositionWorker
+	reconciler = NewOrderReconciler(nil, func(posID, legType string, ev OrderUpdateEvent, delta int) {
+		if worker != nil {
+			worker.OnOrderDelta(legType, ev, delta)
+		}
+	})
+
+	sizing := SizingDecision{
+		Approved:        true,
+		Quantity:        132,
+		DustFloorQty:    1,
+		EntryLimitPrice: 59.44,
+		BreakevenStop:   59.63,
+		StopSpec: StopAndBufferSpec{
+			BaseBuffer:   3.75,
+			InitialStop:  58.83,
+			OneR:         0.65,
+			SignalBarLow: 58.83,
+		},
+	}
+
+	worker = NewPositionWorker(ctx, WorkerConfig{
+		PositionID:  "POS-INOXWIND-TEST-1",
+		TradingDate: "2026-10-26",
+		Mode:        "PAPER",
+		Symbol:      "INOXWIND",
+		Token:       2010113,
+		PatternType: "VWAP_PULLBACK_RECLAIM",
+		TickSize:    0.05,
+		MISLeverage: 5.0,
+		Sizing:      sizing,
+		Broker:      broker,
+		PaperBroker: broker,
+		Reconciler:  reconciler,
+		GetStockPtr: func() *engine.StockMetrics { return &stock },
+		OnClosed: func(w *PositionWorker) {
+			select {
+			case closedCh <- struct{}{}:
+			default:
+			}
+		},
+	})
+
+	// Simulate rehydration state where worker was restored in StateEmergencyFlatten
+	worker.state = StateEmergencyFlatten
+	worker.exitReason = "SL_GAP_THROUGH_BREACH"
+	worker.filledEntryQty.Store(132)
+
+	go worker.workerLoop()
+
+	// Call ForceEmergencyExit
+	worker.ForceEmergencyExit("REHYDRATED_FORCE_FLATTEN")
+
+	select {
+	case <-closedCh:
+		if worker.ToDTO().State != StateClosed {
+			t.Fatalf("expected state CLOSED, got %s", worker.ToDTO().State)
+		}
+		if worker.RemainingQty() != 0 {
+			t.Fatalf("expected RemainingQty 0, got %d", worker.RemainingQty())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for forced emergency flatten to close position")
+	}
+}
+
+
 

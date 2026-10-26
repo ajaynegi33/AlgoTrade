@@ -61,6 +61,11 @@ type registerWorkerReq struct {
 	reply  chan uint16
 }
 
+type seedTarget struct {
+	token     uint32
+	prevClose float64
+}
+
 // Actor is the high-performance Single-Writer Actor goroutine
 type Actor struct {
 	db             *sql.DB
@@ -88,13 +93,17 @@ type Actor struct {
 	macroShockExp  int64 // Unix epoch when FLASH_SHOCK cooldown expires
 	inMacroShock   atomic.Bool
 
-	execHook       ExecutionHook
-	detailReqChan  chan detailReq
-	workerReqChan  chan registerWorkerReq
-	barFlushChan   chan BarFlushItem
-	today0915Epoch int64
-	ticksProcessed atomic.Uint64
-	isRunning      atomic.Bool
+	execHook          ExecutionHook
+	detailReqChan     chan detailReq
+	workerReqChan     chan registerWorkerReq
+	barFlushChan      chan BarFlushItem
+	baselineSeedChan  chan *kite.StockBaselineProfile
+	seedTargetReqChan chan chan []seedTarget
+	universeSyncChan  chan []scanner.ScannedStock
+	seedingInProgress atomic.Bool
+	today0915Epoch    int64
+	ticksProcessed    atomic.Uint64
+	isRunning         atomic.Bool
 
 	ctx            context.Context
 	cancel         context.CancelFunc
@@ -110,20 +119,23 @@ func NewActor(
 ) *Actor {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Actor{
-		db:             db,
-		tickerClient:   tickerClient,
-		histClient:     histClient,
-		wsHub:          wsHub,
-		scannerService: scannerService,
-		tokenMap:       make(map[uint32]uint16, maxTrackedStocks),
-		symbolMap:      make(map[string]uint16, maxTrackedStocks),
-		activeIndices:  make([]uint16, 0, maxTrackedStocks),
-		sectorIndices:  make(map[uint8]uint16, 16),
-		detailReqChan:  make(chan detailReq, 64),
-		workerReqChan:  make(chan registerWorkerReq, 64),
-		barFlushChan:   make(chan BarFlushItem, 4096),
-		ctx:            ctx,
-		cancel:         cancel,
+		db:                db,
+		tickerClient:      tickerClient,
+		histClient:        histClient,
+		wsHub:             wsHub,
+		scannerService:    scannerService,
+		tokenMap:          make(map[uint32]uint16, maxTrackedStocks),
+		symbolMap:         make(map[string]uint16, maxTrackedStocks),
+		activeIndices:     make([]uint16, 0, maxTrackedStocks),
+		sectorIndices:     make(map[uint8]uint16, 16),
+		detailReqChan:     make(chan detailReq, 64),
+		workerReqChan:     make(chan registerWorkerReq, 64),
+		barFlushChan:      make(chan BarFlushItem, 4096),
+		baselineSeedChan:  make(chan *kite.StockBaselineProfile, 512),
+		seedTargetReqChan: make(chan chan []seedTarget, 8),
+		universeSyncChan:  make(chan []scanner.ScannedStock, 4),
+		ctx:               ctx,
+		cancel:            cancel,
 	}
 }
 
@@ -179,12 +191,53 @@ func (a *Actor) Start() error {
 		// 3. Start Actor hot loop
 		go a.runLoop()
 
+		// 4. Pre-seed 20-Day Baselines & Today's Intraday Bars in background
+		a.TriggerHistoricalReseed()
+
 		slog.Info("Single-Writer Engine Actor started successfully",
 			"tracked_stocks", len(a.activeIndices),
 			"token_map_size", len(a.tokenMap),
 		)
 	}
 	return nil
+}
+
+// TriggerHistoricalReseed starts or re-runs background 20-day historical baseline & intraday bar seeding
+func (a *Actor) TriggerHistoricalReseed() {
+	if a.histClient == nil {
+		return
+	}
+	if !a.seedingInProgress.CompareAndSwap(false, true) {
+		return
+	}
+	go a.seedBaselinesAsync()
+}
+
+// OnKiteAuthenticated is invoked when Zerodha Kite OAuth succeeds or restores a valid session.
+// It syncs any newly scanned universe stocks and triggers historical baseline + intraday bar seeding.
+func (a *Actor) OnKiteAuthenticated() {
+	if a.histClient != nil {
+		a.histClient.ClearNoSessionError()
+	}
+	go func() {
+		if a.scannerService != nil {
+			todayStr := time.Now().In(istZone).Format("2006-01-02")
+			universe, err := a.scannerService.GetUniverse(todayStr)
+			if err != nil || universe == nil || len(universe.Stocks) == 0 || universe.ScanDate != todayStr {
+				if scanned, scanErr := a.scannerService.RunScan(false); scanErr == nil && scanned != nil {
+					universe = scanned
+				}
+			}
+			if universe != nil && len(universe.Stocks) > 0 && a.isRunning.Load() {
+				select {
+				case a.universeSyncChan <- universe.Stocks:
+				case <-a.ctx.Done():
+					return
+				}
+			}
+		}
+		a.TriggerHistoricalReseed()
+	}()
 }
 
 // Stop shuts down the actor
@@ -258,10 +311,7 @@ func (a *Actor) seedUniverse() error {
 		}
 	}
 
-	// 4. Pre-seed 20-Day Baselines in background
-	go a.seedBaselinesAsync()
-
-	// 5. Subscribe all tokens on Kite Ticker
+	// 4. Subscribe all tokens on Kite Ticker
 	if a.tickerClient != nil {
 		tokens := make([]uint32, 0, len(a.tokenMap))
 		for tok := range a.tokenMap {
@@ -312,26 +362,140 @@ func (a *Actor) addStock(token uint32, symbol string, sectorID uint8, tickSize f
 }
 
 func (a *Actor) seedBaselinesAsync() {
-	for _, idx := range a.activeIndices {
-		s := &a.stocks[idx]
-		profile, err := a.histClient.SeedStockBaselines(s.InstrumentToken, s.PrevClose)
-		if err == nil && profile != nil {
-			a.slotBaselines[idx] = profile.Slots
-			curSlot := s.CurrentBarIdx
-			if curSlot >= 75 {
-				curSlot = 74
+	defer a.seedingInProgress.Store(false)
+	if a.histClient == nil {
+		return
+	}
+
+	var targets []seedTarget
+	if a.isRunning.Load() {
+		reply := make(chan []seedTarget, 1)
+		select {
+		case a.seedTargetReqChan <- reply:
+			select {
+			case targets = <-reply:
+			case <-a.ctx.Done():
+				return
 			}
-			s.ATR14 = profile.ATR14
-			s.BaselineSlotVolume = profile.Slots[curSlot].MedianVolume
-			s.BaselineCumVolume = profile.Slots[curSlot].MedianCumVol
-			s.IsWarm = true
+		case <-a.ctx.Done():
+			return
+		}
+	} else {
+		for _, idx := range a.activeIndices {
+			s := &a.stocks[idx]
+			if !s.IsWarm {
+				targets = append(targets, seedTarget{token: s.InstrumentToken, prevClose: s.PrevClose})
+			}
 		}
 	}
-	slog.Info("Completed 20-day baseline seeding for all active equities")
+
+	for _, t := range targets {
+		select {
+		case <-a.ctx.Done():
+			return
+		default:
+		}
+		profile, err := a.histClient.SeedStockBaselines(t.token, t.prevClose)
+		if err == nil && profile != nil {
+			if a.isRunning.Load() {
+				select {
+				case a.baselineSeedChan <- profile:
+				case <-a.ctx.Done():
+					return
+				}
+			} else {
+				a.applyBaselineProfile(profile)
+			}
+		}
+	}
+	slog.Info("Completed 20-day baseline seeding for active equities", "seeded_count", len(targets))
+}
+
+func (a *Actor) applyBaselineProfile(profile *kite.StockBaselineProfile) {
+	if profile == nil {
+		return
+	}
+	idx, exists := a.tokenMap[profile.Token]
+	if !exists || int(idx) >= maxTrackedStocks {
+		return
+	}
+	s := &a.stocks[idx]
+	a.slotBaselines[idx] = profile.Slots
+
+	// Backfill today's completed 5m intraday bars (09:15 AM onwards, including 15m ORH/ORL slots 0,1,2)
+	if len(profile.TodayBars) > 0 {
+		var cumVol uint64
+		var weightedPriceVol float64
+		maxSlot := int(s.CurrentBarIdx)
+		for _, tb := range profile.TodayBars {
+			if tb.SlotIdx < 0 || tb.SlotIdx >= 75 {
+				continue
+			}
+			existing := &s.SessionBars[tb.SlotIdx]
+			if existing.Open == 0 || tb.Volume > existing.Volume {
+				*existing = OHLCVBar{
+					Open:      tb.Open,
+					High:      tb.High,
+					Low:       tb.Low,
+					Close:     tb.Close,
+					Volume:    tb.Volume,
+					Timestamp: a.today0915Epoch + int64(tb.SlotIdx)*300,
+				}
+			}
+			if tb.SlotIdx > maxSlot {
+				maxSlot = tb.SlotIdx
+			}
+			if s.Open == 0 && tb.Open > 0 {
+				s.Open = tb.Open
+			}
+			if tb.High > s.High {
+				s.High = tb.High
+			}
+			if (s.Low == 0 || tb.Low < s.Low) && tb.Low > 0 {
+				s.Low = tb.Low
+			}
+			cumVol += tb.Volume
+			typPx := (tb.High + tb.Low + tb.Close) / 3.0
+			weightedPriceVol += typPx * float64(tb.Volume)
+		}
+		if maxSlot > int(s.CurrentBarIdx) && maxSlot < 75 {
+			s.CurrentBarIdx = uint8(maxSlot)
+		}
+		// If no live tick has arrived yet, seed LTP, Volume, and ExchangeVWAP from today's bars
+		if s.LastUpdatedUnix == 0 && len(profile.TodayBars) > 0 {
+			lastBar := profile.TodayBars[len(profile.TodayBars)-1]
+			if s.LTP == 0 && lastBar.Close > 0 {
+				s.LTP = lastBar.Close
+				s.RollingPeak = lastBar.Close
+			}
+			if s.Volume == 0 && cumVol > 0 {
+				s.Volume = cumVol
+				if cumVol >= lastBar.Volume {
+					s.BarStartVolume = cumVol - lastBar.Volume
+				}
+			}
+			if s.ExchangeVWAP == 0 && cumVol > 0 {
+				s.ExchangeVWAP = weightedPriceVol / float64(cumVol)
+			}
+		}
+	}
+
+	curSlot := s.CurrentBarIdx
+	if curSlot >= 75 {
+		curSlot = 74
+	}
+	s.ATR14 = profile.ATR14
+	s.BaselineSlotVolume = profile.Slots[curSlot].MedianVolume
+	s.BaselineCumVolume = profile.Slots[curSlot].MedianCumVol
+	// Only mark IsWarm = true when seeded with real historical data (not synthetic fallback)
+	s.IsWarm = !profile.IsFallback
 }
 
 func (a *Actor) runLoop() {
-	rawFeed := a.tickerClient.SubscribeRaw()
+	var rawFeed <-chan []byte
+	if a.tickerClient != nil {
+		rawFeed = a.tickerClient.SubscribeRaw()
+	}
 	periodic1s := time.NewTicker(1000 * time.Millisecond)
 	defer periodic1s.Stop()
 
@@ -347,6 +511,52 @@ func (a *Actor) runLoop() {
 			ticks := ParseBinaryFrame(rawBytes)
 			for i := range ticks {
 				a.processTick(&ticks[i])
+			}
+
+		case profile := <-a.baselineSeedChan:
+			a.applyBaselineProfile(profile)
+
+		case reply := <-a.seedTargetReqChan:
+			targets := make([]seedTarget, 0, len(a.activeIndices))
+			for _, idx := range a.activeIndices {
+				s := &a.stocks[idx]
+				// Re-seed if still on synthetic fallback (!s.IsWarm) or if today's 15m ORB bars (slots 0..2) are missing
+				if !s.IsWarm || s.SessionBars[0].Open == 0 {
+					targets = append(targets, seedTarget{
+						token:     s.InstrumentToken,
+						prevClose: s.PrevClose,
+					})
+				}
+			}
+			reply <- targets
+
+		case scannedStocks := <-a.universeSyncChan:
+			var newTokens []uint32
+			for _, st := range scannedStocks {
+				tok := uint32(st.InstrumentToken)
+				_, existed := a.tokenMap[tok]
+				secID, _, _ := scanner.ResolveSector(a.db, st.Tradingsymbol)
+				tickSize := float32(st.TickSize)
+				if tickSize <= 0 {
+					tickSize = 0.05
+				}
+				idx := a.addStock(tok, st.Tradingsymbol, secID, tickSize)
+				a.stocks[idx].LotSize = uint32(st.LotSize)
+				if a.stocks[idx].PrevClose <= 0 && st.LastPrice > 0 {
+					a.stocks[idx].PrevClose = st.LastPrice
+				}
+				if st.MISLeverage > 0 {
+					a.stocks[idx].MISLeverage = float32(st.MISLeverage)
+				} else if a.stocks[idx].MISLeverage <= 0 {
+					a.stocks[idx].MISLeverage = 5.0
+				}
+				a.stocks[idx].IsTradeable = true
+				if !existed {
+					newTokens = append(newTokens, tok)
+				}
+			}
+			if len(newTokens) > 0 && a.tickerClient != nil {
+				_ = a.tickerClient.Subscribe(newTokens)
 			}
 
 		case <-periodic1s.C:

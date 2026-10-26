@@ -241,6 +241,21 @@ func (w *PositionWorker) TriggerEmergencyExit(reason string) {
 	}
 }
 
+// ForceEmergencyExit unconditionally forces an emergency exit, even if a previous exit attempt was pending
+func (w *PositionWorker) ForceEmergencyExit(reason string) {
+	if w.isClosed.Load() {
+		return
+	}
+	w.pendingMarketExit.Store(true)
+	select {
+	case w.emergReasonCh <- reason:
+		w.wake()
+	default:
+		// If emergReasonCh is already full or workerLoop has terminated, execute emergency flatten directly
+		go w.executeEmergencyFlatten(reason)
+	}
+}
+
 // RemainingQty returns the exact net open share count (FilledEntryQty - FilledExitQty)
 func (w *PositionWorker) RemainingQty() int {
 	rem := int(w.filledEntryQty.Load() - w.filledExitQty.Load())
@@ -1234,6 +1249,7 @@ func (w *PositionWorker) ToDTO() engine.ActivePositionDTO {
 		NetTotalPnL:      math.Round(netTotal*100.0) / 100.0,
 		ExitReason:       exitReason,
 		OpenedAt:         w.OpenedAt.Format("15:04:05"),
+		OpenedAtUnix:     w.OpenedAtUnix,
 		ClosedAt:         closedStr,
 	}
 }

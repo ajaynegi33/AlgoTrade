@@ -248,6 +248,7 @@ export interface ActivePositionData {
   net_total_pnl: number;
   exit_reason?: string;
   opened_at: string;
+  opened_at_unix?: number;
   closed_at?: string;
 }
 

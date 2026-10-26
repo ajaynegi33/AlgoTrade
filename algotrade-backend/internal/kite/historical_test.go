@@ -51,3 +51,38 @@ func TestComputeBaselinesIgnoresOvernightGapInATR14(t *testing.T) {
 		t.Fatalf("expected 5m ATR14 ~ 1.50 (uncontaminated by overnight gap), got %.4f", profile.ATR14)
 	}
 }
+
+func TestHistoricalService_AutoRecoversOnKiteAuthentication(t *testing.T) {
+	kiteSvc := &Service{}
+	histSvc := NewHistoricalService(nil, kiteSvc)
+
+	// 1. Boot before Kite login: SeedStockBaselines returns fallback and sets "No active Kite session"
+	prof, err := histSvc.SeedStockBaselines(779521, 800.0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !prof.IsFallback {
+		t.Fatalf("expected IsFallback=true when no Kite session is active")
+	}
+	healthy, errMsg := histSvc.IsHealthy()
+	if healthy || errMsg != "No active Kite session" {
+		t.Fatalf("expected unhealthy 'No active Kite session', got healthy=%v err=%q", healthy, errMsg)
+	}
+
+	// 2. Simulate user logging into Zerodha Kite (session becomes active)
+	kiteSvc.mu.Lock()
+	kiteSvc.session = &SessionInfo{
+		UserID:      "AB1234",
+		AccessToken: "valid-token-xyz",
+		CreatedAt:   time.Now().UTC(),
+	}
+	kiteSvc.notifyAuthenticatedLocked()
+	kiteSvc.mu.Unlock()
+
+	// 3. IsHealthy() must immediately recover to (true, "") without requiring a server restart
+	healthyAfter, errAfter := histSvc.IsHealthy()
+	if !healthyAfter || errAfter != "" {
+		t.Fatalf("expected HistoricalService to auto-recover after Kite authentication, got healthy=%v err=%q", healthyAfter, errAfter)
+	}
+}
+

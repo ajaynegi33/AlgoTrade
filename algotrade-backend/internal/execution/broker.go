@@ -423,6 +423,46 @@ func (p *PaperBroker) nextOrderID() string {
 	return fmt.Sprintf("PAPER-%d", n)
 }
 
+// SeedRestingOrder populates the in-memory paper order book during crash recovery rehydration
+func (p *PaperBroker) SeedRestingOrder(
+	orderID, symbol string,
+	token uint32,
+	qty int,
+	triggerPrice, limitPrice float64,
+	modCount int,
+	status string,
+) {
+	if orderID == "" || qty <= 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ord := &paperRestingOrder{
+		OrderID:         orderID,
+		Symbol:          symbol,
+		InstrumentToken: token,
+		TransactionType: "SELL",
+		OrderType:       "SL",
+		Status:          status,
+		Quantity:        qty,
+		FilledQuantity:  0,
+		Price:           limitPrice,
+		TriggerPrice:    triggerPrice,
+		ModCount:        modCount,
+		UpdatedAt:       time.Now(),
+	}
+	p.orders[orderID] = ord
+
+	// Prevent duplicate entries in byToken slice
+	existing := p.byToken[token]
+	for _, o := range existing {
+		if o.OrderID == orderID {
+			return
+		}
+	}
+	p.byToken[token] = append(existing, ord)
+}
+
 // walkAskBook computes the realistic volume-weighted average fill price across the 5 visible Ask levels
 func walkAskBook(qty int, limitPrice float64, s *engine.StockMetrics) float64 {
 	if s == nil || s.LTP <= 0 {
@@ -591,9 +631,10 @@ func (p *PaperBroker) PlaceLimitBuy(
 
 	p.mu.Lock()
 	p.orders[orderID] = ord
+	cp := *ord
 	p.mu.Unlock()
 
-	p.emit(ord)
+	p.emit(&cp)
 	return orderID, nil
 }
 
@@ -655,9 +696,10 @@ func (p *PaperBroker) PlaceEmergencySweepSell(
 
 	p.mu.Lock()
 	p.orders[orderID] = ord
+	cp := *ord
 	p.mu.Unlock()
 
-	p.emit(ord)
+	p.emit(&cp)
 	return orderID, nil
 }
 
@@ -699,9 +741,10 @@ func (p *PaperBroker) PlaceSLOrder(
 	p.mu.Lock()
 	p.orders[orderID] = ord
 	p.byToken[token] = append(p.byToken[token], ord)
+	cp := *ord
 	p.mu.Unlock()
 
-	p.emit(ord)
+	p.emit(&cp)
 	return orderID, nil
 }
 

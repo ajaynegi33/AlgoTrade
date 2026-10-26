@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -179,6 +181,17 @@ func (m *Manager) OnSecondTick(
 		}
 	}
 	m.mu.RUnlock()
+
+	// Guarantee deterministic FIFO chronological entry order (oldest entry first)
+	slices.SortFunc(activeList, func(a, b *PositionWorker) int {
+		if a.OpenedAt.Before(b.OpenedAt) {
+			return -1
+		}
+		if a.OpenedAt.After(b.OpenedAt) {
+			return 1
+		}
+		return strings.Compare(a.PositionID, b.PositionID)
+	})
 
 	var blockedMargin, unrealisedPnL float64
 	activeDTOs := make([]engine.ActivePositionDTO, 0, len(activeList))
@@ -424,9 +437,10 @@ func (m *Manager) rehydrateOpenPositionsFromDB() {
 		       entry_order_id, sl_order_id, scale_out_order_id,
 		       entry_price, initial_stop, current_stop, shadow_stop, breakeven_stop, base_buffer,
 		       high_water_mark, one_r, initial_qty, filled_entry_qty, filled_exit_qty,
-		       mod_count, current_gear, tranche1_done
+		       mod_count, current_gear, tranche1_done, opened_at
 		FROM positions
 		WHERE trading_date = ? AND state != 'CLOSED'
+		ORDER BY opened_at ASC
 	`, todayStr)
 	if err != nil {
 		return
@@ -434,7 +448,7 @@ func (m *Manager) rehydrateOpenPositionsFromDB() {
 	defer rows.Close()
 
 	for rows.Next() {
-		var posID, mode, symbol, state, pattern, entryOrd, slOrd, scaleOrd string
+		var posID, mode, symbol, state, pattern, entryOrd, slOrd, scaleOrd, openedAtStr string
 		var token uint32
 		var entryPx, initStop, curStop, shStop, beStop, baseBuf, hwm, oneR float64
 		var initQty, modCnt, gear, t1Int int
@@ -445,7 +459,7 @@ func (m *Manager) rehydrateOpenPositionsFromDB() {
 			&entryOrd, &slOrd, &scaleOrd,
 			&entryPx, &initStop, &curStop, &shStop, &beStop, &baseBuf,
 			&hwm, &oneR, &initQty, &filledEntry, &filledExit,
-			&modCnt, &gear, &t1Int,
+			&modCnt, &gear, &t1Int, &openedAtStr,
 		); err != nil {
 			continue
 		}
@@ -505,6 +519,15 @@ func (m *Manager) rehydrateOpenPositionsFromDB() {
 		w.modCount.Store(int32(modCnt))
 		w.currentGear.Store(int32(gear))
 		w.tranche1Done.Store(t1Int != 0)
+		if openedAtStr != "" {
+			if t, err := time.Parse(time.RFC3339, openedAtStr); err == nil {
+				w.OpenedAt = t
+				w.OpenedAtUnix = t.Unix()
+			} else if t, err := time.Parse("2006-01-02 15:04:05", openedAtStr); err == nil {
+				w.OpenedAt = t
+				w.OpenedAtUnix = t.Unix()
+			}
+		}
 
 		if entryOrd != "" {
 			m.reconciler.SeedOrderFilled(entryOrd, int(filledEntry))
@@ -518,7 +541,12 @@ func (m *Manager) rehydrateOpenPositionsFromDB() {
 			if scaleOrd == "" && filledExit > 0 {
 				m.reconciler.SeedOrderFilled(slOrd, int(filledExit))
 			}
-			m.reconciler.RegisterOrder(slOrd, posID, "SL", symbol, "SELL", "SL", int(filledEntry-filledExit), curStop, curStop, OrderStatusTrigPending)
+			remQty := int(filledEntry - filledExit)
+			m.reconciler.RegisterOrder(slOrd, posID, "SL", symbol, "SELL", "SL", remQty, curStop, curStop, OrderStatusTrigPending)
+			if mode == "PAPER" && m.paperBroker != nil && remQty > 0 {
+				limitPx := computeSellSLLimitPrice(curStop, w.TickSize)
+				m.paperBroker.SeedRestingOrder(slOrd, symbol, token, remQty, curStop, limitPx, modCnt, OrderStatusTrigPending)
+			}
 		}
 
 		if m.actor != nil {
@@ -541,6 +569,13 @@ func (m *Manager) rehydrateOpenPositionsFromDB() {
 		m.mu.Unlock()
 
 		go w.workerLoop()
+		if state == StateEmergencyFlatten && w.RemainingQty() > 0 {
+			exitR := w.exitReason
+			if exitR == "" {
+				exitR = "REHYDRATED_EMERGENCY_FLATTEN"
+			}
+			go w.ForceEmergencyExit(exitR)
+		}
 		slog.Info("Rehydrated open PositionWorker from SQLite crash recovery",
 			"position_id", posID, "symbol", symbol, "state", state, "remaining_qty", w.RemainingQty())
 	}
@@ -615,7 +650,7 @@ func (m *Manager) FlattenPosition(positionID string, flattenAll bool) (int, erro
 	}
 
 	for _, w := range targets {
-		w.TriggerEmergencyExit("USER_MANUAL_FLATTEN")
+		w.ForceEmergencyExit("USER_MANUAL_FLATTEN")
 	}
 	return len(targets), nil
 }

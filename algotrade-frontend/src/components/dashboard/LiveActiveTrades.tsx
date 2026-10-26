@@ -1,6 +1,6 @@
 "use client";
 
-import React, { memo } from "react";
+import React, { memo, useMemo } from "react";
 import Link from "next/link";
 import { ActivePositionData } from "@/lib/types";
 import { toast } from "sonner";
@@ -43,6 +43,17 @@ export const LiveActiveTrades = memo(function LiveActiveTrades({
   isUpdating,
   onFlattenPosition,
 }: LiveActiveTradesProps) {
+  // Stably sort positions strictly by chronological trade entry order (FIFO).
+  // Prevents cards from swapping grid positions when live prices or telemetry update.
+  const sortedPositions = useMemo(() => {
+    return [...activePositions].sort((a, b) => {
+      const timeA = a.opened_at_unix ?? (a.opened_at ? new Date(`1970-01-01T${a.opened_at}Z`).getTime() : 0);
+      const timeB = b.opened_at_unix ?? (b.opened_at ? new Date(`1970-01-01T${b.opened_at}Z`).getTime() : 0);
+      if (timeA !== timeB) return timeA - timeB;
+      return a.position_id.localeCompare(b.position_id);
+    });
+  }, [activePositions]);
+
   const handleFlattenSingle = async (pos: ActivePositionData) => {
     if (isUpdating) return;
     try {
@@ -97,7 +108,7 @@ export const LiveActiveTrades = memo(function LiveActiveTrades({
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {activePositions.map((pos) => {
+          {sortedPositions.map((pos) => {
             const gear = getGearBadge(pos.current_gear, pos.gear_label);
             const modPct = Math.min(
               100,
@@ -105,8 +116,10 @@ export const LiveActiveTrades = memo(function LiveActiveTrades({
             );
             const totalNetPnl = pos.net_total_pnl;
             const target1R = pos.entry_price + pos.one_r;
+            // Virtual shadow stop is ONLY active in Gear 4 (mod_count >= 24). In Gears 1-3, active SL is strictly current_stop.
+            const isGear4 = pos.current_gear === 4 || pos.mod_count >= 24;
             const effectiveStop =
-              pos.shadow_stop > pos.current_stop ? pos.shadow_stop : pos.current_stop;
+              isGear4 && pos.shadow_stop > 0 ? pos.shadow_stop : pos.current_stop;
             const stopDistRupees = Math.max(0, pos.ltp - effectiveStop);
             const stopDistPct = pos.ltp > 0 ? (stopDistRupees / pos.ltp) * 100 : 0;
             const isTightStop = stopDistPct < 0.35;
@@ -299,11 +312,15 @@ export const LiveActiveTrades = memo(function LiveActiveTrades({
 
                   <button
                     type="button"
-                    disabled={isUpdating || pos.state === "EMERGENCY_FLATTENING"}
+                    disabled={isUpdating}
                     onClick={() => handleFlattenSingle(pos)}
-                    className="px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white text-xs font-black cursor-pointer transition-colors"
+                    className={`px-3.5 py-1.5 rounded-xl text-white text-xs font-black cursor-pointer transition-colors ${
+                      pos.state === "EMERGENCY_FLATTENING"
+                        ? "bg-amber-600 hover:bg-amber-700 animate-pulse"
+                        : "bg-rose-600 hover:bg-rose-700"
+                    }`}
                   >
-                    {pos.state === "EMERGENCY_FLATTENING" ? "Flattening..." : "Flatten Position"}
+                    {pos.state === "EMERGENCY_FLATTENING" ? "Force Flatten" : "Flatten Position"}
                   </button>
                 </div>
               </div>

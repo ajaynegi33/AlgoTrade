@@ -5,6 +5,7 @@ import (
 	"testing"
 	"unsafe"
 
+	"github.com/ajaynegi33/AlgoTrade/internal/kite"
 	"github.com/ajaynegi33/AlgoTrade/internal/scanner"
 )
 
@@ -204,4 +205,35 @@ func TestGetStockDetail_ETERNAL(t *testing.T) {
 		t.Errorf("Expected GetStockDetail(INVALID_XYZ) to return false, got true")
 	}
 }
+
+func TestApplyBaselineProfileBackfillsTodayBarsAndOR15m(t *testing.T) {
+	actor := NewActor(nil, nil, nil, nil, nil)
+	actor.initTodayEpoch()
+	idx := actor.addStock(779521, "SBIN", scanner.SectorBank, 0.05)
+
+	profile := &kite.StockBaselineProfile{
+		Token:      779521,
+		ATR14:      4.25,
+		IsFallback: false,
+		TodayBars: []kite.TodaySlotBar{
+			{SlotIdx: 0, Timestamp: actor.today0915Epoch, Open: 800.0, High: 804.0, Low: 798.5, Close: 802.0, Volume: 120000},
+			{SlotIdx: 1, Timestamp: actor.today0915Epoch + 300, Open: 802.0, High: 806.5, Low: 801.0, Close: 805.0, Volume: 95000},
+			{SlotIdx: 2, Timestamp: actor.today0915Epoch + 600, Open: 805.0, High: 805.5, Low: 800.0, Close: 804.0, Volume: 80000},
+			{SlotIdx: 3, Timestamp: actor.today0915Epoch + 900, Open: 804.0, High: 808.0, Low: 803.5, Close: 807.5, Volume: 110000},
+		},
+	}
+	profile.Slots[3] = kite.SlotBaseline{SlotIdx: 3, MedianVolume: 50000, MedianCumVol: 200000, ATR14: 4.25}
+
+	actor.applyBaselineProfile(profile)
+
+	s := &actor.stocks[idx]
+	if !s.IsWarm {
+		t.Fatalf("expected s.IsWarm=true after applying non-fallback profile")
+	}
+	orh, orl, ready := s.OpeningRange15m()
+	if !ready || orh != 806.5 || orl != 798.5 {
+		t.Fatalf("expected 15m ORB backfilled (ready=true, ORH=806.5, ORL=798.5), got ready=%v ORH=%.2f ORL=%.2f", ready, orh, orl)
+	}
+}
+
 
