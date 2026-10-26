@@ -19,27 +19,26 @@ type StopAndBufferSpec struct {
 
 // SizingDecision holds the output of the 4-Constraint Position Sizer and Net-Profitability Gate
 type SizingDecision struct {
-	Approved         bool              `json:"approved"`
-	RejectReason     string            `json:"reject_reason,omitempty"`
-	Quantity         int               `json:"quantity"`
-	DustFloorQty     int               `json:"dust_floor_qty"`
-	EntryLimitPrice  float64           `json:"entry_limit_price"`
-	StopSpec         StopAndBufferSpec `json:"stop_spec"`
-	BreakevenStop    float64           `json:"breakeven_stop"`
-	RiskBudgetRupees float64           `json:"risk_budget_rupees"`
-	RequiredMargin   float64           `json:"required_margin"`
-	ExpectedNet1R    float64           `json:"expected_net_1r"`
-	EstimatedTaxes   float64           `json:"estimated_taxes"`
+	Approved           bool              `json:"approved"`
+	RejectReason       string            `json:"reject_reason,omitempty"`
+	Quantity           int               `json:"quantity"`
+	DustFloorQty       int               `json:"dust_floor_qty"`
+	EntryLimitPrice    float64           `json:"entry_limit_price"`
+	StopSpec           StopAndBufferSpec `json:"stop_spec"`
+	BreakevenStop      float64           `json:"breakeven_stop"`
+	TargetR1Price      float64           `json:"target_r1_price"`
+	TargetR2Price      float64           `json:"target_r2_price"`
+	RiskRewardRatio    float64           `json:"risk_reward_ratio"`
+	BreakevenWinRatePct float64          `json:"breakeven_win_rate_pct"`
+	RiskBudgetRupees   float64           `json:"risk_budget_rupees"`
+	RequiredMargin     float64           `json:"required_margin"`
+	ExpectedNet1R      float64           `json:"expected_net_1r"`
+	EstimatedTaxes     float64           `json:"estimated_taxes"`
 }
 
 // ComputeStopAndBufferSpec calculates non-inverting stop bounds (DeltaMin < DeltaMax)
 // and decouples the stock's price-tier/ATR breathing buffer (BaseBuffer) from tight entry candles.
-func ComputeStopAndBufferSpec(
-	entryPrice float64,
-	signalBarLow float64,
-	atr14 float64,
-	tickSize float64,
-) (StopAndBufferSpec, error) {
+func ComputeStopAndBufferSpec( entryPrice float64, signalBarLow float64, atr14 float64, tickSize float64 ) (StopAndBufferSpec, error) {
 	if entryPrice <= 0 {
 		return StopAndBufferSpec{}, fmt.Errorf("invalid entry price: %.2f", entryPrice)
 	}
@@ -236,16 +235,27 @@ func ComputePositionSize(
 	beStop := BreakevenTriggerPrice(entryLimitPrice, finalQty, runnerQty, tickSize)
 	reqMargin := (float64(finalQty) * entryLimitPrice) / leverage
 
+	// OrderBlock R:R Calculation:
+	// R1 target at +0.65R (50% scale-out harvest), R2 target at +1.65R (runner expansion)
+	targetR1 := RoundUpToTick(entryLimitPrice+0.65*stopSpec.OneR, tickSize)
+	targetR2 := RoundUpToTick(entryLimitPrice+1.65*stopSpec.OneR, tickSize)
+	riskRewardRatio := RoundToTick((targetR2-entryLimitPrice)/stopSpec.OneR, 0.01)
+	beWinRate := math.Round((stopSpec.OneR/(stopSpec.OneR+(targetR2-entryLimitPrice)))*1000.0) / 10.0
+
 	return SizingDecision{
-		Approved:         true,
-		Quantity:         finalQty,
-		DustFloorQty:     minViableQty,
-		EntryLimitPrice:  entryLimitPrice,
-		StopSpec:         stopSpec,
-		BreakevenStop:    beStop,
-		RiskBudgetRupees: riskBudget,
-		RequiredMargin:   reqMargin,
-		ExpectedNet1R:    netProfit1R,
-		EstimatedTaxes:   chargesAt1R,
+		Approved:            true,
+		Quantity:            finalQty,
+		DustFloorQty:        minViableQty,
+		EntryLimitPrice:     entryLimitPrice,
+		StopSpec:            stopSpec,
+		BreakevenStop:       beStop,
+		TargetR1Price:       targetR1,
+		TargetR2Price:       targetR2,
+		RiskRewardRatio:     riskRewardRatio,
+		BreakevenWinRatePct: beWinRate,
+		RiskBudgetRupees:    riskBudget,
+		RequiredMargin:      reqMargin,
+		ExpectedNet1R:       netProfit1R,
+		EstimatedTaxes:      chargesAt1R,
 	}
 }

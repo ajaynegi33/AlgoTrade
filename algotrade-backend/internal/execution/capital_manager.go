@@ -102,33 +102,113 @@ func (cm *CapitalManager) loadFromDatabase() {
 	}
 
 	for _, m := range []string{"PAPER", "LIVE"} {
-		dto := &engine.DailyRiskDTO{TradingDate: cm.tradingDate}
-		var gross, charges, net, peak float64
-		var locked int
-		var lockReason string
-		qErr := cm.db.QueryRow(`
-			SELECT trades_taken, wins, losses, consecutive_losses,
-			       realised_gross_pnl, total_charges, realised_net_pnl, peak_net_pnl,
-			       circuit_breaker_locked, lock_reason
-			FROM daily_risk_ledger
-			WHERE trading_date = ? AND mode = ?
-		`, cm.tradingDate, m).Scan(
-			&dto.TradesTaken, &dto.Wins, &dto.Losses, &dto.ConsecutiveLosses,
-			&gross, &charges, &net, &peak, &locked, &lockReason,
-		)
-		if qErr == nil {
-			dto.PeakNetPnL = peak
-			dto.CircuitBreakerLocked = locked != 0
-			dto.LockReason = lockReason
-			if dto.TradesTaken > 0 {
-				dto.WinRatePct = math.Round((float64(dto.Wins)/float64(dto.TradesTaken))*1000.0) / 10.0
-			}
-			cm.realisedGrossByMode[m] = gross
-			cm.totalChargesByMode[m] = charges
-			cm.realisedNetByMode[m] = net
-		}
-		cm.dailyLedger[m] = dto
+		cm.ReconcileWithPositionsDB(m)
 	}
+}
+
+// ReconcileWithPositionsDB re-synchronizes the daily risk ledger with ground-truth closed trades in the positions table.
+// Falsification Guard: Fixes any historical double-counting or ledger drift so /trades and the Dashboard remain 100% consistent.
+func (cm *CapitalManager) ReconcileWithPositionsDB(mode string) {
+	if cm.db == nil {
+		return
+	}
+
+	rows, err := cm.db.Query(`
+		SELECT realised_gross_pnl, total_charges, realised_net_pnl, closed_at
+		FROM positions
+		WHERE trading_date = ? AND mode = ? AND state = 'CLOSED'
+		ORDER BY closed_at ASC
+	`, cm.tradingDate, mode)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	var tradesTaken, wins, losses, consecLosses int
+	var cumGross, cumCharges, cumNet, peakNet float64
+
+	for rows.Next() {
+		var gross, charges, net float64
+		var closedAt sql.NullString
+		if err := rows.Scan(&gross, &charges, &net, &closedAt); err != nil {
+			continue
+		}
+		tradesTaken++
+		cumGross += gross
+		cumCharges += charges
+		cumNet += net
+		if cumNet > peakNet {
+			peakNet = cumNet
+		}
+
+		if net > 0 {
+			wins++
+			consecLosses = 0
+		} else {
+			losses++
+			consecLosses++
+		}
+	}
+
+	dto := &engine.DailyRiskDTO{
+		TradingDate:       cm.tradingDate,
+		TradesTaken:       tradesTaken,
+		Wins:              wins,
+		Losses:            losses,
+		ConsecutiveLosses: consecLosses,
+		PeakNetPnL:        peakNet,
+	}
+	if tradesTaken > 0 {
+		dto.WinRatePct = math.Round((float64(wins)/float64(tradesTaken))*1000.0) / 10.0
+	}
+
+	// Check circuit breakers on ground-truth ledger
+	baseCap := cm.settings.PaperCapital
+	if mode == "LIVE" && cm.liveGrossBase > 0 {
+		baseCap = cm.liveGrossBase
+	}
+	oneR := baseCap * cm.settings.RiskPerTradePct
+
+	if baseCap > 0 && cumNet <= -0.020*baseCap {
+		dto.CircuitBreakerLocked = true
+		dto.LockReason = fmt.Sprintf("Max Daily Loss Reached (₹%.0f / -2.0%% cap)", cumNet)
+	} else if consecLosses >= 2 {
+		dto.CircuitBreakerLocked = true
+		dto.LockReason = "2 Consecutive Losses Circuit Breaker"
+	} else if oneR > 0 && peakNet >= 2.0*oneR && cumNet <= 0.55*peakNet {
+		dto.CircuitBreakerLocked = true
+		dto.LockReason = fmt.Sprintf("Profit-Giveback Lock (Protected ₹%.0f from ₹%.0f peak)", cumNet, peakNet)
+	}
+
+	cm.dailyLedger[mode] = dto
+	cm.realisedGrossByMode[mode] = cumGross
+	cm.totalChargesByMode[mode] = cumCharges
+	cm.realisedNetByMode[mode] = cumNet
+
+	// Persist corrected ledger to SQLite
+	lockedInt := 0
+	if dto.CircuitBreakerLocked {
+		lockedInt = 1
+	}
+	_, _ = cm.db.Exec(`
+		INSERT INTO daily_risk_ledger (
+			trading_date, mode, trades_taken, wins, losses, consecutive_losses,
+			realised_gross_pnl, total_charges, realised_net_pnl, peak_net_pnl,
+			circuit_breaker_locked, lock_reason
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(trading_date, mode) DO UPDATE SET
+			trades_taken = excluded.trades_taken,
+			wins = excluded.wins,
+			losses = excluded.losses,
+			consecutive_losses = excluded.consecutive_losses,
+			realised_gross_pnl = excluded.realised_gross_pnl,
+			total_charges = excluded.total_charges,
+			realised_net_pnl = excluded.realised_net_pnl,
+			peak_net_pnl = excluded.peak_net_pnl,
+			circuit_breaker_locked = excluded.circuit_breaker_locked,
+			lock_reason = excluded.lock_reason;
+	`, cm.tradingDate, mode, tradesTaken, wins, losses, consecLosses,
+		cumGross, cumCharges, cumNet, peakNet, lockedInt, dto.LockReason)
 }
 
 func (cm *CapitalManager) GetSettings() ExecutionSettings {
@@ -279,11 +359,11 @@ func (cm *CapitalManager) ComputeCapitalSummary(
 		ledger = engine.DailyRiskDTO{TradingDate: cm.tradingDate}
 	}
 
-	// Dynamic drawdown multiplier: scale down risk if consecutive losses >= 2
+	// Dynamic drawdown multiplier: never size up after a loss (fixed or reduced risk)
 	drawdownMult := 1.0
-	if ledger.ConsecutiveLosses == 2 {
-		drawdownMult = 0.70
-	} else if ledger.ConsecutiveLosses >= 3 {
+	if ledger.ConsecutiveLosses == 1 {
+		drawdownMult = 0.85
+	} else if ledger.ConsecutiveLosses >= 2 {
 		drawdownMult = 0.50
 	}
 	if sessionSizeMult <= 0 {
@@ -296,12 +376,19 @@ func (cm *CapitalManager) ComputeCapitalSummary(
 		currentRiskBudget = math.Max(currentRiskBudget, netEquity*0.0075)
 	}
 
+	buyingPower5x := math.Round(netEquity * 5.0 * 100.0) / 100.0
+	deployedExposure := math.Round(blockedMargin * 5.0 * 100.0) / 100.0
+	freeBuyingPower5x := math.Round(freeMargin * 5.0 * 100.0) / 100.0
+
 	capDTO := engine.CapitalSummaryDTO{
 		Mode:                 mode,
 		PaperCapital:         cm.settings.PaperCapital,
 		NetEquity:            math.Round(netEquity*100.0) / 100.0,
 		FreeMargin:           math.Round(freeMargin*100.0) / 100.0,
 		BlockedMargin:        math.Round(blockedMargin*100.0) / 100.0,
+		BuyingPower5x:        buyingPower5x,
+		DeployedExposure:     deployedExposure,
+		FreeBuyingPower5x:    freeBuyingPower5x,
 		RealisedGrossPnL:     math.Round(grossPnL*100.0) / 100.0,
 		TotalCharges:         math.Round(charges*100.0) / 100.0,
 		RealisedNetPnL:       math.Round(netPnL*100.0) / 100.0,
@@ -356,14 +443,14 @@ func (cm *CapitalManager) RecordClosedTrade(mode string, grossPnL, charges, netP
 	}
 	oneR := baseCap * cm.settings.RiskPerTradePct
 
-	// 1. Max Daily Loss Circuit Breaker (-1.5% of Capital or -3.0R)
-	if baseCap > 0 && cumNet <= -0.015*baseCap {
+	// 1. Max Daily Loss Circuit Breaker (-2.0% of Capital or -3.0R)
+	if baseCap > 0 && cumNet <= -0.020*baseCap {
 		ledger.CircuitBreakerLocked = true
-		ledger.LockReason = fmt.Sprintf("Max Daily Loss Reached (₹%.0f / -1.5%% cap)", cumNet)
-	} else if ledger.ConsecutiveLosses >= 3 {
-		// 2. 3 Consecutive Losses Lockout
+		ledger.LockReason = fmt.Sprintf("Max Daily Loss Reached (₹%.0f / -2.0%% cap)", cumNet)
+	} else if ledger.ConsecutiveLosses >= 2 {
+		// 2. 2 Consecutive Losses Lockout (Preserves capital; stop for the day)
 		ledger.CircuitBreakerLocked = true
-		ledger.LockReason = "3 Consecutive Losses Circuit Breaker"
+		ledger.LockReason = "2 Consecutive Losses Circuit Breaker"
 	} else if oneR > 0 && ledger.PeakNetPnL >= 2.0*oneR && cumNet <= 0.55*ledger.PeakNetPnL {
 		// 3. Profit-Giveback Lock (Protects banked green days once PeakNetPnL >= +2.0R)
 		ledger.CircuitBreakerLocked = true

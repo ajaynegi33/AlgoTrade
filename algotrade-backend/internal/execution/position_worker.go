@@ -69,6 +69,7 @@ type PositionWorker struct {
 	tranche1Pending   atomic.Bool
 	pendingMarketExit atomic.Bool
 	isClosed          atomic.Bool
+	closedNotified    atomic.Bool
 
 	mu               sync.RWMutex
 	state            string
@@ -203,9 +204,7 @@ func (w *PositionWorker) Start() error {
 		w.mu.Unlock()
 		w.isClosed.Store(true)
 		w.persistPositionState()
-		if w.onClosed != nil {
-			w.onClosed(w)
-		}
+		w.notifyClosed()
 		return err
 	}
 
@@ -224,6 +223,13 @@ func (w *PositionWorker) wake() {
 	select {
 	case w.wakeCh <- struct{}{}:
 	default:
+	}
+}
+
+// notifyClosed triggers the onClosed callback with strict idempotency (guaranteed exactly once)
+func (w *PositionWorker) notifyClosed() {
+	if w.onClosed != nil && w.closedNotified.CompareAndSwap(false, true) {
+		w.onClosed(w)
 	}
 }
 
@@ -342,28 +348,22 @@ func (w *PositionWorker) OnTickHotPath(s *engine.StockMetrics, inMacroShock bool
 	if s.FastAggressorEMA < effectiveAggBuy {
 		effectiveAggBuy = s.FastAggressorEMA
 	}
-	shockDrop := s.RollingPeak - ltp
-	shockThreshold := math.Min(0.55*w.OneR, math.Max(0.45*atrSafe, 0.0030*ltp))
-	bidVacuum := s.SmoothedBuyerRatio < 0.25 && s.FastAggressorEMA < 0.28
-
-	if (shockDrop >= shockThreshold && bidVacuum) || (inMacroShock && ltp < s.ExchangeVWAP && effectiveAggBuy < 0.35) {
-		if !w.tranche1Done.Load() && ltp < s.ExchangeVWAP {
-			// Pre-1R position lost VWAP into a sudden vacuum shock -> Cut immediately!
-			w.TriggerEmergencyExit("SUDDEN_MARKET_SHOCK_CUT")
+	// 4. GUARD C: Macro Flash Shock Protection (Nifty 50 Liquidity Vacuum)
+	if inMacroShock && ltp < s.ExchangeVWAP && effectiveAggBuy < 0.35 {
+		if !w.tranche1Done.Load() {
+			w.TriggerEmergencyExit("MACRO_FLASH_SHOCK_CUT")
 			return
 		}
-		if w.tranche1Done.Load() {
-			// Runner in profit during shock -> Ratchet stop to max(Breakeven, LTP - 0.35*BaseBuffer)
-			tightStop := math.Max(beStop, RoundDownToTick(ltp-0.35*w.BaseBuffer, w.TickSize))
-			if tightStop > confirmedStop {
-				w.ProposeStopRatchet(tightStop, atrSafe, true)
-			}
-			return
+		// Runner in profit during shock -> Clamp stop to max(Breakeven, LTP - 0.35*BaseBuffer)
+		tightStop := math.Max(beStop, RoundDownToTick(ltp-0.35*w.BaseBuffer, w.TickSize))
+		if tightStop > confirmedStop {
+			w.ProposeStopRatchet(tightStop, atrSafe, true)
 		}
+		return
 	}
 
-	// 5. GUARD D: +1.0R 3-Step Race-Free Scale-Out Trigger
-	if !w.tranche1Done.Load() && !w.tranche1Pending.Load() && rCur >= 1.00 {
+	// 5. GUARD D: +0.65R High-Frequency Minimum Profit Scale-Out Trigger (Early Harvest at R1)
+	if !w.tranche1Done.Load() && !w.tranche1Pending.Load() && rCur >= 0.65 {
 		w.tranche1Pending.Store(true)
 		w.wake()
 		return
@@ -382,10 +382,9 @@ func (w *PositionWorker) OnTickHotPath(s *engine.StockMetrics, inMacroShock bool
 	if flowScore >= 0.56 && structureIntact {
 		mFlow = math.Min(1.10, 0.85+(flowScore-0.56)*1.25)
 	} else if structureIntact {
-		// Structure (VWAP & SignalBarLow) intact: floor M_flow at 0.65 so 1 sell print doesn't choke the trade
+		// Structure intact: floor M_flow at 0.65 so normal wicks don't choke the trade
 		mFlow = math.Max(0.65, 0.65+math.Max(0, flowScore-0.35)*0.95)
 	} else {
-		// Below VWAP or in Macro Shock: unlock aggressive tightening down to 0.40x
 		mFlow = math.Max(0.40, 0.40+math.Max(0, flowScore-0.25)*1.40)
 	}
 
@@ -396,82 +395,43 @@ func (w *PositionWorker) OnTickHotPath(s *engine.StockMetrics, inMacroShock bool
 		cClimax = math.Max(0.35, 1.0-0.22*(xVWAP-1.8))
 	}
 
-	// 7. Compute Dynamic Breathing Buffer (BaseBuffer / OneR * M_flow * C_climax * D_thesis)
-	// Falsification Guard (Bug B3): Pre-1R, if BaseBuffer > OneR and order flow weakens (or trade stalls >= 90s),
-	// anchor effectiveBase to min(BaseBuffer, OneR) so tightening multipliers immediately lift the stop above InitialStop!
-	elapsedSec := max(int64(0), s.LastUpdatedUnix-w.OpenedAtUnix)
+	// 7. Dynamic Breathing Buffer & High-Frequency Breakeven Ratchet
 	effectiveBase := w.BaseBuffer
-	if !w.tranche1Done.Load() && (flowScore < 0.55 || elapsedSec >= 90) {
+	if !w.tranche1Done.Load() && flowScore < 0.55 {
 		effectiveBase = math.Min(w.BaseBuffer, w.OneR)
 	}
 
-	// Pre-1R Thesis-Decay & Stagnation Ratchet (D_thesis):
-	// Minimizes loss proactively when buyer absorption fails after entry or when a breakout stalls for > 90s.
-	dThesis := 1.0
-	if !w.tranche1Done.Load() {
-		if elapsedSec >= 20 && rMFE < 0.25 && flowScore < 0.42 {
-			// Case B: Immediate post-entry buyer absorption failure -> compress stop buffer to [0.45, 0.80]
-			dThesis = math.Max(0.45, math.Min(0.80, 0.55+(flowScore-0.30)*2.0))
-		} else if elapsedSec >= 90 && rMFE < 0.40 && flowScore < 0.50 {
-			// Case C: Stagnation / Time-Decay Ratchet after 90s without reaching +0.40R
-			dThesis = math.Max(0.40, 1.0-0.0033*float64(elapsedSec-90))
-		}
-	}
-
-	bDynamic := effectiveBase * mFlow * cClimax * dThesis
+	bDynamic := effectiveBase * mFlow * cClimax
 	unclampedCand := RoundToTick(hwm-bDynamic, w.TickSize)
 
-	// Minimum Tick-Clearance Guard (Anti-Suicide-Stop):
-	// When ratcheting pre-1R due to thesis decay, leave at least max(3 ticks, 0.22*ATR, 0.18% LTP) below current LTP
-	// so a single bid-ask bounce does not prematurely wick out the position.
-	if !w.tranche1Done.Load() && dThesis < 1.0 {
-		minClearance := math.Max(3.0*w.TickSize, math.Max(0.22*atrSafe, 0.0018*ltp))
-		maxPre1RCand := RoundDownToTick(ltp-minClearance, w.TickSize)
-		if unclampedCand > maxPre1RCand && maxPre1RCand > confirmedStop {
-			unclampedCand = maxPre1RCand
-		}
-	}
-
-	if rMFE >= 0.85 {
+	// Early Profit Protection: Once trade reaches +0.50R, lock Tax-Free Breakeven immediately!
+	if rMFE >= 0.50 {
 		unclampedCand = math.Max(unclampedCand, beStop)
-	} else if rMFE >= 0.50 {
-		unclampedCand = math.Max(unclampedCand, RoundToTick(entryPx-0.50*w.OneR, w.TickSize))
 	}
 	if w.tranche1Done.Load() && s.CurrentBarIdx > w.EntryBarIdx && s.CurrentBarIdx >= 1 {
 		prev5mLow := s.SessionBars[s.CurrentBarIdx-1].Low - 2.0*w.TickSize
 		unclampedCand = math.Max(unclampedCand, RoundToTick(prev5mLow, w.TickSize))
 	}
 
-	// 8. Completed 5m Bar Structural Invalidation Check (Pre-1R)
-	if !w.tranche1Done.Load() && s.CurrentBarIdx > w.EntryBarIdx && s.CurrentBarIdx >= 1 {
+	// 8. OrderBlock Rule: Judge the Zone on Completed 5-Minute Candle Closes (Never on Intra-Candle Wicks)
+	if s.CurrentBarIdx > w.EntryBarIdx && s.CurrentBarIdx >= 1 {
 		prevBar := s.SessionBars[s.CurrentBarIdx-1]
-		if prevBar.Close < s.ExchangeVWAP && prevBar.Close < prevBar.Open && s.AggressorBuyRatio < 0.42 {
-			w.TriggerEmergencyExit("COMPLETED_5M_VWAP_BREAKDOWN")
+		if prevBar.Close > 0 && prevBar.Close < w.InitialStop {
+			w.TriggerEmergencyExit("COMPLETED_5M_STRUCTURAL_STOP_CLOSE")
 			return
 		}
 	}
 
-	// 9. ZERO-FALLTHROUGH FALLING-KNIFE vs. NORMAL RATCHET:
+	// 9. Stop Ratchet Execution
 	if unclampedCand <= confirmedStop {
-		w.decayBreachSinceUnix.Store(0)
 		return
 	}
 
 	maxLegalTrigger := RoundDownToTick(ltp-math.Max(2.0*w.TickSize, 0.001*ltp), w.TickSize)
 	if ltp <= unclampedCand {
-		// Price is ALREADY below unclampedCand! NEVER clamp safeCand down below LTP!
-		if (s.LastUpdatedUnix-w.OpenedAtUnix) >= 20 && ltp < s.ExchangeVWAP && effectiveAggBuy < 0.40 {
-			since := w.decayBreachSinceUnix.Load()
-			if since == 0 {
-				w.decayBreachSinceUnix.Store(s.LastUpdatedUnix)
-			} else if (s.LastUpdatedUnix - since) >= 2 {
-				w.TriggerEmergencyExit("THESIS_DECAY_FALLING_KNIFE_CUT")
-			}
-		}
 		return
 	}
 
-	w.decayBreachSinceUnix.Store(0)
 	safeCand := math.Min(unclampedCand, maxLegalTrigger)
 	if safeCand > confirmedStop {
 		w.ProposeStopRatchet(safeCand, atrSafe, false)
@@ -558,9 +518,7 @@ func (w *PositionWorker) OnOrderDelta(legType string, ev OrderUpdateEvent, delta
 			w.isClosed.Store(true)
 			w.mu.Unlock()
 			w.persistPositionState()
-			if w.onClosed != nil {
-				w.onClosed(w)
-			}
+			w.notifyClosed()
 			return
 		}
 
@@ -587,9 +545,7 @@ func (w *PositionWorker) OnOrderDelta(legType string, ev OrderUpdateEvent, delta
 				w.finalizeClosedLocked(legType + "_" + ev.Status)
 				w.mu.Unlock()
 				w.persistPositionState()
-				if w.onClosed != nil {
-					w.onClosed(w)
-				}
+				w.notifyClosed()
 				return
 			}
 		}
@@ -715,9 +671,7 @@ func (w *PositionWorker) handleEntryTimeout() {
 		w.isClosed.Store(true)
 		w.mu.Unlock()
 		w.persistPositionState()
-		if w.onClosed != nil {
-			w.onClosed(w)
-		}
+		w.notifyClosed()
 		return
 	}
 
@@ -1022,9 +976,7 @@ func (w *PositionWorker) executeEmergencyFlatten(reason string) {
 			w.finalizeClosedLocked(reason)
 			w.mu.Unlock()
 			w.persistPositionState()
-			if w.onClosed != nil {
-				w.onClosed(w)
-			}
+			w.notifyClosed()
 			return
 		}
 	}

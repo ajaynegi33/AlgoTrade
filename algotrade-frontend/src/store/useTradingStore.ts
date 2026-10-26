@@ -5,6 +5,7 @@ import {
   UniverseSummaryData,
   ExecutionStateData,
   RankedSnapshotData,
+  TradeAnalyticsSummaryData,
 } from "@/lib/types";
 import {
   getKiteStatus,
@@ -24,6 +25,7 @@ interface TradingState {
   universe: UniverseSummaryData | null;
   executionState: ExecutionStateData | null;
   liveSnapshot: RankedSnapshotData | null;
+  tradeSummary: TradeAnalyticsSummaryData | null;
   isWsConnected: boolean;
   lastWsUpdatedMs: number;
   wsReconnectCount: number;
@@ -42,6 +44,7 @@ interface TradingState {
   setKiteStatus: (status: KiteStatusData | null) => void;
   setExecutionState: (state: ExecutionStateData | null) => void;
   setLiveSnapshot: (snapshot: RankedSnapshotData) => void;
+  setTradeSummary: (summary: TradeAnalyticsSummaryData | null) => void;
   setWsConnectionState: (connected: boolean, reconnectDelta?: number) => void;
   updateSettings: (payload: {
     mode?: "PAPER" | "LIVE";
@@ -60,6 +63,7 @@ export const useTradingStore = create<TradingState>((set, get) => ({
   universe: null,
   executionState: null,
   liveSnapshot: null,
+  tradeSummary: null,
   isWsConnected: false,
   lastWsUpdatedMs: 0,
   wsReconnectCount: 0,
@@ -77,6 +81,7 @@ export const useTradingStore = create<TradingState>((set, get) => ({
       lastWsUpdatedMs: Date.now(),
       executionState: snapshot.execution ?? prev.executionState,
     })),
+  setTradeSummary: (summary) => set({ tradeSummary: summary }),
   setWsConnectionState: (connected, reconnectDelta = 0) =>
     set((prev) => ({
       isWsConnected: connected,

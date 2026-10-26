@@ -47,9 +47,10 @@ func Init(dbPath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 	}
 
-	// Concurrency tuning: SQLite handles single-writer concurrency reliably
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	// Concurrency tuning: SQLite WAL mode supports concurrent reads and serializes writes
+	// with busy_timeout(5000), preventing Go connection pool starvation across goroutines.
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(2)
 	db.SetConnMaxLifetime(time.Hour)
 
 	if err := db.Ping(); err != nil {

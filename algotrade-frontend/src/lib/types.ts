@@ -193,6 +193,9 @@ export interface CapitalSummaryData {
   net_equity: number;
   free_margin: number;
   blocked_margin: number;
+  buying_power_5x?: number;
+  deployed_exposure?: number;
+  free_buying_power_5x?: number;
   realised_gross_pnl: number;
   total_charges: number;
   realised_net_pnl: number;
@@ -500,5 +503,98 @@ export interface StockDetailData {
   anti_spoof_ratio: number;
   bars: SessionBarData[];
   last_updated: number;
+}
+
+export interface CandleData {
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface OrderBlockLevelData {
+  symbol: string;
+  instrument_token: number;
+  direction: "BULLISH" | "BEARISH";
+  zone_level_z: number;
+  zone_low: number;
+  zone_high: number;
+  invalidation_s1: number;
+  invalidation_r1?: number;
+  target_r1: number;
+  target_r2: number;
+  target_s1?: number;
+  target_s2?: number;
+  one_r: number;
+  risk_reward_ratio: number;
+  breakeven_win_rate_pct: number;
+  zone_age: "IMPULSE" | "MARKED" | "FIRST_RETEST" | "LATER_RETEST" | "BROKEN" | string;
+  retest_count: number;
+  is_chasing: boolean;
+  chasing_risk_per_share: number;
+  chasing_rr_ratio: number;
+  chasing_be_win_rate_pct: number;
+  candles_5m: CandleData[];
+}
+
+export interface MinimaxEvaluationData {
+  symbol: string;
+  instrument_token: number;
+  direction: "BULLISH" | "BEARISH";
+  minimax_ev: number;
+  conviction_pct: number;
+  action_verdict: "ACT_AT_ZONE_Z" | "WAIT_FOR_PULLBACK_TO_Z" | "PRUNED_CHOP" | string;
+  verdict_reason: string;
+  predicted_path: string[];
+  pruned_branches: number;
+  evaluated_nodes: number;
+  order_block: OrderBlockLevelData;
+}
+
+export interface SectorMoveData {
+  name: string;
+  avg_move_pct: number;
+}
+
+export interface MarketPictureData {
+  bullish_count: number;
+  bearish_count: number;
+  total_stocks: number;
+  leading_sectors: SectorMoveData[];
+  lagging_sectors: SectorMoveData[];
+  day_bias: "ONE_SIDED_BULLISH" | "ONE_SIDED_BEARISH" | "BALANCED" | string;
+}
+
+export interface TrajectoryData {
+  symbol: string;
+  direction: "BULLISH" | "BEARISH";
+  change_pct: number;
+  points: number[];
+  is_pick: boolean;
+  sector: string;
+}
+
+export interface DecisionGateItemData {
+  symbol: string;
+  sector: string;
+  change_pct: number;
+  score: number;
+  buildup_type: "LONG BUILD-UP" | "SHORT BUILD-UP";
+  passed_gate1: boolean;
+  passed_gate2: boolean;
+  passed_gate3: boolean;
+  passed_gate4: boolean;
+  is_pick: boolean;
+}
+
+export interface OrderBlockTreeResponseData {
+  market_picture: MarketPictureData;
+  trajectories: TrajectoryData[];
+  bullish_gates: DecisionGateItemData[];
+  bearish_gates: DecisionGateItemData[];
+  top_bullish_picks: MinimaxEvaluationData[];
+  top_bearish_picks: MinimaxEvaluationData[];
 }
 

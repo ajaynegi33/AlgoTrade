@@ -30,6 +30,9 @@ function TerminalHeaderTitle() {
   const pathname = usePathname();
 
   const title = useMemo(() => {
+    if (pathname.startsWith("/orderblock")) {
+      return "OrderBlock Minimax α-β Prediction Desk";
+    }
     if (pathname.startsWith("/trades")) {
       return "Trade History, Tax Audit & Engine Analytics";
     }

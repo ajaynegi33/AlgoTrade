@@ -432,6 +432,15 @@ func (m *Manager) rehydrateOpenPositionsFromDB() {
 	ist := time.FixedZone("IST", 5*3600+1800)
 	todayStr := time.Now().In(ist).Format("2006-01-02")
 
+	type rawOpenPos struct {
+		posID, mode, symbol, state, pattern, entryOrd, slOrd, scaleOrd, openedAtStr string
+		token                                                                       uint32
+		entryPx, initStop, curStop, shStop, beStop, baseBuf, hwm, oneR              float64
+		initQty, modCnt, gear, t1Int                                               int
+		filledEntry, filledExit                                                    int64
+	}
+	var openList []rawOpenPos
+
 	rows, err := m.db.Query(`
 		SELECT position_id, mode, symbol, instrument_token, state, pattern_type,
 		       entry_order_id, sl_order_id, scale_out_order_id,
@@ -445,28 +454,29 @@ func (m *Manager) rehydrateOpenPositionsFromDB() {
 	if err != nil {
 		return
 	}
-	defer rows.Close()
-
 	for rows.Next() {
-		var posID, mode, symbol, state, pattern, entryOrd, slOrd, scaleOrd, openedAtStr string
-		var token uint32
-		var entryPx, initStop, curStop, shStop, beStop, baseBuf, hwm, oneR float64
-		var initQty, modCnt, gear, t1Int int
-		var filledEntry, filledExit int64
-
-		if err := rows.Scan(
-			&posID, &mode, &symbol, &token, &state, &pattern,
-			&entryOrd, &slOrd, &scaleOrd,
-			&entryPx, &initStop, &curStop, &shStop, &beStop, &baseBuf,
-			&hwm, &oneR, &initQty, &filledEntry, &filledExit,
-			&modCnt, &gear, &t1Int, &openedAtStr,
-		); err != nil {
-			continue
+		var p rawOpenPos
+		if sErr := rows.Scan(
+			&p.posID, &p.mode, &p.symbol, &p.token, &p.state, &p.pattern,
+			&p.entryOrd, &p.slOrd, &p.scaleOrd,
+			&p.entryPx, &p.initStop, &p.curStop, &p.shStop, &p.beStop, &p.baseBuf,
+			&p.hwm, &p.oneR, &p.initQty, &p.filledEntry, &p.filledExit,
+			&p.modCnt, &p.gear, &p.t1Int, &p.openedAtStr,
+		); sErr == nil {
+			if !(p.filledEntry > 0 && p.filledExit >= p.filledEntry) {
+				openList = append(openList, p)
+			}
 		}
+	}
+	rows.Close()
 
-		if filledEntry > 0 && filledExit >= filledEntry {
-			continue
-		}
+	for _, p := range openList {
+		posID, mode, symbol, state, pattern := p.posID, p.mode, p.symbol, p.state, p.pattern
+		entryOrd, slOrd, scaleOrd, openedAtStr := p.entryOrd, p.slOrd, p.scaleOrd, p.openedAtStr
+		token := p.token
+		entryPx, initStop, curStop, shStop, beStop, baseBuf, hwm, oneR := p.entryPx, p.initStop, p.curStop, p.shStop, p.beStop, p.baseBuf, p.hwm, p.oneR
+		initQty, modCnt, gear, t1Int := p.initQty, p.modCnt, p.gear, p.t1Int
+		filledEntry, filledExit := p.filledEntry, p.filledExit
 
 		var broker ExecutionBroker = m.paperBroker
 		if mode == "LIVE" {

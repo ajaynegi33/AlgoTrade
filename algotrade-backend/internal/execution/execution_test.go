@@ -3,10 +3,12 @@ package execution
 import (
 	"context"
 	"math"
+	"path/filepath"
 	"testing"
 	"time"
 	"unsafe"
 
+	"github.com/ajaynegi33/AlgoTrade/internal/database"
 	"github.com/ajaynegi33/AlgoTrade/internal/engine"
 )
 
@@ -428,6 +430,59 @@ func TestPhase27_TradeHistoryAndTaxBreakdown(t *testing.T) {
 	}
 }
 
+func TestTradeHistory_NoDeadlockOnMaxConns(t *testing.T) {
+	tempDB := filepath.Join(t.TempDir(), "test_hist_deadlock.db")
+	db, err := database.Init(tempDB)
+	if err != nil {
+		t.Fatalf("failed to init db: %v", err)
+	}
+	defer database.Close()
+
+	// Seed completed position and child orders in SQLite
+	_, err = db.Exec(`
+		INSERT INTO positions (
+			position_id, trading_date, mode, symbol, instrument_token, state, pattern_type,
+			entry_price, exit_price, initial_stop, current_stop, shadow_stop, breakeven_stop, base_buffer,
+			high_water_mark, one_r, initial_qty, filled_entry_qty, filled_exit_qty,
+			mod_count, current_gear, tranche1_done,
+			realised_gross_pnl, total_charges, realised_net_pnl, exit_reason, opened_at, closed_at
+		) VALUES (
+			'POS-BPCL-1', '2026-10-26', 'PAPER', 'BPCL', 134657, 'CLOSED', 'VWAP_PULLBACK_RECLAIM',
+			286.95, 288.47, 286.0, 289.15, 289.15, 287.7, 1.2,
+			289.6, 1.05, 78, 78, 78,
+			15, 2, 1,
+			118.95, 24.51, 94.44, 'SL_COMPLETE', '2026-10-26 07:18:28', '2026-10-26 07:56:56'
+		);
+		INSERT INTO orders (order_id, position_id, leg_type, symbol, transaction_type, order_type, quantity, filled_quantity, price, trigger_price, average_price, status)
+		VALUES ('ORD-1', 'POS-BPCL-1', 'ENTRY', 'BPCL', 'BUY', 'LIMIT', 78, 78, 287.05, 0, 286.95, 'COMPLETE'),
+		       ('ORD-2', 'POS-BPCL-1', 'SL', 'BPCL', 'SELL', 'SL', 39, 39, 287.95, 289.15, 289.20, 'COMPLETE');
+	`)
+	if err != nil {
+		t.Fatalf("failed to insert test data: %v", err)
+	}
+
+	mgr := NewManager(db, nil, nil, nil)
+	defer mgr.Stop()
+
+	doneCh := make(chan *engine.TradeHistoryResponseDTO, 1)
+	go func() {
+		hist := mgr.GetTradeHistory("ALL", "", "", 10)
+		doneCh <- hist
+	}()
+
+	select {
+	case hist := <-doneCh:
+		if len(hist.Trades) < 1 {
+			t.Fatalf("expected at least 1 trade from SQLite, got %d", len(hist.Trades))
+		}
+		if hist.Trades[0].Symbol != "BPCL" || len(hist.Trades[0].Orders) != 2 {
+			t.Fatalf("expected BPCL with 2 order legs, got symbol=%s, orders=%d", hist.Trades[0].Symbol, len(hist.Trades[0].Orders))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("DEADLOCK DETECTED: GetTradeHistory did not complete within 2s")
+	}
+}
+
 func TestActivePositionsStableEntryOrder(t *testing.T) {
 	mgr := NewManager(nil, nil, nil, nil)
 	defer mgr.Stop()
@@ -709,6 +764,106 @@ func TestRehydratedEmergencyFlattenForceExit(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for forced emergency flatten to close position")
+	}
+}
+
+func TestPositionWorker_EarlyHarvestAt065RAnd5mClose(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stock := &engine.StockMetrics{
+		InstrumentToken: 779521,
+		LTP:             800.00,
+		TickSize:        0.05,
+		ATR14:           4.00,
+		ExchangeVWAP:    798.00,
+		AggressorBuyRatio: 0.65,
+		FastAggressorEMA:  0.62,
+		SmoothedBuyerRatio: 0.60,
+		CurrentBarIdx:   2,
+	}
+	stock.SessionBars[0] = engine.OHLCVBar{High: 798.0, Low: 794.0, Open: 795.0, Close: 797.0}
+	stock.SessionBars[1] = engine.OHLCVBar{High: 801.0, Low: 796.0, Open: 797.0, Close: 800.0}
+	stock.SessionBars[2] = engine.OHLCVBar{High: 804.0, Low: 799.0, Open: 800.0, Close: 803.0}
+
+	sizing := SizingDecision{
+		Approved:        true,
+		Quantity:        50,
+		DustFloorQty:    1,
+		EntryLimitPrice: 800.00,
+		BreakevenStop:   800.80,
+		TargetR1Price:   803.25,
+		TargetR2Price:   808.25,
+		StopSpec: StopAndBufferSpec{
+			BaseBuffer:   3.00,
+			InitialStop:  795.00,
+			OneR:         5.00,
+			SignalBarLow: 795.00,
+		},
+	}
+
+	worker := NewPositionWorker(ctx, WorkerConfig{
+		PositionID:  "POS-SBIN-HARVEST-1",
+		TradingDate: "2026-10-26",
+		Mode:        "PAPER",
+		Symbol:      "SBIN",
+		Token:       779521,
+		TickSize:    0.05,
+		MISLeverage: 5.0,
+		EntryBarIdx: 1,
+		Sizing:      sizing,
+		GetStockPtr: func() *engine.StockMetrics { return stock },
+	})
+
+	worker.filledEntryQty.Store(50)
+	worker.confirmedStopBits.Store(math.Float64bits(795.00))
+
+	// 1. Tick at 802.60 (+0.52R): verify stop ratchets to Breakeven (800.80)
+	stock.LTP = 802.60
+	worker.OnTickHotPath(stock, false)
+	shadow := math.Float64frombits(worker.shadowStopBits.Load())
+	if shadow < 800.80 {
+		t.Fatalf("expected shadow stop to ratchet to Breakeven 800.80 at +0.52R, got %.2f", shadow)
+	}
+
+	// 2. Tick at 803.30 (+0.66R): verify Tranche 1 50% scale-out is triggered
+	stock.LTP = 803.30
+	worker.OnTickHotPath(stock, false)
+	if !worker.tranche1Pending.Load() {
+		t.Fatalf("expected tranche1Pending to be TRUE at +0.66R for early profit harvest, got false")
+	}
+
+	// 3. Intra-candle dip does NOT panic-dump if 5m bar hasn't closed below InitialStop
+	stock.LTP = 796.00
+	worker.OnTickHotPath(stock, false)
+	if worker.isClosed.Load() {
+		t.Fatalf("expected position to hold during intra-candle wick above InitialStop (795.00), but was closed prematurely")
+	}
+
+	// 4. Completed 5m candle close below InitialStop triggers structural exit
+	stock.CurrentBarIdx = 3
+	stock.SessionBars[2] = engine.OHLCVBar{High: 798.0, Low: 793.0, Open: 797.0, Close: 794.0} // Closed below 795.00!
+	stock.LTP = 794.00
+	worker.OnTickHotPath(stock, false)
+	if !worker.pendingMarketExit.Load() {
+		t.Fatalf("expected pendingMarketExit to be TRUE after completed 5m candle closed below InitialStop (794.00 < 795.00)")
+	}
+}
+
+func TestPositionWorker_NotifyClosedIdempotent(t *testing.T) {
+	callCount := 0
+	w := &PositionWorker{
+		onClosed: func(pw *PositionWorker) {
+			callCount++
+		},
+	}
+
+	for i := 0; i < 10; i++ {
+		w.notifyClosed()
+	}
+
+	if callCount != 1 {
+		t.Fatalf("expected onClosed to be called exactly 1 time, got %d", callCount)
 	}
 }
 

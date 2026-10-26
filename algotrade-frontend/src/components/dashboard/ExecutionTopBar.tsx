@@ -233,6 +233,9 @@ export const ExecutionTopBar = memo(function ExecutionTopBar({
             <span className="text-sm font-black text-slate-900 mt-1 block">
               ₹{capital.net_equity.toLocaleString("en-IN", { maximumFractionDigits: 0 })}
             </span>
+            <span className="text-[10px] text-emerald-700 font-semibold block mt-0.5">
+              5x Power: ₹{(capital.buying_power_5x ?? capital.net_equity * 5).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
+            </span>
           </div>
 
           <div className="p-3 rounded-2xl bg-slate-50/80 border border-slate-200/70">
@@ -242,6 +245,9 @@ export const ExecutionTopBar = memo(function ExecutionTopBar({
             <span className="text-sm font-black text-slate-900 mt-1 block">
               ₹{capital.free_margin.toLocaleString("en-IN", { maximumFractionDigits: 0 })}
             </span>
+            <span className="text-[10px] text-slate-500 font-semibold block mt-0.5">
+              5x Free: ₹{(capital.free_buying_power_5x ?? capital.free_margin * 5).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
+            </span>
           </div>
 
           <div className="p-3 rounded-2xl bg-slate-50/80 border border-slate-200/70">
@@ -250,6 +256,9 @@ export const ExecutionTopBar = memo(function ExecutionTopBar({
             </span>
             <span className="text-sm font-black text-slate-900 mt-1 block">
               ₹{capital.blocked_margin.toLocaleString("en-IN", { maximumFractionDigits: 0 })}
+            </span>
+            <span className="text-[10px] text-indigo-700 font-semibold block mt-0.5">
+              Stock Value: ₹{(capital.deployed_exposure ?? capital.blocked_margin * 5).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
             </span>
           </div>
 

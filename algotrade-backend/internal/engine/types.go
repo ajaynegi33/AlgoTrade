@@ -95,6 +95,9 @@ type CapitalSummaryDTO struct {
 	NetEquity            float64 `json:"net_equity"`             // Effective capital for risk budgeting
 	FreeMargin           float64 `json:"free_margin"`            // Unencumbered cash available for new positions
 	BlockedMargin        float64 `json:"blocked_margin"`         // Margin utilized by active positions
+	BuyingPower5x        float64 `json:"buying_power_5x"`        // 5x MIS Intraday Buying Power (NetEquity * 5.0)
+	DeployedExposure     float64 `json:"deployed_exposure"`      // Total stock notional value active (BlockedMargin * 5.0)
+	FreeBuyingPower5x    float64 `json:"free_buying_power_5x"`   // Remaining 5x MIS Buying Power (FreeMargin * 5.0)
 	RealisedGrossPnL     float64 `json:"realised_gross_pnl"`     // Today's closed trade PnL before taxes
 	TotalCharges         float64 `json:"total_charges"`          // Brokerage + STT + Exchange + SEBI + Stamp + GST
 	RealisedNetPnL       float64 `json:"realised_net_pnl"`       // Net banked profit/loss after all charges

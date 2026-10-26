@@ -16,6 +16,7 @@ import (
 	"github.com/ajaynegi33/AlgoTrade/internal/engine"
 	"github.com/ajaynegi33/AlgoTrade/internal/execution"
 	"github.com/ajaynegi33/AlgoTrade/internal/kite"
+	"github.com/ajaynegi33/AlgoTrade/internal/prediction"
 	"github.com/ajaynegi33/AlgoTrade/internal/response"
 	"github.com/ajaynegi33/AlgoTrade/internal/scanner"
 	"github.com/ajaynegi33/AlgoTrade/internal/user"
@@ -99,6 +100,7 @@ func main() {
 	})
 
 	engineHandler := engine.NewHandler(engineActor, wsHub)
+	predictionHandler := prediction.NewHandler(engineActor)
 
 	// Initialize Handlers
 	authHandler := auth.NewHandler(cfg, userStore)
@@ -148,6 +150,9 @@ func main() {
 	mux.Handle("POST /api/execution/paper-capital", requireAuth(http.HandlerFunc(execHandler.UpdatePaperCapital)))
 	mux.Handle("POST /api/execution/flatten", requireAuth(http.HandlerFunc(execHandler.Flatten)))
 	mux.HandleFunc("POST /api/kite/postback", execHandler.HandleKitePostback)
+
+	// OrderBlock Decision Tree & Minimax Alpha-Beta Pruning Prediction Routes
+	mux.HandleFunc("GET /api/prediction/orderblock-tree", predictionHandler.GetOrderBlockTree)
 
 	// Deferred non-blocking initial scan check on startup
 	go func() {

@@ -202,6 +202,7 @@ export default function TradeHistoryAndTaxPage() {
           limit: 500,
         });
         setHistoryData(res);
+        useTradingStore.getState().setTradeSummary(res.summary);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : "Failed to load trade history";
         if (!silent) toast.error(msg);

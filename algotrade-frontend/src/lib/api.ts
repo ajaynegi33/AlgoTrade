@@ -11,6 +11,7 @@ import {
   StockDetailData,
   ExecutionStateData,
   TradeHistoryResponseData,
+  OrderBlockTreeResponseData,
 } from "./types";
 
 const API_BASE_URL =
@@ -402,6 +403,23 @@ export async function getTradeHistory(params?: {
     throw new ApiError(
       json.error?.message || "Failed to fetch trade history",
       json.error?.code || "TRADE_HISTORY_ERROR"
+    );
+  }
+  return json.data;
+}
+
+export async function getOrderBlockTree(): Promise<OrderBlockTreeResponseData> {
+  const res = await fetch(`${API_BASE_URL}/api/prediction/orderblock-tree`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new ApiError("Failed to fetch OrderBlock prediction tree", "ORDERBLOCK_TREE_ERROR", res.status);
+  }
+  const json: ApiResponse<OrderBlockTreeResponseData> = await res.json();
+  if (!json.success || !json.data) {
+    throw new ApiError(
+      json.error?.message || "Failed to fetch OrderBlock prediction tree",
+      json.error?.code || "ORDERBLOCK_TREE_ERROR"
     );
   }
   return json.data;

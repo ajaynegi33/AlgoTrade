@@ -129,45 +129,72 @@ func (m *Manager) GetTradeHistory(modeFilter, fromDate, toDate string, limit int
 			LIMIT ?
 		`, whereSQL)
 
+		type rawDBPos struct {
+			posID, trDate, mode, sym, compName, secName, state, pattern, exitReason, openedRaw, closedRaw string
+			token                                                                                          uint32
+			misLev, entryPx, exitPx, initStop, curStop, shStop, beStop, hwm, oneR, gross, charges, net     float64
+			initQty, filledEntry, filledExit, modCnt, gear, t1Int                                          int
+		}
+		var rawList []rawDBPos
+
 		rows, err := m.db.Query(query, args...)
 		if err == nil {
-			defer rows.Close()
 			for rows.Next() {
-				var (
-					posID, trDate, mode, sym, compName, secName, state, pattern, exitReason, openedRaw, closedRaw string
-					token                                                                                          uint32
-					misLev, entryPx, exitPx, initStop, curStop, shStop, beStop, hwm, oneR, gross, charges, net     float64
-					initQty, filledEntry, filledExit, modCnt, gear, t1Int                                          int
-				)
+				var r rawDBPos
 				if scanErr := rows.Scan(
-					&posID, &trDate, &mode, &sym, &compName, &secName, &misLev,
-					&token, &state, &pattern,
-					&entryPx, &exitPx, &initStop, &curStop, &shStop, &beStop, &hwm, &oneR,
-					&initQty, &filledEntry, &filledExit, &modCnt, &gear, &t1Int,
-					&gross, &charges, &net, &exitReason, &openedRaw, &closedRaw,
-				); scanErr != nil {
-					continue
+					&r.posID, &r.trDate, &r.mode, &r.sym, &r.compName, &r.secName, &r.misLev,
+					&r.token, &r.state, &r.pattern,
+					&r.entryPx, &r.exitPx, &r.initStop, &r.curStop, &r.shStop, &r.beStop, &r.hwm, &r.oneR,
+					&r.initQty, &r.filledEntry, &r.filledExit, &r.modCnt, &r.gear, &r.t1Int,
+					&r.gross, &r.charges, &r.net, &r.exitReason, &r.openedRaw, &r.closedRaw,
+				); scanErr == nil {
+					rawList = append(rawList, r)
 				}
+			}
+			rows.Close()
 
+			for _, r := range rawList {
 				item := buildTradeHistoryItem(
-					m.db, ist, posID, trDate, mode, sym, compName, secName, misLev,
-					token, state, pattern, entryPx, exitPx, initStop, curStop, shStop, beStop, hwm, oneR,
-					initQty, filledEntry, filledExit, modCnt, gear, t1Int != 0,
-					gross, charges, net, exitReason, openedRaw, closedRaw,
+					m.db, ist, r.posID, r.trDate, r.mode, r.sym, r.compName, r.secName, r.misLev,
+					r.token, r.state, r.pattern, r.entryPx, r.exitPx, r.initStop, r.curStop, r.shStop, r.beStop, r.hwm, r.oneR,
+					r.initQty, r.filledEntry, r.filledExit, r.modCnt, r.gear, r.t1Int != 0,
+					r.gross, r.charges, r.net, r.exitReason, r.openedRaw, r.closedRaw,
 				)
 				items = append(items, item)
-				seenPosIDs[posID] = true
+				seenPosIDs[r.posID] = true
 			}
 		}
 	}
 
-	// Merge any in-memory closed or active positions not yet in SQLite (e.g. in-memory test runs)
+	// Merge any currently active positions in memory not yet in SQLite or still in market
 	m.mu.RLock()
+	activeSnapshots := make([]engine.ActivePositionDTO, 0, len(m.activeWorkers))
+	for _, w := range m.activeWorkers {
+		activeSnapshots = append(activeSnapshots, w.ToDTO())
+	}
 	memClosed := make([]engine.ActivePositionDTO, len(m.closedPositions))
 	copy(memClosed, m.closedPositions)
 	m.mu.RUnlock()
 
 	todayStr := time.Now().In(ist).Format("2006-01-02")
+	for _, act := range activeSnapshots {
+		if seenPosIDs[act.PositionID] {
+			continue
+		}
+		if (modeFilter == "PAPER" || modeFilter == "LIVE") && act.Mode != modeFilter {
+			continue
+		}
+		item := buildTradeHistoryItem(
+			m.db, ist, act.PositionID, todayStr, act.Mode, act.Symbol, act.Symbol, "NSE Cash Equity", 5.0,
+			act.InstrumentToken, act.State, act.PatternType, act.EntryPrice, act.ExitPrice,
+			act.InitialStop, act.CurrentStop, act.ShadowStop, act.BreakevenStop, act.HighWaterMark, act.OneR,
+			act.InitialQty, act.InitialQty, act.InitialQty-act.RemainingQty, act.ModCount, act.CurrentGear, act.Tranche1Done,
+			act.RealisedGrossPnL, act.EstimatedCharges, act.NetTotalPnL, act.ExitReason, act.OpenedAt, act.ClosedAt,
+		)
+		items = append(items, item)
+		seenPosIDs[act.PositionID] = true
+	}
+
 	for _, cp := range memClosed {
 		if seenPosIDs[cp.PositionID] {
 			continue
@@ -289,7 +316,6 @@ func buildTradeHistoryItem(
 			ORDER BY updated_at ASC
 		`, posID)
 		if err == nil {
-			defer oRows.Close()
 			for oRows.Next() {
 				var leg engine.TradeOrderLegDTO
 				var updRaw string
@@ -302,6 +328,7 @@ func buildTradeHistoryItem(
 					orderLegs = append(orderLegs, leg)
 				}
 			}
+			oRows.Close()
 		}
 	}
 
