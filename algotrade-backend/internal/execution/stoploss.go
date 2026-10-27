@@ -142,7 +142,7 @@ func BreakevenTriggerPrice(entryPrice float64, initialQty, runnerQty int, tickSi
 	perShareTax := taxes.TotalCharges / float64(runnerQty)
 
 	// Cushion = max(perShareTax + 2 ticks, 0.15% of entry price)
-	minCushion := math.Max(perShareTax+2.0*tickSize, 0.0015*entryPrice)
+	minCushion := math.Max(perShareTax + 2.0 * tickSize, 0.0015 * entryPrice)
 	return RoundUpToTick(entryPrice+minCushion, tickSize)
 }
 
