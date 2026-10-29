@@ -165,14 +165,14 @@ func (reconciler *OrderReconciler) ProcessOrderEvent(orderEvent OrderUpdateEvent
 	}
 }
 
-// SyncOrdersCoalesced fetches all orders from the active broker, coalescing concurrent callers within 250ms
+// SyncOrdersCoalesced fetches all orders from the active broker, coalescing concurrent callers within 500ms
 func (reconciler *OrderReconciler) SyncOrdersCoalesced(ctx context.Context, broker ExecutionBroker) ([]OrderUpdateEvent, error) {
 	if broker == nil {
 		return nil, nil
 	}
 
 	reconciler.fetchMu.Lock()
-	if time.Since(reconciler.lastFetchTime) < 250*time.Millisecond && reconciler.lastFetchErr == nil {
+	if time.Since(reconciler.lastFetchTime) < 500*time.Millisecond && reconciler.lastFetchErr == nil {
 		cached := reconciler.lastFetchedList
 		reconciler.fetchMu.Unlock()
 		return cached, nil

@@ -221,11 +221,14 @@ func ComputePositionSize(
 		}
 	}
 
-	// Minimum viable partial-fill dust floor (at least 1 share and enough to cover 2x taxes at +1R)
-	minViableQty := max(1, int(math.Ceil((2.5*chargesAt1R)/math.Max(0.05, stopSpec.OneR))))
-	if minViableQty > allocatedQuantity {
-		minViableQty = allocatedQuantity
-	}
+	// Marginal viable partial-fill dust floor:
+	// A small partial fill is viable if expected profit at +1R covers the flat ₹20 exit brokerage + taxes (≈ ₹25)
+	marginalExitFriction := 25.0
+	effectiveOneR := math.Max(0.50, stopSpec.OneR)
+	marginalViableQty := int(math.Ceil(marginalExitFriction / effectiveOneR))
+	// Dust floor must never exceed 15% of allocated position size or 1 share minimum
+	maxDustAllowed := max(1, int(0.15*float64(allocatedQuantity)))
+	minViableQty := min(max(1, marginalViableQty), maxDustAllowed)
 
 	// Calculate Breakeven Stop on runner tranche using stoploss.go
 	runnerQty := max(1, allocatedQuantity-(allocatedQuantity/2))

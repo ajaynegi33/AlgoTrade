@@ -111,6 +111,17 @@ func (manager *Manager) handleOrderDelta(positionID, legType string, orderEvent 
 	manager.mu.RUnlock()
 	if isWorkerFound && worker != nil {
 		worker.OnOrderDelta(legType, orderEvent, deltaFilled)
+	} else if deltaFilled > 0 && orderEvent.TransactionType == "BUY" {
+		// Late fill after worker was closed/deleted!
+		slog.Error("ORPHANED BUY FILL DETECTED: Position worker closed or not found, initiating emergency market liquidation",
+			"position_id", positionID, "order_id", orderEvent.OrderID, "delta_filled", deltaFilled, "symbol", orderEvent.Symbol)
+		go func() {
+			broker := manager.getActiveBroker()
+			_, err := broker.PlaceEmergencySweepSell(context.Background(), orderEvent.Symbol, orderEvent.InstrumentToken, deltaFilled, orderEvent.AveragePrice, 0.05, 0.0350, nil)
+			if err != nil {
+				slog.Error("CRITICAL: Failed to liquidate orphaned shares", "symbol", orderEvent.Symbol, "qty", deltaFilled, "error", err)
+			}
+		}()
 	}
 }
 
@@ -122,7 +133,12 @@ func (manager *Manager) onWorkerClosed(worker *PositionWorker) {
 	if currentWorker, isSymbolMapped := manager.symbolToWorker[worker.Symbol]; isSymbolMapped && currentWorker.PositionID == worker.PositionID {
 		delete(manager.symbolToWorker, worker.Symbol)
 	}
-	manager.symbolCooldowns[worker.Symbol] = time.Now().Add(15 * time.Minute)
+	if worker.filledEntryQty.Load() > 0 {
+		manager.symbolCooldowns[worker.Symbol] = time.Now().Add(15 * time.Minute)
+	} else {
+		// If 0 shares filled (timed out or rejected), only apply a 60-second backoff
+		manager.symbolCooldowns[worker.Symbol] = time.Now().Add(60 * time.Second)
+	}
 	manager.closedPositions = append([]market.ActivePositionDTO{dto}, manager.closedPositions...)
 	if len(manager.closedPositions) > 50 {
 		manager.closedPositions = manager.closedPositions[:50]
@@ -518,6 +534,7 @@ func (manager *Manager) rehydrateOpenPositionsFromDB() {
 		worker.modCount.Store(int32(positionRecord.modCount))
 		worker.currentGear.Store(int32(positionRecord.gear))
 		worker.hasTranche1Completed.Store(positionRecord.hasTranche1CompletedInt != 0)
+		remainingTimeout := 5 * time.Minute
 		if positionRecord.openedAtStr != "" {
 			if t, err := time.Parse(time.RFC3339, positionRecord.openedAtStr); err == nil {
 				worker.OpenedAt = t
@@ -526,11 +543,28 @@ func (manager *Manager) rehydrateOpenPositionsFromDB() {
 				worker.OpenedAt = t
 				worker.OpenedAtUnix = t.Unix()
 			}
+			elapsed := time.Since(worker.OpenedAt)
+			if 5*time.Minute > elapsed {
+				remainingTimeout = 5*time.Minute - elapsed
+				if remainingTimeout < 30*time.Second {
+					remainingTimeout = 30 * time.Second
+				}
+			} else {
+				remainingTimeout = 30 * time.Second
+			}
 		}
+		worker.entryTimeoutDuration = remainingTimeout
 
 		if positionRecord.entryOrderID != "" {
 			manager.reconciler.SeedOrderFilled(positionRecord.entryOrderID, int(positionRecord.filledEntryQuantity))
-			manager.reconciler.RegisterOrder(positionRecord.entryOrderID, positionRecord.positionID, "ENTRY", positionRecord.symbol, "BUY", "LIMIT", positionRecord.initialQuantity, positionRecord.entryPrice, 0, OrderStatusComplete)
+			entryStatus := OrderStatusComplete
+			if positionRecord.state == StateEntryPlaced && int(positionRecord.filledEntryQuantity) < positionRecord.initialQuantity {
+				entryStatus = OrderStatusOpen
+			}
+			manager.reconciler.RegisterOrder(positionRecord.entryOrderID, positionRecord.positionID, "ENTRY", positionRecord.symbol, "BUY", "LIMIT", positionRecord.initialQuantity, positionRecord.entryPrice, 0, entryStatus)
+			if positionRecord.mode == "PAPER" && manager.paperBroker != nil && entryStatus == OrderStatusOpen {
+				manager.paperBroker.SeedRestingBuyOrder(positionRecord.entryOrderID, positionRecord.symbol, positionRecord.token, positionRecord.initialQuantity, int(positionRecord.filledEntryQuantity), positionRecord.entryPrice, OrderStatusOpen)
+			}
 		}
 		if positionRecord.scaleOutOrderID != "" && positionRecord.filledExitQuantity > 0 {
 			manager.reconciler.SeedOrderFilled(positionRecord.scaleOutOrderID, int(positionRecord.filledExitQuantity))
@@ -541,6 +575,9 @@ func (manager *Manager) rehydrateOpenPositionsFromDB() {
 				manager.reconciler.SeedOrderFilled(positionRecord.slOrderID, int(positionRecord.filledExitQuantity))
 			}
 			remQty := int(positionRecord.filledEntryQuantity - positionRecord.filledExitQuantity)
+			worker.mu.Lock()
+			worker.slOrderQty = remQty
+			worker.mu.Unlock()
 			manager.reconciler.RegisterOrder(positionRecord.slOrderID, positionRecord.positionID, "SL", positionRecord.symbol, "SELL", "SL", remQty, positionRecord.currentStop, positionRecord.currentStop, OrderStatusTrigPending)
 			if positionRecord.mode == "PAPER" && manager.paperBroker != nil && remQty > 0 {
 				limitPx := ComputeSellSLLimitPrice(positionRecord.currentStop, worker.TickSize)

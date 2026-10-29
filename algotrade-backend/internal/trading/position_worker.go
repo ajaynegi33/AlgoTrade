@@ -57,6 +57,7 @@ type PositionWorker struct {
 	shadowStopBits       atomic.Uint64
 	proposedStopBits     atomic.Uint64
 	slBreachSinceUnix    atomic.Int64
+	runawaySinceUnix     atomic.Int64
 	shadowBreachTicks    atomic.Uint32
 	lastModUnixMs        atomic.Int64
 
@@ -74,6 +75,7 @@ type PositionWorker struct {
 	state            string
 	entryOrderID     string
 	slOrderID        string
+	slOrderQty       int
 	scaleOutOrderID  string
 	slOrderStatus    string
 	slOpenSinceMs    int64
@@ -453,6 +455,7 @@ func (worker *PositionWorker) handleEntryTimeout() {
 	// Cancel remaining unfilled portion of entry order
 	if entryOrdID != "" {
 		_ = worker.broker.CancelOrder(worker.ctx, entryOrdID)
+		time.Sleep(500 * time.Millisecond) // Drain window to absorb late fills before final check
 		_, _ = worker.reconciler.SyncOrdersCoalesced(worker.ctx, worker.broker)
 	}
 
@@ -482,9 +485,25 @@ func (worker *PositionWorker) handleEntryTimeout() {
 	worker.mu.Lock()
 	worker.InitialQty = filled
 	worker.BreakevenStop = beStop
+	hasSL := worker.slOrderID != ""
+	slQty := worker.slOrderQty
 	worker.mu.Unlock()
 	worker.breakevenStopBits.Store(math.Float64bits(beStop))
-	worker.ensureInitialSLPlaced()
+
+	if !hasSL {
+		worker.ensureInitialSLPlaced()
+	} else if filled > slQty && !worker.hasTranche1Completed.Load() && worker.state != StateScaleOutPending && worker.modCount.Load() < MaxSafetyModifications {
+		curStop := math.Float64frombits(worker.confirmedStopBits.Load())
+		limitPx := ComputeSellSLLimitPrice(curStop, worker.TickSize)
+		ltp := worker.LatestLTP()
+		if err := worker.broker.ModifySLOrder(worker.ctx, worker.slOrderID, filled, curStop, limitPx, ltp, worker.TickSize); err == nil {
+			worker.mu.Lock()
+			worker.slOrderQty = filled
+			worker.mu.Unlock()
+			worker.modCount.Add(1)
+			worker.lastModUnixMs.Store(time.Now().UnixMilli())
+		}
+	}
 	worker.persistPositionState()
 }
 

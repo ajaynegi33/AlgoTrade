@@ -28,8 +28,28 @@ func (worker *PositionWorker) OnTickHotPath(stockMetrics *market.StockMetrics, i
 	}
 	worker.latestLTPBits.Store(math.Float64bits(lastTradedPrice))
 
-	// Only evaluate trailing stops once entry has filled at least 1 share
-	if worker.filledEntryQty.Load() <= 0 || worker.GetRemainingQty() <= 0 {
+	// Runaway Price Guard: Cancel entry limit buy if price ran away without filling
+	if worker.filledEntryQty.Load() <= 0 {
+		worker.mu.RLock()
+		isEntryPlaced := worker.state == StateEntryPlaced
+		entryPx := worker.EntryPrice
+		worker.mu.RUnlock()
+
+		if isEntryPlaced && worker.OneR > 0 && lastTradedPrice >= entryPx+1.2*worker.OneR {
+			runawayStart := worker.runawaySinceUnix.Load()
+			if runawayStart == 0 {
+				worker.runawaySinceUnix.Store(stockMetrics.LastUpdatedUnix)
+			} else if (stockMetrics.LastUpdatedUnix - runawayStart) >= 30 {
+				worker.TriggerEmergencyExit("ENTRY_CANCELLED_PRICE_RUNAWAY")
+				return
+			}
+		} else {
+			worker.runawaySinceUnix.Store(0)
+		}
+		return
+	}
+
+	if worker.GetRemainingQty() <= 0 {
 		return
 	}
 

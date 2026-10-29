@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -571,9 +572,11 @@ func TestSLGapThroughBreachAndFlatten(t *testing.T) {
 	stock.TickSize = 0.05
 	stock.MISLeverage = 5.0
 	for i := 0; i < 5; i++ {
-		stock.AskLevels[i] = market.DepthLevel{Price: float32(59.55 + float64(i)*0.05), Qty: 50000}
-		stock.BidLevels[i] = market.DepthLevel{Price: float32(59.45 - float64(i)*0.05), Qty: 50000}
+		stock.AskLevels[i] = market.DepthLevel{Price: float32(59.40 + float64(i)*0.05), Qty: 50000}
+		stock.BidLevels[i] = market.DepthLevel{Price: float32(59.35 - float64(i)*0.05), Qty: 50000}
 	}
+	stock.Ask1Price = 59.40
+	stock.Bid1Price = 59.35
 
 	sizing := SizingDecision{
 		IsApproved:      true,
@@ -1012,8 +1015,11 @@ func TestPartialFillTimeoutAndMarginAdjustment(t *testing.T) {
 		t.Fatalf("Expected 40 filled shares, got %d", worker.filledEntryQty.Load())
 	}
 
-	// Wait for the entry timeout to trigger cancellation of remaining 60 shares
-	time.Sleep(100 * time.Millisecond)
+	// Wait for the entry timeout to trigger cancellation of remaining 60 shares (including 500ms drain window)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && worker.GetInitialQty() != 40 {
+		time.Sleep(20 * time.Millisecond)
+	}
 
 	// Verify cancel was dispatched for the unfilled portion
 	if !mockBroker.cancelCalled.Load() {
@@ -1039,6 +1045,287 @@ func TestPartialFillTimeoutAndMarginAdjustment(t *testing.T) {
 	if dto.InitialQty != 40 || dto.RemainingQty != 40 {
 		t.Fatalf("Expected DTO InitialQty=40 and RemainingQty=40, got Initial=%d Remaining=%d",
 			dto.InitialQty, dto.RemainingQty)
+	}
+}
+
+func TestPartialFillIncrementalStopLossExpansion(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var worker *PositionWorker
+	reconciler := NewOrderReconciler(nil, func(posID, legType string, ev OrderUpdateEvent, delta int) {
+		if worker != nil {
+			worker.OnOrderDelta(legType, ev, delta)
+		}
+	})
+
+	paperBroker := NewPaperBroker(func(ev OrderUpdateEvent) {
+		reconciler.ProcessOrderEvent(ev)
+	})
+	mockBroker := &partialFillMockBroker{PaperBroker: paperBroker}
+
+	stock := &market.StockMetrics{
+		InstrumentToken: 54321,
+		LTP:             100.0,
+		TickSize:        0.05,
+		MISLeverage:     5.0,
+	}
+
+	sizing := SizingDecision{
+		IsApproved:      true,
+		Quantity:        100,
+		DustFloorQty:    5,
+		EntryLimitPrice: 100.0,
+		StopSpec: StopAndBufferSpec{
+			InitialStop:  98.0,
+			OneR:         2.0,
+			BaseBuffer:   0.5,
+			SignalBarLow: 98.2,
+		},
+	}
+
+	worker = NewPositionWorker(ctx, WorkerConfig{
+		PositionID:           "POS-TEST-INCR-EXPANSION",
+		TradingDate:          "2026-10-30",
+		Mode:                 "PAPER",
+		Symbol:               "EXPANDSTOCK",
+		Token:                54321,
+		TickSize:             0.05,
+		MISLeverage:          5.0,
+		Sizing:               sizing,
+		EntryTimeoutDuration: 10 * time.Second,
+		Broker:               mockBroker,
+		PaperBroker:          paperBroker,
+		Reconciler:           reconciler,
+		GetStockPtr:          func() *market.StockMetrics { return stock },
+	})
+
+	if err := worker.Start(); err != nil {
+		t.Fatalf("Failed to start worker: %v", err)
+	}
+
+	// 1. First partial fill of 30 shares
+	worker.OnOrderDelta("ENTRY", OrderUpdateEvent{
+		OrderID:        worker.entryOrderID,
+		Status:         OrderStatusOpen,
+		FilledQuantity: 30,
+		AveragePrice:   100.0,
+	}, 30)
+
+	// Wait for workerLoop to place initial SL for 30 shares
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		worker.mu.RLock()
+		slQty := worker.slOrderQty
+		hasSL := worker.slOrderID != ""
+		worker.mu.RUnlock()
+		if hasSL && slQty == 30 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	worker.mu.RLock()
+	slID := worker.slOrderID
+	slQty := worker.slOrderQty
+	worker.mu.RUnlock()
+	if slID == "" || slQty != 30 {
+		t.Fatalf("Expected initial SL placed for 30 shares, got slID=%s slQty=%d", slID, slQty)
+	}
+
+	// 2. Second partial fill arrives: 40 more shares (total 70)
+	worker.OnOrderDelta("ENTRY", OrderUpdateEvent{
+		OrderID:        worker.entryOrderID,
+		Status:         OrderStatusOpen,
+		FilledQuantity: 70,
+		AveragePrice:   100.0,
+	}, 40)
+
+	// Wait for workerLoop to resize SL to 70 shares
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		worker.mu.RLock()
+		slQty = worker.slOrderQty
+		worker.mu.RUnlock()
+		if slQty == 70 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	worker.mu.RLock()
+	slQty = worker.slOrderQty
+	worker.mu.RUnlock()
+	if slQty != 70 {
+		t.Fatalf("Expected SL resized to 70 shares, got %d", slQty)
+	}
+}
+
+func TestPaperBrokerRestingLimitBuyAndDepthFill(t *testing.T) {
+	var events []OrderUpdateEvent
+	var evMu sync.Mutex
+	paper := NewPaperBroker(func(ev OrderUpdateEvent) {
+		evMu.Lock()
+		events = append(events, ev)
+		evMu.Unlock()
+	})
+
+	token := uint32(99901)
+	stock := &market.StockMetrics{
+		InstrumentToken: token,
+		LTP:             105.0,
+		Ask1Price:       105.10,
+		Bid1Price:       105.00,
+		TickSize:        0.05,
+	}
+	for i := 0; i < 5; i++ {
+		stock.AskLevels[i] = market.DepthLevel{Price: float32(105.10 + float64(i)*0.05), Qty: 20}
+		stock.BidLevels[i] = market.DepthLevel{Price: float32(105.00 - float64(i)*0.05), Qty: 20}
+	}
+
+	// 1. Place limit buy at 104.50 (well below Ask1 105.10)
+	orderID, err := paper.PlaceLimitBuy(context.Background(), "DEPTHTEST", token, 50, 104.50, stock)
+	if err != nil {
+		t.Fatalf("PlaceLimitBuy failed: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	evMu.Lock()
+	if len(events) == 0 {
+		t.Fatalf("Expected OPEN event emitted")
+	}
+	firstEv := events[0]
+	evMu.Unlock()
+
+	if firstEv.OrderID != orderID || firstEv.Status != OrderStatusOpen || firstEv.FilledQuantity != 0 {
+		t.Fatalf("Expected order to rest OPEN with 0 filled, got: %+v", firstEv)
+	}
+
+	// 2. Market drops: stock LTP drops to 104.50, Ask1 drops to 104.50 with 30 shares available
+	stock.LTP = 104.50
+	stock.Ask1Price = 104.50
+	stock.AskLevels[0] = market.DepthLevel{Price: 104.50, Qty: 30}
+	stock.AskLevels[1] = market.DepthLevel{Price: 104.55, Qty: 50}
+
+	paper.EvaluateTickForToken(stock)
+	time.Sleep(50 * time.Millisecond)
+
+	evMu.Lock()
+	var partialEv *OrderUpdateEvent
+	for i := range events {
+		if events[i].OrderID == orderID && events[i].FilledQuantity == 30 {
+			partialEv = &events[i]
+			break
+		}
+	}
+	evMu.Unlock()
+
+	if partialEv == nil {
+		t.Fatalf("Expected partial fill of 30 shares on tick arrival")
+	}
+	if partialEv.Status != OrderStatusOpen {
+		t.Fatalf("Expected order to still be OPEN after partial fill, got %s", partialEv.Status)
+	}
+
+	// 3. More ask liquidity arrives at 104.50: remaining 20 shares fill
+	stock.AskLevels[0] = market.DepthLevel{Price: 104.50, Qty: 50}
+	paper.EvaluateTickForToken(stock)
+	time.Sleep(50 * time.Millisecond)
+
+	evMu.Lock()
+	var completeEv *OrderUpdateEvent
+	for i := range events {
+		if events[i].OrderID == orderID && events[i].FilledQuantity == 50 {
+			completeEv = &events[i]
+			break
+		}
+	}
+	evMu.Unlock()
+
+	if completeEv == nil {
+		t.Fatalf("Expected complete fill of 50 shares")
+	}
+	if completeEv.Status != OrderStatusComplete {
+		t.Fatalf("Expected order to be COMPLETE, got %s", completeEv.Status)
+	}
+}
+
+func TestRunawayPriceGuard(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var worker *PositionWorker
+	reconciler := NewOrderReconciler(nil, func(posID, legType string, ev OrderUpdateEvent, delta int) {
+		if worker != nil {
+			worker.OnOrderDelta(legType, ev, delta)
+		}
+	})
+	paper := NewPaperBroker(func(ev OrderUpdateEvent) {
+		reconciler.ProcessOrderEvent(ev)
+	})
+
+	stock := &market.StockMetrics{
+		InstrumentToken: 77777,
+		LTP:             100.0,
+		Ask1Price:       100.50,
+		TickSize:        0.05,
+		LastUpdatedUnix: time.Now().Unix(),
+	}
+
+	sizing := SizingDecision{
+		IsApproved:      true,
+		Quantity:        50,
+		DustFloorQty:    5,
+		EntryLimitPrice: 100.0,
+		StopSpec: StopAndBufferSpec{
+			InitialStop:  98.0,
+			OneR:         2.0,
+			BaseBuffer:   0.5,
+			SignalBarLow: 98.2,
+		},
+	}
+
+	worker = NewPositionWorker(ctx, WorkerConfig{
+		PositionID:           "POS-RUNAWAY-TEST",
+		TradingDate:          "2026-10-30",
+		Mode:                 "PAPER",
+		Symbol:               "RUNAWAYSTOCK",
+		Token:                77777,
+		TickSize:             0.05,
+		MISLeverage:          5.0,
+		Sizing:               sizing,
+		EntryTimeoutDuration: 5 * time.Minute,
+		Broker:               paper,
+		PaperBroker:          paper,
+		Reconciler:           reconciler,
+		GetStockPtr:          func() *market.StockMetrics { return stock },
+	})
+
+	if err := worker.Start(); err != nil {
+		t.Fatalf("worker.Start failed: %v", err)
+	}
+
+	// Verify 0 filled, state is StateEntryPlaced
+	if worker.filledEntryQty.Load() != 0 {
+		t.Fatalf("Expected 0 filled shares")
+	}
+
+	// Now price runs away to 103.0 (+1.5R above entry 100.0, > 1.2R threshold of 102.40)
+	stock.LTP = 103.0
+	// Tick 1: runaway begins
+	worker.OnTickHotPath(stock, false)
+	if worker.runawaySinceUnix.Load() == 0 {
+		t.Fatalf("Expected runaway timer to start")
+	}
+
+	// Advance clock by 35 seconds
+	stock.LastUpdatedUnix += 35
+	worker.OnTickHotPath(stock, false)
+
+	// Position worker should receive emergency exit
+	time.Sleep(100 * time.Millisecond)
+	if !worker.isMarketExitPending.Load() {
+		t.Fatalf("Expected isMarketExitPending to be true due to price runaway")
 	}
 }
 

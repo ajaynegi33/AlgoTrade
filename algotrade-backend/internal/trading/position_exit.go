@@ -42,15 +42,34 @@ func (worker *PositionWorker) processPendingWork() {
 		return
 	}
 
-	// 1. Ensure initial SL is placed as soon as entry fills
+	// 1. Ensure initial SL is placed as soon as entry fills (full or partial)
 	if worker.filledEntryQty.Load() > 0 {
 		worker.mu.RLock()
 		hasSL := worker.slOrderID != ""
+		slQty := worker.slOrderQty
 		worker.mu.RUnlock()
-		if !hasSL && int(worker.filledEntryQty.Load()) >= worker.InitialQty {
+		filledEntry := int(worker.filledEntryQty.Load())
+		if !hasSL {
 			worker.ensureInitialSLPlaced()
 			if worker.isClosed.Load() || worker.isMarketExitPending.Load() {
 				return
+			}
+		} else if filledEntry > slQty && worker.state != StateScaleOutPending && !worker.hasTranche1Completed.Load() && worker.modCount.Load() < MaxSafetyModifications {
+			// Incremental fill arrived while SL is active: resize SL to cover all filled shares
+			curStop := math.Float64frombits(worker.confirmedStopBits.Load())
+			limitPx := ComputeSellSLLimitPrice(curStop, worker.TickSize)
+			ltp := worker.LatestLTP()
+			worker.mu.RLock()
+			slID := worker.slOrderID
+			worker.mu.RUnlock()
+			if slID != "" {
+				if err := worker.broker.ModifySLOrder(worker.ctx, slID, filledEntry, curStop, limitPx, ltp, worker.TickSize); err == nil {
+					worker.mu.Lock()
+					worker.slOrderQty = filledEntry
+					worker.mu.Unlock()
+					worker.modCount.Add(1)
+					worker.lastModUnixMs.Store(time.Now().UnixMilli())
+				}
 			}
 		}
 	}
@@ -145,6 +164,7 @@ func (worker *PositionWorker) ensureInitialSLPlaced() {
 	worker.mu.Lock()
 	worker.slOrderID = slID
 	worker.slOrderStatus = OrderStatusTrigPending
+	worker.slOrderQty = rem
 	worker.state = StateProtectedActive
 	worker.mu.Unlock()
 
@@ -154,6 +174,21 @@ func (worker *PositionWorker) ensureInitialSLPlaced() {
 
 // executeThreeStepScaleOut performs the Race-Free 3-Step Scale-Out at +1.0R with Compensating Rollback
 func (worker *PositionWorker) executeThreeStepScaleOut() {
+	// Guard against racing entry limit buy: if entry is still resting, cancel it and freeze InitialQty
+	worker.mu.RLock()
+	entryOrdID := worker.entryOrderID
+	initQty := worker.InitialQty
+	worker.mu.RUnlock()
+	filledEntry := int(worker.filledEntryQty.Load())
+	if entryOrdID != "" && filledEntry < initQty {
+		_ = worker.broker.CancelOrder(worker.ctx, entryOrdID)
+		_, _ = worker.reconciler.SyncOrdersCoalesced(worker.ctx, worker.broker)
+		filledEntry = int(worker.filledEntryQty.Load())
+		worker.mu.Lock()
+		worker.InitialQty = filledEntry
+		worker.mu.Unlock()
+	}
+
 	rem := worker.RemainingQty()
 	if rem < 2 {
 		// Position is 1 share: cannot split; lock Breakeven stop directly
@@ -199,6 +234,9 @@ func (worker *PositionWorker) executeThreeStepScaleOut() {
 		worker.isTranche1Pending.Store(false)
 		return
 	}
+	worker.mu.Lock()
+	worker.slOrderQty = runnerQty
+	worker.mu.Unlock()
 	worker.modCount.Add(1)
 	worker.lastModUnixMs.Store(time.Now().UnixMilli())
 
@@ -217,6 +255,9 @@ func (worker *PositionWorker) executeThreeStepScaleOut() {
 				worker.executeEmergencyFlatten("SCALE_OUT_ROLLBACK_FAILED")
 				return
 			}
+			worker.mu.Lock()
+			worker.slOrderQty = fullRem
+			worker.mu.Unlock()
 			worker.modCount.Add(1)
 		}
 		worker.mu.Lock()
@@ -282,6 +323,9 @@ func (worker *PositionWorker) executeThreeStepScaleOut() {
 				worker.modCount.Add(1)
 				worker.lastModUnixMs.Store(time.Now().UnixMilli())
 				worker.confirmedStopBits.Store(math.Float64bits(beTrigger))
+				worker.mu.Lock()
+				worker.slOrderQty = remAfter
+				worker.mu.Unlock()
 			}
 		}
 	}
