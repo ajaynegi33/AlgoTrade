@@ -333,6 +333,9 @@ func (h *HistoricalService) loadFromDatabase(token uint32) (*StockBaselineProfil
 			count++
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("error iterating baseline rows: %w", err)
+	}
 
 	if count == 75 {
 		todayIST := time.Now().In(ist).Format("2006-01-02")
@@ -388,6 +391,9 @@ func (h *HistoricalService) loadTodayBarsFromDatabase(token uint32) []TodaySlotB
 				})
 			}
 		}
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("Failed iterating today bars from database", "token", token, "error", err)
 	}
 	return bars
 }

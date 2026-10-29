@@ -147,6 +147,9 @@ func (cm *CapitalManager) ReconcileWithPositionsDB(mode string) {
 			consecLosses++
 		}
 	}
+	if err := rows.Err(); err != nil {
+		slog.Error("Failed iterating daily risk positions from DB", "error", err)
+	}
 
 	dto := &market.DailyRiskDTO{
 		TradingDate:       cm.tradingDate,
@@ -466,6 +469,7 @@ func (cm *CapitalManager) SyncUniverseLeverages(ctx context.Context) {
 	if err != nil {
 		return
 	}
+	defer rows.Close()
 	type item struct {
 		token  uint32
 		symbol string
@@ -477,7 +481,9 @@ func (cm *CapitalManager) SyncUniverseLeverages(ctx context.Context) {
 			list = append(list, it)
 		}
 	}
-	rows.Close()
+	if err := rows.Err(); err != nil {
+		slog.Error("Failed iterating scanned stocks for leverage sync", "error", err)
+	}
 
 	if len(list) == 0 {
 		return

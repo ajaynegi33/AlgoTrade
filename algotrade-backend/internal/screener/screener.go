@@ -202,6 +202,10 @@ func (s *Service) GetUniverse(date string) (*UniverseSummary, error) {
 		stocks = append(stocks, s)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating scanned stocks: %w", err)
+	}
+
 	if len(stocks) == 0 {
 		// If requested date has no scanned stocks, fallback to latest cached scan
 		return s.fallbackUniverse()

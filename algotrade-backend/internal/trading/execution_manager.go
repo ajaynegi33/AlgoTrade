@@ -40,12 +40,7 @@ type Manager struct {
 	cancel context.CancelFunc
 }
 
-func NewManager(
-	db *sql.DB,
-	actor *market.Actor,
-	kiteService *kite.Service,
-	tickerClient *kite.TickerClient,
-) *Manager {
+func NewManager( db *sql.DB, actor *market.Actor, kiteService *kite.Service, tickerClient *kite.TickerClient ) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	m := &Manager{
@@ -413,6 +408,9 @@ func (m *Manager) loadClosedPositionsFromDB() {
 			m.closedPositions = append(m.closedPositions, dto)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		slog.Error("Failed iterating closed positions from DB", "error", err)
+	}
 }
 
 // rehydrateOpenPositionsFromDB restores any open position workers after an unexpected server restart
@@ -442,8 +440,11 @@ func (m *Manager) rehydrateOpenPositionsFromDB() {
 		ORDER BY opened_at ASC
 	`, todayStr)
 	if err != nil {
+		slog.Error("Failed querying open positions for rehydration", "error", err)
 		return
 	}
+	defer rows.Close()
+
 	for rows.Next() {
 		var p rawOpenPos
 		if sErr := rows.Scan(
@@ -458,7 +459,9 @@ func (m *Manager) rehydrateOpenPositionsFromDB() {
 			}
 		}
 	}
-	rows.Close()
+	if err := rows.Err(); err != nil {
+		slog.Error("Failed iterating open positions for rehydration", "error", err)
+	}
 
 	for _, p := range openList {
 		var broker ExecutionBroker = m.paperBroker

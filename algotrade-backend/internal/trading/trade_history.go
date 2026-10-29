@@ -3,6 +3,7 @@ package trading
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"math"
 	"slices"
 	"strings"
@@ -139,6 +140,7 @@ func (m *Manager) GetTradeHistory(modeFilter, fromDate, toDate string, limit int
 
 		rows, err := m.db.Query(query, args...)
 		if err == nil {
+			defer rows.Close()
 			for rows.Next() {
 				var r rawDBPos
 				if scanErr := rows.Scan(
@@ -151,7 +153,9 @@ func (m *Manager) GetTradeHistory(modeFilter, fromDate, toDate string, limit int
 					rawList = append(rawList, r)
 				}
 			}
-			rows.Close()
+			if rErr := rows.Err(); rErr != nil {
+				slog.Error("Failed iterating trade history rows from DB", "error", rErr)
+			}
 
 			for _, r := range rawList {
 				act := market.ActivePositionDTO{
@@ -326,6 +330,7 @@ func buildTradeHistoryFromDTO(
 			ORDER BY updated_at ASC
 		`, act.PositionID)
 		if err == nil {
+			defer oRows.Close()
 			for oRows.Next() {
 				var leg market.TradeOrderLegDTO
 				var updRaw string
@@ -338,7 +343,9 @@ func buildTradeHistoryFromDTO(
 					orderLegs = append(orderLegs, leg)
 				}
 			}
-			oRows.Close()
+			if oErr := oRows.Err(); oErr != nil {
+				slog.Error("Failed iterating position order legs from DB", "position_id", act.PositionID, "error", oErr)
+			}
 		}
 	}
 

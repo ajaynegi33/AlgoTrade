@@ -21,14 +21,7 @@ type CandidateSignal struct {
 
 // PickBestLongCandidate runs Stage 0 Regime Filtering, Pattern A & B Structural Detection, and Pre-Trade Gatekeeping,
 // while also producing the Top 5 CandidateGateDiagnosticDTO telemetry array for the Trader Cockpit UI.
-func PickBestLongCandidate(
-	stocks *[512]market.StockMetrics,
-	bullishSorted []uint16,
-	sectorHealthMap map[uint8]market.SectorHealth,
-	sessionClock market.GlobalSessionClockDTO,
-	netEquity, freeMargin, riskPct, drawdownMult float64,
-	isSymbolUnavailable func(symbol string, token uint32) bool,
-) (*CandidateSignal, string, string, []market.CandidateGateDiagnosticDTO) {
+func PickBestLongCandidate( stocks *[512]market.StockMetrics, bullishSorted []uint16, sectorHealthMap map[uint8]market.SectorHealth, sessionClock market.GlobalSessionClockDTO, netEquity, freeMargin, riskPct, drawdownMult float64, isSymbolUnavailable func(symbol string, token uint32) bool ) (*CandidateSignal, string, string, []market.CandidateGateDiagnosticDTO) {
 	regimeOK := true
 	var regimeLockStatus, regimeLockReason string
 
