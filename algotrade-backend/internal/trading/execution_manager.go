@@ -241,9 +241,8 @@ func (m *Manager) OnSecondTick(
 	} else if settings.AutoExecute {
 		gateStatus = pickStatus
 		gateReason = pickReason
-		if candidate != nil && time.Since(m.lastEntryTime) >= 3*time.Second {
-			m.lastEntryTime = now
-			go m.spawnCandidateWorker(*candidate, settings.Mode, &stocks[candidate.StockIdx])
+		if candidate != nil {
+			m.spawnCandidateWorker(*candidate, settings.Mode, &stocks[candidate.StockIdx])
 		}
 	} else if candidate != nil {
 		gateStatus = "PAUSED_SIGNAL_READY"
@@ -302,46 +301,50 @@ func (m *Manager) spawnCandidateWorker(cand CandidateSignal, mode string, stockP
 	}
 
 	worker := NewPositionWorker(m.ctx, WorkerConfig{
-		PositionID:  posID,
-		TradingDate: todayStr,
-		Mode:        mode,
-		Symbol:      cand.Symbol,
-		Token:       cand.Token,
-		StockIdx:    cand.StockIdx,
-		PatternType: cand.PatternType,
-		TickSize:    float64(stockPtr.TickSize),
-		MISLeverage: lev,
-		EntryBarIdx: stockPtr.CurrentBarIdx,
-		Sizing:      cand.Sizing,
-		Broker:      broker,
-		PaperBroker: m.paperBroker,
-		Reconciler:  m.reconciler,
-		DB:          m.db,
-		GetStockPtr: func() *market.StockMetrics { return stockPtr },
-		OnClosed:    m.onWorkerClosed,
+		PositionID:           posID,
+		TradingDate:          todayStr,
+		Mode:                 mode,
+		Symbol:               cand.Symbol,
+		Token:                cand.Token,
+		StockIdx:             cand.StockIdx,
+		PatternType:          cand.PatternType,
+		TickSize:             float64(stockPtr.TickSize),
+		MISLeverage:          lev,
+		EntryBarIdx:          stockPtr.CurrentBarIdx,
+		Sizing:               cand.Sizing,
+		EntryTimeoutDuration: 5 * time.Minute,
+		Broker:               broker,
+		PaperBroker:          m.paperBroker,
+		Reconciler:           m.reconciler,
+		DB:                   m.db,
+		GetStockPtr:          func() *market.StockMetrics { return stockPtr },
+		OnClosed:             m.onWorkerClosed,
 	})
 
 	m.activeWorkers[posID] = worker
 	m.symbolToWorker[cand.Symbol] = worker
+	m.lastEntryTime = time.Now()
 	m.mu.Unlock()
 
 	if m.actor != nil {
 		m.actor.BindPositionWorker(cand.Token, cand.Symbol, worker)
 	}
 
-	if err := worker.Start(); err != nil {
-		slog.Warn("Candidate PositionWorker failed to start", "symbol", cand.Symbol, "error", err)
-	} else {
-		slog.Info("Spawned autonomous PositionWorker",
-			"position_id", posID,
-			"mode", mode,
-			"symbol", cand.Symbol,
-			"pattern", cand.PatternType,
-			"qty", cand.Sizing.Quantity,
-			"entry", cand.Sizing.EntryLimitPrice,
-			"stop", cand.Sizing.StopSpec.InitialStop,
-		)
-	}
+	go func() {
+		if err := worker.Start(); err != nil {
+			slog.Warn("Candidate PositionWorker failed to start", "symbol", cand.Symbol, "error", err)
+		} else {
+			slog.Info("Spawned autonomous PositionWorker",
+				"position_id", posID,
+				"mode", mode,
+				"symbol", cand.Symbol,
+				"pattern", cand.PatternType,
+				"qty", cand.Sizing.Quantity,
+				"entry", cand.Sizing.EntryLimitPrice,
+				"stop", cand.Sizing.StopSpec.InitialStop,
+			)
+		}
+	}()
 }
 
 func (m *Manager) backgroundMaintenanceLoop() {

@@ -212,6 +212,7 @@ func runMigrations(db *sql.DB) error {
 			closed_at DATETIME
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_positions_date_mode ON positions(trading_date, mode);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_active_symbol_date ON positions(symbol, trading_date) WHERE state != 'CLOSED';`,
 		`CREATE TABLE IF NOT EXISTS orders (
 			order_id TEXT PRIMARY KEY,
 			position_id TEXT NOT NULL,

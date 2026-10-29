@@ -94,6 +94,7 @@ type PositionWorker struct {
 	db             *sql.DB
 	getStockPtr    func() *market.StockMetrics
 	onClosed       func(w *PositionWorker)
+	entryTimeoutDuration time.Duration
 	ctx            context.Context
 	cancel         context.CancelFunc
 }
@@ -116,6 +117,7 @@ type WorkerConfig struct {
 	DB           *sql.DB
 	GetStockPtr  func() *market.StockMetrics
 	OnClosed     func(w *PositionWorker)
+	EntryTimeoutDuration time.Duration
 }
 
 func NewPositionWorker(parentCtx context.Context, cfg WorkerConfig) *PositionWorker {
@@ -130,39 +132,45 @@ func NewPositionWorker(parentCtx context.Context, cfg WorkerConfig) *PositionWor
 		lev = 5.0
 	}
 
+	timeoutDur := cfg.EntryTimeoutDuration
+	if timeoutDur <= 0 {
+		timeoutDur = 5 * time.Minute
+	}
+
 	w := &PositionWorker{
-		PositionID:    cfg.PositionID,
-		TradingDate:   cfg.TradingDate,
-		Mode:          cfg.Mode,
-		Symbol:        cfg.Symbol,
-		Token:         cfg.Token,
-		StockIdx:      cfg.StockIdx,
-		PatternType:   cfg.PatternType,
-		TickSize:      tick,
-		MISLeverage:   lev,
-		InitialQty:    cfg.Sizing.Quantity,
-		DustFloorQty:  cfg.Sizing.DustFloorQty,
-		EntryBarIdx:   cfg.EntryBarIdx,
-		OpenedAt:      now,
-		OpenedAtUnix:  now.Unix(),
-		EntryPrice:    cfg.Sizing.EntryLimitPrice,
-		InitialStop:   cfg.Sizing.StopSpec.InitialStop,
-		BreakevenStop: cfg.Sizing.BreakevenStop,
-		BaseBuffer:    cfg.Sizing.StopSpec.BaseBuffer,
-		OneR:          cfg.Sizing.StopSpec.OneR,
-		SignalBarLow:  cfg.Sizing.StopSpec.SignalBarLow,
-		state:         StateEntryPlaced,
-		wakeCh:        make(chan struct{}, 1),
-		emergReasonCh: make(chan string, 4),
-		fillNotifyCh:  make(chan struct{}, 8),
-		broker:        cfg.Broker,
-		paperBroker:   cfg.PaperBroker,
-		reconciler:    cfg.Reconciler,
-		db:            cfg.DB,
-		getStockPtr:   cfg.GetStockPtr,
-		onClosed:      cfg.OnClosed,
-		ctx:           ctx,
-		cancel:        cancel,
+		PositionID:           cfg.PositionID,
+		TradingDate:          cfg.TradingDate,
+		Mode:                 cfg.Mode,
+		Symbol:               cfg.Symbol,
+		Token:                cfg.Token,
+		StockIdx:             cfg.StockIdx,
+		PatternType:          cfg.PatternType,
+		TickSize:             tick,
+		MISLeverage:          lev,
+		InitialQty:           cfg.Sizing.Quantity,
+		DustFloorQty:         cfg.Sizing.DustFloorQty,
+		EntryBarIdx:          cfg.EntryBarIdx,
+		OpenedAt:             now,
+		OpenedAtUnix:         now.Unix(),
+		EntryPrice:           cfg.Sizing.EntryLimitPrice,
+		InitialStop:          cfg.Sizing.StopSpec.InitialStop,
+		BreakevenStop:        cfg.Sizing.BreakevenStop,
+		BaseBuffer:           cfg.Sizing.StopSpec.BaseBuffer,
+		OneR:                 cfg.Sizing.StopSpec.OneR,
+		SignalBarLow:         cfg.Sizing.StopSpec.SignalBarLow,
+		state:                StateEntryPlaced,
+		entryTimeoutDuration: timeoutDur,
+		wakeCh:               make(chan struct{}, 1),
+		emergReasonCh:        make(chan string, 4),
+		fillNotifyCh:         make(chan struct{}, 8),
+		broker:               cfg.Broker,
+		paperBroker:          cfg.PaperBroker,
+		reconciler:           cfg.Reconciler,
+		db:                   cfg.DB,
+		getStockPtr:          cfg.GetStockPtr,
+		onClosed:             cfg.OnClosed,
+		ctx:                  ctx,
+		cancel:               cancel,
 	}
 
 	w.entryPriceBits.Store(math.Float64bits(cfg.Sizing.EntryLimitPrice))
@@ -183,6 +191,18 @@ func (w *PositionWorker) GetEntryPrice() float64 {
 
 func (w *PositionWorker) GetBreakevenStop() float64 {
 	return math.Float64frombits(w.breakevenStopBits.Load())
+}
+
+func (w *PositionWorker) GetInitialQty() int {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.InitialQty
+}
+
+func (w *PositionWorker) GetSLOrderID() string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.slOrderID
 }
 
 // RemainingQty returns the exact net open share count (FilledEntryQty - FilledExitQty)
@@ -343,7 +363,7 @@ func (w *PositionWorker) finalizeClosedLocked(reason string) {
 }
 
 func (w *PositionWorker) workerLoop() {
-	entryTimeout := time.NewTimer(3500 * time.Millisecond)
+	entryTimeout := time.NewTimer(w.entryTimeoutDuration)
 	defer entryTimeout.Stop()
 
 	watchdogTicker := time.NewTicker(500 * time.Millisecond)
@@ -399,15 +419,18 @@ func (w *PositionWorker) handleEntryTimeout() {
 		return
 	}
 	filled := int(w.filledEntryQty.Load())
-	if filled >= w.InitialQty {
+
+	w.mu.RLock()
+	initQty := w.InitialQty
+	entryOrdID := w.entryOrderID
+	w.mu.RUnlock()
+
+	if filled >= initQty {
 		w.ensureInitialSLPlaced()
 		return
 	}
 
 	// Cancel remaining unfilled portion of entry order
-	w.mu.RLock()
-	entryOrdID := w.entryOrderID
-	w.mu.RUnlock()
 	if entryOrdID != "" {
 		_ = w.broker.CancelOrder(w.ctx, entryOrdID)
 		_, _ = w.reconciler.SyncOrdersCoalesced(w.ctx, w.broker)
@@ -442,6 +465,7 @@ func (w *PositionWorker) handleEntryTimeout() {
 	w.mu.Unlock()
 	w.breakevenStopBits.Store(math.Float64bits(beStop))
 	w.ensureInitialSLPlaced()
+	w.persistPositionState()
 }
 
 func (w *PositionWorker) ToDTO() market.ActivePositionDTO {

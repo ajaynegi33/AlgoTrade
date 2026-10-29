@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -916,8 +917,128 @@ func TestDecoupledStopLossAndSizing(t *testing.T) {
 	if r := EffectiveRiskPerTradePct(1000000.0, 0.005); r != 0.0050 {
 		t.Fatalf("expected 0.50%% risk for 10L account, got %.4f", r)
 	}
-	if r := EffectiveRiskPerTradePct(10000000.0, 0.005); r != 0.0035 {
+	if r := EffectiveRiskPerTradePct(10000000.0, 0.005); r != 0.035/10.0 {
 		t.Fatalf("expected 0.35%% risk for 1Cr account, got %.4f", r)
+	}
+}
+
+type partialFillMockBroker struct {
+	*PaperBroker
+	cancelCalled atomic.Bool
+}
+
+func (m *partialFillMockBroker) PlaceLimitBuy(
+	_ context.Context,
+	_ string,
+	_ uint32,
+	_ int,
+	_ float64,
+	_ *market.StockMetrics,
+) (string, error) {
+	// Return open order without immediate fill to test resting limit order timeout
+	return "TEST-ORD-RESTING", nil
+}
+
+func (m *partialFillMockBroker) CancelOrder(ctx context.Context, orderID string) error {
+	m.cancelCalled.Store(true)
+	return m.PaperBroker.CancelOrder(ctx, orderID)
+}
+
+func TestPartialFillTimeoutAndMarginAdjustment(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var worker *PositionWorker
+	reconciler := NewOrderReconciler(nil, func(posID, legType string, ev OrderUpdateEvent, delta int) {
+		if worker != nil {
+			worker.OnOrderDelta(legType, ev, delta)
+		}
+	})
+
+	paperBroker := NewPaperBroker(func(ev OrderUpdateEvent) {
+		reconciler.ProcessOrderEvent(ev)
+	})
+	mockBroker := &partialFillMockBroker{PaperBroker: paperBroker}
+
+	stock := &market.StockMetrics{
+		InstrumentToken: 12345,
+		LTP:             1505.0,
+		TickSize:        0.05,
+		MISLeverage:     5.0,
+	}
+
+	sizing := SizingDecision{
+		Approved:        true,
+		Quantity:        100,
+		DustFloorQty:    5,
+		EntryLimitPrice: 1500.0,
+		StopSpec: StopAndBufferSpec{
+			InitialStop:  1485.0,
+			OneR:         15.0,
+			BaseBuffer:   3.0,
+			SignalBarLow: 1488.0,
+		},
+	}
+
+	worker = NewPositionWorker(ctx, WorkerConfig{
+		PositionID:           "POS-TEST-PARTIAL",
+		TradingDate:          "2026-10-29",
+		Mode:                 "PAPER",
+		Symbol:               "TESTSTOCK",
+		Token:                12345,
+		TickSize:             0.05,
+		MISLeverage:          5.0,
+		Sizing:               sizing,
+		EntryTimeoutDuration: 50 * time.Millisecond,
+		Broker:               mockBroker,
+		PaperBroker:          paperBroker,
+		Reconciler:           reconciler,
+		GetStockPtr:          func() *market.StockMetrics { return stock },
+	})
+
+	if err := worker.Start(); err != nil {
+		t.Fatalf("Failed to start worker: %v", err)
+	}
+
+	// Simulate partial fill of 40 shares (out of 100)
+	worker.OnOrderDelta("ENTRY", OrderUpdateEvent{
+		OrderID:        worker.entryOrderID,
+		Status:         OrderStatusOpen,
+		FilledQuantity: 40,
+		AveragePrice:   1500.0,
+	}, 40)
+
+	if worker.filledEntryQty.Load() != 40 {
+		t.Fatalf("Expected 40 filled shares, got %d", worker.filledEntryQty.Load())
+	}
+
+	// Wait for the entry timeout to trigger cancellation of remaining 60 shares
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify cancel was dispatched for the unfilled portion
+	if !mockBroker.cancelCalled.Load() {
+		t.Fatalf("Expected broker CancelOrder to be called on timeout")
+	}
+
+	// Verify InitialQty was adjusted from 100 to 40
+	if worker.GetInitialQty() != 40 {
+		t.Fatalf("Expected InitialQty adjusted to 40, got %d", worker.GetInitialQty())
+	}
+
+	if worker.RemainingQty() != 40 {
+		t.Fatalf("Expected RemainingQty = 40, got %d", worker.RemainingQty())
+	}
+
+	// Verify that SL order was placed for the exact 40 shares
+	if worker.GetSLOrderID() == "" {
+		t.Fatalf("Expected SL order placed for partial fill")
+	}
+
+	// Verify DTO shows updated quantities
+	dto := worker.ToDTO()
+	if dto.InitialQty != 40 || dto.RemainingQty != 40 {
+		t.Fatalf("Expected DTO InitialQty=40 and RemainingQty=40, got Initial=%d Remaining=%d",
+			dto.InitialQty, dto.RemainingQty)
 	}
 }
 
