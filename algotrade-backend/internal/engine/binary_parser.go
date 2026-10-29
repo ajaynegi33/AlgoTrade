@@ -89,6 +89,16 @@ func parseIndexPacket(pkt []byte) ParsedTick {
 	}
 }
 
+// ComputeAntiSpoofRatio calculates the weighted anti-spoof depth ratio (60% Top 2, 40% Rest 3)
+func ComputeAntiSpoofRatio(bidTop2, bidRest3, askTop2, askRest3 uint64) float64 {
+	wBid := 0.6*float64(bidTop2) + 0.4*float64(bidRest3)
+	wAsk := 0.6*float64(askTop2) + 0.4*float64(askRest3)
+	if tot := wBid + wAsk; tot > 0 {
+		return wBid / tot
+	}
+	return 0.50
+}
+
 func parseEquityPacket(pkt []byte) ParsedTick {
 	token := binary.BigEndian.Uint32(pkt[0:4])
 	ltp := float64(int32(binary.BigEndian.Uint32(pkt[4:8]))) / 100.0
@@ -134,13 +144,7 @@ func parseEquityPacket(pkt []byte) ParsedTick {
 			askRest3 += aQty
 		}
 	}
-	wBid := 0.6*float64(bidTop2) + 0.4*float64(bidRest3)
-	wAsk := 0.6*float64(askTop2) + 0.4*float64(askRest3)
-
-	var rawRatio float32 = 0.5
-	if tot := wBid + wAsk; tot > 0 {
-		rawRatio = float32(wBid / tot)
-	}
+	rawRatio := float32(ComputeAntiSpoofRatio(bidTop2, bidRest3, askTop2, askRest3))
 
 	bid1Price := bidLevels[0].Price
 	ask1Price := askLevels[0].Price

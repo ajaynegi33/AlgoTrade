@@ -60,7 +60,7 @@ func (m *Manager) GetTradeHistory(modeFilter, fromDate, toDate string, limit int
 	if limit <= 0 || limit > 1000 {
 		limit = 500
 	}
-	ist := time.FixedZone("IST", 5*3600+1800)
+	ist := engine.ISTLocation
 	modeFilter = strings.ToUpper(strings.TrimSpace(modeFilter))
 
 	items := make([]engine.TradeHistoryItemDTO, 0, 64)
@@ -154,12 +154,37 @@ func (m *Manager) GetTradeHistory(modeFilter, fromDate, toDate string, limit int
 			rows.Close()
 
 			for _, r := range rawList {
-				item := buildTradeHistoryItem(
-					m.db, ist, r.posID, r.trDate, r.mode, r.sym, r.compName, r.secName, r.misLev,
-					r.token, r.state, r.pattern, r.entryPx, r.exitPx, r.initStop, r.curStop, r.shStop, r.beStop, r.hwm, r.oneR,
-					r.initQty, r.filledEntry, r.filledExit, r.modCnt, r.gear, r.t1Int != 0,
-					r.gross, r.charges, r.net, r.exitReason, r.openedRaw, r.closedRaw,
-				)
+				act := engine.ActivePositionDTO{
+					PositionID:       r.posID,
+					Mode:             r.mode,
+					Symbol:           r.sym,
+					InstrumentToken:  r.token,
+					State:            r.state,
+					PatternType:      r.pattern,
+					EntryPrice:       r.entryPx,
+					ExitPrice:        r.exitPx,
+					InitialStop:      r.initStop,
+					CurrentStop:      r.curStop,
+					ShadowStop:       r.shStop,
+					BreakevenStop:    r.beStop,
+					HighWaterMark:    r.hwm,
+					OneR:             r.oneR,
+					InitialQty:       r.initQty,
+					RemainingQty:     r.initQty - r.filledExit,
+					ModCount:         r.modCnt,
+					CurrentGear:      r.gear,
+					Tranche1Done:     r.t1Int != 0,
+					RealisedGrossPnL: r.gross,
+					EstimatedCharges: r.charges,
+					NetTotalPnL:      r.net,
+					ExitReason:       r.exitReason,
+					OpenedAt:         r.openedRaw,
+					ClosedAt:         r.closedRaw,
+				}
+				if r.filledEntry > 0 {
+					act.InitialQty = r.filledEntry
+				}
+				item := buildTradeHistoryFromDTO(m.db, ist, act, r.trDate, r.compName, r.secName, r.misLev)
 				items = append(items, item)
 				seenPosIDs[r.posID] = true
 			}
@@ -176,41 +201,25 @@ func (m *Manager) GetTradeHistory(modeFilter, fromDate, toDate string, limit int
 	copy(memClosed, m.closedPositions)
 	m.mu.RUnlock()
 
-	todayStr := time.Now().In(ist).Format("2006-01-02")
-	for _, act := range activeSnapshots {
-		if seenPosIDs[act.PositionID] {
-			continue
+	todayStr := engine.TodayDateIST()
+	appendActivePosition := func(pos engine.ActivePositionDTO) {
+		if seenPosIDs[pos.PositionID] {
+			return
 		}
-		if (modeFilter == "PAPER" || modeFilter == "LIVE") && act.Mode != modeFilter {
-			continue
+		if (modeFilter == "PAPER" || modeFilter == "LIVE") && pos.Mode != modeFilter {
+			return
 		}
-		item := buildTradeHistoryItem(
-			m.db, ist, act.PositionID, todayStr, act.Mode, act.Symbol, act.Symbol, "NSE Cash Equity", 5.0,
-			act.InstrumentToken, act.State, act.PatternType, act.EntryPrice, act.ExitPrice,
-			act.InitialStop, act.CurrentStop, act.ShadowStop, act.BreakevenStop, act.HighWaterMark, act.OneR,
-			act.InitialQty, act.InitialQty, act.InitialQty-act.RemainingQty, act.ModCount, act.CurrentGear, act.Tranche1Done,
-			act.RealisedGrossPnL, act.EstimatedCharges, act.NetTotalPnL, act.ExitReason, act.OpenedAt, act.ClosedAt,
-		)
+		item := buildTradeHistoryFromDTO(m.db, ist, pos, todayStr, pos.Symbol, "NSE Cash Equity", 5.0)
 		items = append(items, item)
-		seenPosIDs[act.PositionID] = true
+		seenPosIDs[pos.PositionID] = true
+	}
+
+	for _, act := range activeSnapshots {
+		appendActivePosition(act)
 	}
 
 	for _, cp := range memClosed {
-		if seenPosIDs[cp.PositionID] {
-			continue
-		}
-		if (modeFilter == "PAPER" || modeFilter == "LIVE") && cp.Mode != modeFilter {
-			continue
-		}
-		item := buildTradeHistoryItem(
-			m.db, ist, cp.PositionID, todayStr, cp.Mode, cp.Symbol, cp.Symbol, "NSE Cash Equity", 5.0,
-			cp.InstrumentToken, cp.State, cp.PatternType, cp.EntryPrice, cp.ExitPrice,
-			cp.InitialStop, cp.CurrentStop, cp.ShadowStop, cp.BreakevenStop, cp.HighWaterMark, cp.OneR,
-			cp.InitialQty, cp.InitialQty, cp.InitialQty, cp.ModCount, cp.CurrentGear, cp.Tranche1Done,
-			cp.RealisedGrossPnL, cp.EstimatedCharges, cp.NetTotalPnL, cp.ExitReason, cp.OpenedAt, cp.ClosedAt,
-		)
-		items = append(items, item)
-		seenPosIDs[cp.PositionID] = true
+		appendActivePosition(cp)
 	}
 
 	summary := computeTradeAnalyticsSummary(items)
@@ -220,29 +229,30 @@ func (m *Manager) GetTradeHistory(modeFilter, fromDate, toDate string, limit int
 	}
 }
 
-func buildTradeHistoryItem(
+func buildTradeHistoryFromDTO(
 	db *sql.DB,
 	ist *time.Location,
-	posID, trDate, mode, sym, compName, secName string,
+	act engine.ActivePositionDTO,
+	tradingDate, compName, secName string,
 	misLev float64,
-	token uint32,
-	state, pattern string,
-	entryPx, exitPx, initStop, curStop, shStop, beStop, hwm, oneR float64,
-	initQty, filledEntry, filledExit, modCnt, gear int,
-	t1Done bool,
-	gross, _ /* storedCharges */, _ /* storedNet */ float64,
-	exitReason, openedRaw, closedRaw string,
 ) engine.TradeHistoryItemDTO {
-	qty := filledEntry
+	qty := act.InitialQty
 	if qty <= 0 {
-		qty = initQty
+		qty = 1
 	}
 	if misLev < 1.0 {
 		misLev = 5.0
 	}
+	if compName == "" {
+		compName = act.Symbol
+	}
+	if secName == "" {
+		secName = "NSE Cash Equity"
+	}
 
-	buyPrice := entryPx
-	sellPrice := exitPx
+	buyPrice := act.EntryPrice
+	sellPrice := act.ExitPrice
+	gross := act.RealisedGrossPnL
 	if sellPrice <= 0 && qty > 0 && math.Abs(gross) > 1e-6 {
 		sellPrice = math.Max(0.05, buyPrice+(gross/float64(qty)))
 	}
@@ -259,7 +269,7 @@ func buildTradeHistoryItem(
 		gross = totalSellValue - totalInvested
 	}
 
-	tb := CalculatePositionTaxBreakdown(buyPrice, sellPrice, qty, t1Done)
+	tb := CalculatePositionTaxBreakdown(buyPrice, sellPrice, qty, act.Tranche1Done)
 	taxDTO := engine.TaxBreakdownDTO{
 		BuyBrokerage:  tb.BuyBrokerage,
 		SellBrokerage: tb.SellBrokerage,
@@ -282,23 +292,23 @@ func buildTradeHistoryItem(
 		roiMargin = (netAfterTax / marginBlocked) * 100.0
 	}
 
-	tOpen, openClock := parseDBTimeIST(openedRaw, ist)
-	tClose, closeClock := parseDBTimeIST(closedRaw, ist)
+	tOpen, openClock := parseDBTimeIST(act.OpenedAt, ist)
+	tClose, closeClock := parseDBTimeIST(act.ClosedAt, ist)
 	var holdSec int64
 	if !tOpen.IsZero() && !tClose.IsZero() && tClose.After(tOpen) {
 		holdSec = int64(tClose.Sub(tOpen).Seconds())
 	}
 
-	finalStop := curStop
-	if shStop > finalStop {
-		finalStop = shStop
+	finalStop := act.CurrentStop
+	if act.ShadowStop > finalStop {
+		finalStop = act.ShadowStop
 	}
 
 	var realisedR, peakMFER, rCapturePct float64
-	if oneR > 0 {
-		realisedR = (sellPrice - buyPrice) / oneR
-		if hwm > buyPrice {
-			peakMFER = (hwm - buyPrice) / oneR
+	if act.OneR > 0 {
+		realisedR = (sellPrice - buyPrice) / act.OneR
+		if act.HighWaterMark > buyPrice {
+			peakMFER = (act.HighWaterMark - buyPrice) / act.OneR
 		}
 		if peakMFER > 0.05 && realisedR > 0 {
 			rCapturePct = math.Min(100.0, (realisedR/peakMFER)*100.0)
@@ -314,7 +324,7 @@ func buildTradeHistoryItem(
 			FROM orders
 			WHERE position_id = ?
 			ORDER BY updated_at ASC
-		`, posID)
+		`, act.PositionID)
 		if err == nil {
 			for oRows.Next() {
 				var leg engine.TradeOrderLegDTO
@@ -332,8 +342,9 @@ func buildTradeHistoryItem(
 		}
 	}
 
+	exitReason := act.ExitReason
 	if exitReason == "" {
-		if state == StateClosed {
+		if act.State == StateClosed {
 			exitReason = "SL_OR_TARGET_EXIT"
 		} else {
 			exitReason = "ACTIVE_IN_MARKET"
@@ -341,15 +352,15 @@ func buildTradeHistoryItem(
 	}
 
 	return engine.TradeHistoryItemDTO{
-		PositionID:            posID,
-		TradingDate:           trDate,
-		Mode:                  mode,
-		Symbol:                sym,
+		PositionID:            act.PositionID,
+		TradingDate:           tradingDate,
+		Mode:                  act.Mode,
+		Symbol:                act.Symbol,
 		CompanyName:           compName,
 		Sector:                secName,
-		InstrumentToken:       token,
-		State:                 state,
-		PatternType:           pattern,
+		InstrumentToken:       act.InstrumentToken,
+		State:                 act.State,
+		PatternType:           act.PatternType,
 		PurchaseTime:          openClock,
 		SellTime:              closeClock,
 		HoldDurationSec:       holdSec,
@@ -366,17 +377,17 @@ func buildTradeHistoryItem(
 		NetPnLAfterTax:        netAfterTax,
 		ReturnOnInvestedPct:   round2(roiInvested),
 		ReturnOnMarginPct:     round2(roiMargin),
-		InitialStop:           round2(initStop),
+		InitialStop:           round2(act.InitialStop),
 		FinalStop:             round2(finalStop),
-		BreakevenStop:         round2(beStop),
-		HighWaterMark:         round2(hwm),
-		OneR:                  round2(oneR),
+		BreakevenStop:         round2(act.BreakevenStop),
+		HighWaterMark:         round2(act.HighWaterMark),
+		OneR:                  round2(act.OneR),
 		RealisedRMultiple:     round2(realisedR),
 		PeakMFER:              round2(peakMFER),
 		RCaptureEfficiencyPct: round2(rCapturePct),
-		ModCount:              modCnt,
-		FinalGear:             gear,
-		Tranche1Done:          t1Done,
+		ModCount:              act.ModCount,
+		FinalGear:             act.CurrentGear,
+		Tranche1Done:          act.Tranche1Done,
 		ExitReason:            exitReason,
 		Orders:                orderLegs,
 	}

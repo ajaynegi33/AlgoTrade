@@ -301,8 +301,7 @@ func (m *Manager) spawnCandidateWorker(cand CandidateSignal, mode string, stockP
 	}
 	seq := m.posSeq.Add(1)
 	posID := fmt.Sprintf("POS-%s-%d", cand.Symbol, seq)
-	ist := time.FixedZone("IST", 5*3600+1800)
-	todayStr := time.Now().In(ist).Format("2006-01-02")
+	todayStr := engine.TodayDateIST()
 
 	var broker ExecutionBroker = m.paperBroker
 	if mode == "LIVE" {
@@ -389,8 +388,7 @@ func (m *Manager) loadClosedPositionsFromDB() {
 	if m.db == nil {
 		return
 	}
-	ist := time.FixedZone("IST", 5*3600+1800)
-	todayStr := time.Now().In(ist).Format("2006-01-02")
+	todayStr := engine.TodayDateIST()
 
 	rows, err := m.db.Query(`
 		SELECT position_id, mode, symbol, instrument_token, state, pattern_type,
@@ -429,8 +427,7 @@ func (m *Manager) rehydrateOpenPositionsFromDB() {
 	if m.db == nil {
 		return
 	}
-	ist := time.FixedZone("IST", 5*3600+1800)
-	todayStr := time.Now().In(ist).Format("2006-01-02")
+	todayStr := engine.TodayDateIST()
 
 	type rawOpenPos struct {
 		posID, mode, symbol, state, pattern, entryOrd, slOrd, scaleOrd, openedAtStr string
@@ -471,39 +468,32 @@ func (m *Manager) rehydrateOpenPositionsFromDB() {
 	rows.Close()
 
 	for _, p := range openList {
-		posID, mode, symbol, state, pattern := p.posID, p.mode, p.symbol, p.state, p.pattern
-		entryOrd, slOrd, scaleOrd, openedAtStr := p.entryOrd, p.slOrd, p.scaleOrd, p.openedAtStr
-		token := p.token
-		entryPx, initStop, curStop, shStop, beStop, baseBuf, hwm, oneR := p.entryPx, p.initStop, p.curStop, p.shStop, p.beStop, p.baseBuf, p.hwm, p.oneR
-		initQty, modCnt, gear, t1Int := p.initQty, p.modCnt, p.gear, p.t1Int
-		filledEntry, filledExit := p.filledEntry, p.filledExit
-
 		var broker ExecutionBroker = m.paperBroker
-		if mode == "LIVE" {
+		if p.mode == "LIVE" {
 			broker = m.liveBroker
 		}
 
 		sizing := SizingDecision{
 			Approved:        true,
-			Quantity:        initQty,
+			Quantity:        p.initQty,
 			DustFloorQty:    1,
-			EntryLimitPrice: entryPx,
-			BreakevenStop:   beStop,
+			EntryLimitPrice: p.entryPx,
+			BreakevenStop:   p.beStop,
 			StopSpec: StopAndBufferSpec{
-				BaseBuffer:   baseBuf,
-				InitialStop:  initStop,
-				OneR:         oneR,
-				SignalBarLow: initStop,
+				BaseBuffer:   p.baseBuf,
+				InitialStop:  p.initStop,
+				OneR:         p.oneR,
+				SignalBarLow: p.initStop,
 			},
 		}
 
 		w := NewPositionWorker(m.ctx, WorkerConfig{
-			PositionID:  posID,
+			PositionID:  p.posID,
 			TradingDate: todayStr,
-			Mode:        mode,
-			Symbol:      symbol,
-			Token:       token,
-			PatternType: pattern,
+			Mode:        p.mode,
+			Symbol:      p.symbol,
+			Token:       p.token,
+			PatternType: p.pattern,
 			TickSize:    0.05,
 			MISLeverage: 5.0,
 			Sizing:      sizing,
@@ -514,53 +504,53 @@ func (m *Manager) rehydrateOpenPositionsFromDB() {
 			OnClosed:    m.onWorkerClosed,
 		})
 
-		w.state = state
-		w.entryOrderID = entryOrd
-		w.slOrderID = slOrd
-		w.scaleOutOrderID = scaleOrd
-		w.entryCostRupees = float64(filledEntry) * entryPx
-		w.exitProceeds = float64(filledExit) * entryPx
-		w.filledEntryQty.Store(filledEntry)
-		w.filledExitQty.Store(filledExit)
-		w.confirmedStopBits.Store(uint64FromFloat(curStop))
-		w.shadowStopBits.Store(uint64FromFloat(shStop))
-		w.proposedStopBits.Store(uint64FromFloat(curStop))
-		w.highWaterMarkBits.Store(uint64FromFloat(hwm))
-		w.modCount.Store(int32(modCnt))
-		w.currentGear.Store(int32(gear))
-		w.tranche1Done.Store(t1Int != 0)
-		if openedAtStr != "" {
-			if t, err := time.Parse(time.RFC3339, openedAtStr); err == nil {
+		w.state = p.state
+		w.entryOrderID = p.entryOrd
+		w.slOrderID = p.slOrd
+		w.scaleOutOrderID = p.scaleOrd
+		w.entryCostRupees = float64(p.filledEntry) * p.entryPx
+		w.exitProceeds = float64(p.filledExit) * p.entryPx
+		w.filledEntryQty.Store(p.filledEntry)
+		w.filledExitQty.Store(p.filledExit)
+		w.confirmedStopBits.Store(math.Float64bits(p.curStop))
+		w.shadowStopBits.Store(math.Float64bits(p.shStop))
+		w.proposedStopBits.Store(math.Float64bits(p.curStop))
+		w.highWaterMarkBits.Store(math.Float64bits(p.hwm))
+		w.modCount.Store(int32(p.modCnt))
+		w.currentGear.Store(int32(p.gear))
+		w.tranche1Done.Store(p.t1Int != 0)
+		if p.openedAtStr != "" {
+			if t, err := time.Parse(time.RFC3339, p.openedAtStr); err == nil {
 				w.OpenedAt = t
 				w.OpenedAtUnix = t.Unix()
-			} else if t, err := time.Parse("2006-01-02 15:04:05", openedAtStr); err == nil {
+			} else if t, err := time.Parse("2006-01-02 15:04:05", p.openedAtStr); err == nil {
 				w.OpenedAt = t
 				w.OpenedAtUnix = t.Unix()
 			}
 		}
 
-		if entryOrd != "" {
-			m.reconciler.SeedOrderFilled(entryOrd, int(filledEntry))
-			m.reconciler.RegisterOrder(entryOrd, posID, "ENTRY", symbol, "BUY", "LIMIT", initQty, entryPx, 0, OrderStatusComplete)
+		if p.entryOrd != "" {
+			m.reconciler.SeedOrderFilled(p.entryOrd, int(p.filledEntry))
+			m.reconciler.RegisterOrder(p.entryOrd, p.posID, "ENTRY", p.symbol, "BUY", "LIMIT", p.initQty, p.entryPx, 0, OrderStatusComplete)
 		}
-		if scaleOrd != "" && filledExit > 0 {
-			m.reconciler.SeedOrderFilled(scaleOrd, int(filledExit))
-			m.reconciler.RegisterOrder(scaleOrd, posID, "SCALE_OUT", symbol, "SELL", "LIMIT", int(filledExit), entryPx, 0, OrderStatusComplete)
+		if p.scaleOrd != "" && p.filledExit > 0 {
+			m.reconciler.SeedOrderFilled(p.scaleOrd, int(p.filledExit))
+			m.reconciler.RegisterOrder(p.scaleOrd, p.posID, "SCALE_OUT", p.symbol, "SELL", "LIMIT", int(p.filledExit), p.entryPx, 0, OrderStatusComplete)
 		}
-		if slOrd != "" {
-			if scaleOrd == "" && filledExit > 0 {
-				m.reconciler.SeedOrderFilled(slOrd, int(filledExit))
+		if p.slOrd != "" {
+			if p.scaleOrd == "" && p.filledExit > 0 {
+				m.reconciler.SeedOrderFilled(p.slOrd, int(p.filledExit))
 			}
-			remQty := int(filledEntry - filledExit)
-			m.reconciler.RegisterOrder(slOrd, posID, "SL", symbol, "SELL", "SL", remQty, curStop, curStop, OrderStatusTrigPending)
-			if mode == "PAPER" && m.paperBroker != nil && remQty > 0 {
-				limitPx := computeSellSLLimitPrice(curStop, w.TickSize)
-				m.paperBroker.SeedRestingOrder(slOrd, symbol, token, remQty, curStop, limitPx, modCnt, OrderStatusTrigPending)
+			remQty := int(p.filledEntry - p.filledExit)
+			m.reconciler.RegisterOrder(p.slOrd, p.posID, "SL", p.symbol, "SELL", "SL", remQty, p.curStop, p.curStop, OrderStatusTrigPending)
+			if p.mode == "PAPER" && m.paperBroker != nil && remQty > 0 {
+				limitPx := ComputeSellSLLimitPrice(p.curStop, w.TickSize)
+				m.paperBroker.SeedRestingOrder(p.slOrd, p.symbol, p.token, remQty, p.curStop, limitPx, p.modCnt, OrderStatusTrigPending)
 			}
 		}
 
 		if m.actor != nil {
-			idx := m.actor.BindPositionWorker(token, symbol, w)
+			idx := m.actor.BindPositionWorker(p.token, p.symbol, w)
 			w.StockIdx = idx
 			if stockPtr := m.actor.GetStockPtrByIndex(idx); stockPtr != nil {
 				w.getStockPtr = func() *engine.StockMetrics { return stockPtr }
@@ -574,12 +564,12 @@ func (m *Manager) rehydrateOpenPositionsFromDB() {
 		}
 
 		m.mu.Lock()
-		m.activeWorkers[posID] = w
-		m.symbolToWorker[symbol] = w
+		m.activeWorkers[p.posID] = w
+		m.symbolToWorker[p.symbol] = w
 		m.mu.Unlock()
 
 		go w.workerLoop()
-		if state == StateEmergencyFlatten && w.RemainingQty() > 0 {
+		if p.state == StateEmergencyFlatten && w.RemainingQty() > 0 {
 			exitR := w.exitReason
 			if exitR == "" {
 				exitR = "REHYDRATED_EMERGENCY_FLATTEN"
@@ -587,12 +577,8 @@ func (m *Manager) rehydrateOpenPositionsFromDB() {
 			go w.ForceEmergencyExit(exitR)
 		}
 		slog.Info("Rehydrated open PositionWorker from SQLite crash recovery",
-			"position_id", posID, "symbol", symbol, "state", state, "remaining_qty", w.RemainingQty())
+			"position_id", p.posID, "symbol", p.symbol, "state", p.state, "remaining_qty", w.RemainingQty())
 	}
-}
-
-func uint64FromFloat(v float64) uint64 {
-	return math.Float64bits(v)
 }
 
 // GetCurrentState returns the latest 1s ExecutionStateDTO (or builds one on demand)

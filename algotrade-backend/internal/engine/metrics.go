@@ -113,23 +113,22 @@ type StockMetrics struct {
 	ActiveIndex uint16     // Index in activeStocks slice
 
 	// -------------------------------------------------------------------------
-	// 4. One-Byte Types & Arrays - 16B + 7B = 23 bytes
+	// 4. One-Byte Types & Arrays - 16B + 6B = 22 bytes
 	// -------------------------------------------------------------------------
-	Symbol         [16]byte // Uppercase trading symbol e.g. "TATASTEEL\x00"
-	SectorID       uint8    // Sector identifier (1..12)
-	CurrentBarIdx  uint8    // 0 to 74 (current 5m candle index)
-	PullbackCount  uint8    // Count of confirmed pullbacks to VWAP
-	WasExtended    bool     // Hysteresis latch: price rallied > 1.0 ATR above VWAP
-	IsTradeable    bool     // Passes spread <= 0.10% and liquidity gates
-	IsWarm         bool     // Historical data pre-seeded successfully
-	UnmappedSector bool     // Fallback to Nifty 50 flag
+	Symbol        [16]byte // Uppercase trading symbol e.g. "TATASTEEL\x00"
+	SectorID      uint8    // Sector identifier (1..12)
+	CurrentBarIdx uint8    // 0 to 74 (current 5m candle index)
+	PullbackCount uint8    // Count of confirmed pullbacks to VWAP
+	WasExtended   bool     // Hysteresis latch: price rallied > 1.0 ATR above VWAP
+	IsTradeable   bool     // Passes spread <= 0.10% and liquidity gates
+	IsWarm        bool     // Historical data pre-seeded successfully
 
 	// -------------------------------------------------------------------------
-	// 5. Explicit 5-Byte Padding (Brings struct to exact 8-byte boundary)
-	// Group 3 (4B) + Group 4 (23B) = 27 bytes. Next 8-byte boundary is 32 bytes.
-	// 32 - 27 = 5 bytes padding.
+	// 5. Explicit 6-Byte Padding (Brings struct to exact 8-byte boundary)
+	// Group 3 (4B) + Group 4 (22B) = 26 bytes. Next 8-byte boundary is 32 bytes.
+	// 32 - 26 = 6 bytes padding.
 	// -------------------------------------------------------------------------
-	_ [5]byte
+	_ [6]byte
 } // Total struct size: 3,792 + 120 + 32 + 32 = 3,976 bytes. Exact multiple of 8!
 
 // SymbolString returns the null-trimmed string representation of the symbol

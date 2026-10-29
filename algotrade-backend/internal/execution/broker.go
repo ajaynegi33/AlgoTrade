@@ -16,7 +16,6 @@ import (
 
 const (
 	OrderTag               = "AT26LONG"
-	MaxExchangeOrderMods   = 25
 	DefaultVariety         = "regular"
 	ExchangeNSE            = "NSE"
 	ProductMIS             = "MIS"
@@ -250,7 +249,7 @@ func (b *ZerodhaLiveBroker) PlaceSLOrder(
 		return "", fmt.Errorf("%w: trigger=%.2f, ltp=%.2f", ErrTriggerAboveLTP, triggerPrice, currentLTP)
 	}
 	if limitPrice <= 0 || limitPrice > triggerPrice {
-		limitPrice = computeSellSLLimitPrice(triggerPrice, tickSize)
+		limitPrice = ComputeSellSLLimitPrice(triggerPrice, tickSize)
 	}
 	if err := b.waitRateLimit(ctx); err != nil {
 		return "", err
@@ -295,7 +294,7 @@ func (b *ZerodhaLiveBroker) ModifySLOrder(
 		return fmt.Errorf("%w: newTrigger=%.2f, ltp=%.2f", ErrTriggerAboveLTP, newTrigger, currentLTP)
 	}
 	if newLimit <= 0 || newLimit > newTrigger {
-		newLimit = computeSellSLLimitPrice(newTrigger, tickSize)
+		newLimit = ComputeSellSLLimitPrice(newTrigger, tickSize)
 	}
 	if err := b.waitRateLimit(ctx); err != nil {
 		return err
@@ -455,8 +454,8 @@ func (p *PaperBroker) SeedRestingOrder(
 	p.byToken[token] = append(existing, ord)
 }
 
-// walkAskBook computes the realistic volume-weighted average fill price across the 5 visible Ask levels
-func walkAskBook(qty int, limitPrice float64, s *engine.StockMetrics) float64 {
+// walkBook computes the realistic volume-weighted average fill price across 5 visible book levels
+func walkBook(qty int, limitPrice float64, s *engine.StockMetrics, isBuy bool) float64 {
 	if s == nil || s.LTP <= 0 {
 		return limitPrice
 	}
@@ -464,110 +463,106 @@ func walkAskBook(qty int, limitPrice float64, s *engine.StockMetrics) float64 {
 	if tick <= 0 {
 		tick = 0.05
 	}
+
+	// For sell orders, check if top bid is stale or unpopulated (>0.5% away)
+	if !isBuy {
+		topBid := float64(s.BidLevels[0].Price)
+		if topBid <= 0 || math.Abs(s.LTP-topBid)/s.LTP > 0.005 {
+			px := RoundToTick(math.Max(tick, s.LTP-tick), tick)
+			if limitPrice > 0 && px < limitPrice {
+				px = limitPrice
+			}
+			return px
+		}
+	}
+
 	rem := qty
-	var cost float64
+	var totalValue float64
 	var filled int
 
 	for i := 0; i < 5 && rem > 0; i++ {
-		lvlPrice := float64(s.AskLevels[i].Price)
-		lvlQty := int(s.AskLevels[i].Qty)
+		var lvlPrice float64
+		var lvlQty int
+		if isBuy {
+			lvlPrice = float64(s.AskLevels[i].Price)
+			lvlQty = int(s.AskLevels[i].Qty)
+			if limitPrice > 0 && lvlPrice > limitPrice+1e-6 {
+				break
+			}
+		} else {
+			lvlPrice = float64(s.BidLevels[i].Price)
+			lvlQty = int(s.BidLevels[i].Qty)
+			if limitPrice > 0 && lvlPrice < limitPrice-1e-6 {
+				break
+			}
+		}
 		if lvlPrice <= 0 || lvlQty <= 0 {
 			continue
 		}
-		if limitPrice > 0 && lvlPrice > limitPrice+1e-6 {
-			break
-		}
 		take := min(rem, lvlQty)
-		cost += float64(take) * lvlPrice
+		totalValue += float64(take) * lvlPrice
 		filled += take
 		rem -= take
 	}
 
 	if filled == 0 {
-		px := RoundToTick(s.LTP+tick, tick)
-		if s.Ask1Price > 0 {
-			px = RoundToTick(float64(s.Ask1Price), tick)
-		}
-		if limitPrice > 0 && px > limitPrice {
-			px = limitPrice
+		var px float64
+		if isBuy {
+			px = RoundToTick(s.LTP+tick, tick)
+			if s.Ask1Price > 0 {
+				px = RoundToTick(float64(s.Ask1Price), tick)
+			}
+			if limitPrice > 0 && px > limitPrice {
+				px = limitPrice
+			}
+		} else {
+			px = RoundToTick(math.Max(tick, s.LTP-tick), tick)
+			if s.Bid1Price > 0 {
+				px = RoundToTick(float64(s.Bid1Price), tick)
+			}
+			if limitPrice > 0 && px < limitPrice {
+				px = limitPrice
+			}
 		}
 		return px
 	}
+
 	if rem > 0 {
-		lastAsk := float64(s.AskLevels[4].Price)
-		if lastAsk <= 0 {
-			lastAsk = s.LTP + 2.0*tick
+		var sweepPrice float64
+		if isBuy {
+			lastAsk := float64(s.AskLevels[4].Price)
+			if lastAsk <= 0 {
+				lastAsk = s.LTP + 2.0*tick
+			}
+			sweepPrice = lastAsk + tick
+			if limitPrice > 0 && sweepPrice > limitPrice {
+				sweepPrice = limitPrice
+			}
+		} else {
+			lastBid := float64(s.BidLevels[4].Price)
+			if lastBid <= 0 {
+				lastBid = math.Max(tick, s.LTP-2.0*tick)
+			}
+			sweepPrice = math.Max(tick, lastBid-tick)
+			if limitPrice > 0 && sweepPrice < limitPrice {
+				sweepPrice = limitPrice
+			}
 		}
-		sweepPrice := lastAsk + tick
-		if limitPrice > 0 && sweepPrice > limitPrice {
-			sweepPrice = limitPrice
-		}
-		cost += float64(rem) * sweepPrice
+		totalValue += float64(rem) * sweepPrice
 		filled += rem
 	}
-	return RoundToTick(cost/float64(filled), 0.01)
+
+	return RoundToTick(totalValue/float64(filled), 0.01)
+}
+
+// walkAskBook computes the realistic volume-weighted average fill price across the 5 visible Ask levels
+func walkAskBook(qty int, limitPrice float64, s *engine.StockMetrics) float64 {
+	return walkBook(qty, limitPrice, s, true)
 }
 
 // walkBidBook computes the realistic volume-weighted average fill price across the 5 visible Bid levels
 func walkBidBook(qty int, limitPrice float64, s *engine.StockMetrics) float64 {
-	if s == nil || s.LTP <= 0 {
-		return limitPrice
-	}
-	tick := float64(s.TickSize)
-	if tick <= 0 {
-		tick = 0.05
-	}
-	// If order book levels are unpopulated or stale relative to LTP (>0.5% away), fill at LTP - 1 tick (clamped to limitPrice)
-	topBid := float64(s.BidLevels[0].Price)
-	if topBid <= 0 || math.Abs(s.LTP-topBid)/s.LTP > 0.005 {
-		px := RoundToTick(math.Max(tick, s.LTP-tick), tick)
-		if limitPrice > 0 && px < limitPrice {
-			px = limitPrice
-		}
-		return px
-	}
-	rem := qty
-	var proceeds float64
-	var filled int
-
-	for i := 0; i < 5 && rem > 0; i++ {
-		lvlPrice := float64(s.BidLevels[i].Price)
-		lvlQty := int(s.BidLevels[i].Qty)
-		if lvlPrice <= 0 || lvlQty <= 0 {
-			continue
-		}
-		if limitPrice > 0 && lvlPrice < limitPrice-1e-6 {
-			break
-		}
-		take := min(rem, lvlQty)
-		proceeds += float64(take) * lvlPrice
-		filled += take
-		rem -= take
-	}
-
-	if filled == 0 {
-		px := RoundToTick(math.Max(tick, s.LTP-tick), tick)
-		if s.Bid1Price > 0 {
-			px = RoundToTick(float64(s.Bid1Price), tick)
-		}
-		if limitPrice > 0 && px < limitPrice {
-			px = limitPrice
-		}
-		return px
-	}
-	if rem > 0 {
-		lastBid := float64(s.BidLevels[4].Price)
-		if lastBid <= 0 {
-			lastBid = math.Max(tick, s.LTP-2.0*tick)
-		}
-		sweepPrice := math.Max(tick, lastBid-tick)
-		if limitPrice > 0 && sweepPrice < limitPrice {
-			sweepPrice = limitPrice
-		}
-		proceeds += float64(rem) * sweepPrice
-		filled += rem
-	}
-	return RoundToTick(proceeds/float64(filled), 0.01)
+	return walkBook(qty, limitPrice, s, false)
 }
 
 func (p *PaperBroker) emit(o *paperRestingOrder) {
@@ -712,7 +707,7 @@ func (p *PaperBroker) PlaceSLOrder(
 		return "", fmt.Errorf("%w: trigger=%.2f, ltp=%.2f", ErrTriggerAboveLTP, triggerPrice, currentLTP)
 	}
 	if limitPrice <= 0 || limitPrice > triggerPrice {
-		limitPrice = computeSellSLLimitPrice(triggerPrice, tickSize)
+		limitPrice = ComputeSellSLLimitPrice(triggerPrice, tickSize)
 	}
 
 	orderID := p.nextOrderID()
@@ -756,7 +751,7 @@ func (p *PaperBroker) ModifySLOrder(
 		return fmt.Errorf("%w: newTrigger=%.2f, ltp=%.2f", ErrTriggerAboveLTP, newTrigger, currentLTP)
 	}
 	if newLimit <= 0 || newLimit > newTrigger {
-		newLimit = computeSellSLLimitPrice(newTrigger, tickSize)
+		newLimit = ComputeSellSLLimitPrice(newTrigger, tickSize)
 	}
 
 	p.mu.Lock()

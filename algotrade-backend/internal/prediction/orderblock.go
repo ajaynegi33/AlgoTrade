@@ -45,18 +45,7 @@ func round2(v float64) float64 {
 	return math.Round(v*100.0) / 100.0
 }
 
-// DetectBullishOrderBlock extracts the structural Order Block from finished 5m candles
-func DetectBullishOrderBlock(s *engine.StockMetrics) OrderBlockLevel {
-	ltp := s.LTP
-	if ltp <= 0 {
-		ltp = 100.0
-	}
-	atrSafe := math.Max(s.ATR14, ltp*0.0030)
-	tick := float64(s.TickSize)
-	if tick <= 0 {
-		tick = 0.05
-	}
-
+func extractSessionCandles(s *engine.StockMetrics) []Candle {
 	barCount := int(s.CurrentBarIdx)
 	if barCount < 2 {
 		barCount = 2
@@ -79,12 +68,32 @@ func DetectBullishOrderBlock(s *engine.StockMetrics) OrderBlockLevel {
 			})
 		}
 	}
+	return candles
+}
+
+// DetectBullishOrderBlock extracts the structural Order Block from finished 5m candles
+func DetectBullishOrderBlock(s *engine.StockMetrics) OrderBlockLevel {
+	ltp := s.LTP
+	if ltp <= 0 {
+		ltp = 100.0
+	}
+	atrSafe := math.Max(s.ATR14, ltp*0.0030)
+	tick := float64(s.TickSize)
+	if tick <= 0 {
+		tick = 0.05
+	}
+
+	candles := extractSessionCandles(s)
+	barCount := len(candles)
+	if barCount < 2 {
+		barCount = 2
+	}
 
 	// Default fallback values if early in session
 	zoneLow := round2(math.Max(tick, ltp-0.45*atrSafe))
 	zoneHigh := round2(math.Max(tick, ltp-0.10*atrSafe))
-	zoneZ := round2((zoneLow + zoneHigh) / 2.0)
-	s1 := round2(math.Max(tick, zoneLow-2.0*tick))
+	equilibriumZ := round2((zoneLow + zoneHigh) / 2.0)
+	invalidationS1 := round2(math.Max(tick, zoneLow-2.0*tick))
 	zoneAge := "MARKED"
 	retests := 0
 
@@ -110,14 +119,14 @@ func DetectBullishOrderBlock(s *engine.StockMetrics) OrderBlockLevel {
 		if zoneHigh <= zoneLow {
 			zoneHigh = round2(zoneLow + 0.35*atrSafe)
 		}
-		zoneZ = round2((zoneLow + zoneHigh) / 2.0)
-		s1 = round2(math.Max(tick, zoneLow-2.0*tick))
+		equilibriumZ = round2((zoneLow + zoneHigh) / 2.0)
+		invalidationS1 = round2(math.Max(tick, zoneLow-2.0*tick))
 
 		// Check zone aging on completed 5m candle closes
 		for i := impulseIdx + 1; i < barCount; i++ {
 			b := s.SessionBars[i]
 			if b.Open > 0 {
-				if b.Close < s1 {
+				if b.Close < invalidationS1 {
 					zoneAge = "BROKEN"
 					break
 				}
@@ -143,18 +152,18 @@ func DetectBullishOrderBlock(s *engine.StockMetrics) OrderBlockLevel {
 		}
 	}
 
-	oneR := round2(math.Max(2.0*tick, zoneZ-s1))
-	r1 := round2(zoneZ + 0.65*oneR)
-	r2 := round2(zoneZ + 1.85*oneR)
+	oneR := round2(math.Max(2.0*tick, equilibriumZ-invalidationS1))
+	targetR1 := round2(equilibriumZ + 0.65*oneR)
+	targetR2 := round2(equilibriumZ + 1.85*oneR)
 
-	// Sample setup math at Zone Z
-	rrZ := round2((r2 - zoneZ) / oneR)
-	beZ := round2((oneR / (oneR + (r2 - zoneZ))) * 100.0)
+	// Sample setup math at Equilibrium Zone Z
+	rrZ := round2((targetR2 - equilibriumZ) / oneR)
+	beZ := round2((oneR / (oneR + (targetR2 - equilibriumZ))) * 100.0)
 
 	// Setup math if chasing at current LTP
 	isChasing := ltp > zoneHigh+0.25*atrSafe
-	chaseRisk := round2(math.Max(tick, ltp-s1))
-	chaseRoom := round2(math.Max(tick, r2-ltp))
+	chaseRisk := round2(math.Max(tick, ltp-invalidationS1))
+	chaseRoom := round2(math.Max(tick, targetR2-ltp))
 	chaseRR := round2(chaseRoom / chaseRisk)
 	chaseBE := round2((chaseRisk / (chaseRisk + chaseRoom)) * 100.0)
 
@@ -162,12 +171,12 @@ func DetectBullishOrderBlock(s *engine.StockMetrics) OrderBlockLevel {
 		Symbol:              s.SymbolString(),
 		Token:               s.InstrumentToken,
 		Direction:           "BULLISH",
-		ZoneLevelZ:          zoneZ,
+		ZoneLevelZ:          equilibriumZ,
 		ZoneLow:             zoneLow,
 		ZoneHigh:            zoneHigh,
-		InvalidationS1:      s1,
-		TargetR1:            r1,
-		TargetR2:            r2,
+		InvalidationS1:      invalidationS1,
+		TargetR1:            targetR1,
+		TargetR2:            targetR2,
 		OneR:                oneR,
 		RiskRewardRatio:     rrZ,
 		BreakevenWinRatePct: beZ,
@@ -193,33 +202,16 @@ func DetectBearishOrderBlock(s *engine.StockMetrics) OrderBlockLevel {
 		tick = 0.05
 	}
 
-	barCount := int(s.CurrentBarIdx)
+	candles := extractSessionCandles(s)
+	barCount := len(candles)
 	if barCount < 2 {
 		barCount = 2
-	}
-	if barCount > 75 {
-		barCount = 75
-	}
-
-	candles := make([]Candle, 0, barCount)
-	for i := 0; i < barCount; i++ {
-		b := s.SessionBars[i]
-		if b.Open > 0 {
-			candles = append(candles, Candle{
-				Timestamp: b.Timestamp,
-				Open:      b.Open,
-				High:      b.High,
-				Low:       b.Low,
-				Close:     b.Close,
-				Volume:    b.Volume,
-			})
-		}
 	}
 
 	zoneHigh := round2(ltp + 0.45*atrSafe)
 	zoneLow := round2(ltp + 0.10*atrSafe)
-	zoneZ := round2((zoneLow + zoneHigh) / 2.0)
-	r1 := round2(zoneHigh + 2.0*tick)
+	equilibriumZ := round2((zoneLow + zoneHigh) / 2.0)
+	invalidationR1 := round2(zoneHigh + 2.0*tick)
 	zoneAge := "MARKED"
 	retests := 0
 
@@ -243,13 +235,13 @@ func DetectBearishOrderBlock(s *engine.StockMetrics) OrderBlockLevel {
 		if zoneLow >= zoneHigh {
 			zoneLow = round2(zoneHigh - 0.35*atrSafe)
 		}
-		zoneZ = round2((zoneLow + zoneHigh) / 2.0)
-		r1 = round2(zoneHigh + 2.0*tick)
+		equilibriumZ = round2((zoneLow + zoneHigh) / 2.0)
+		invalidationR1 = round2(zoneHigh + 2.0*tick)
 
 		for i := breakdownIdx + 1; i < barCount; i++ {
 			b := s.SessionBars[i]
 			if b.Open > 0 {
-				if b.Close > r1 {
+				if b.Close > invalidationR1 {
 					zoneAge = "BROKEN"
 					break
 				}
@@ -275,16 +267,16 @@ func DetectBearishOrderBlock(s *engine.StockMetrics) OrderBlockLevel {
 		}
 	}
 
-	oneR := round2(math.Max(2.0*tick, r1-zoneZ))
-	s1 := round2(math.Max(tick, zoneZ-0.65*oneR))
-	s2 := round2(math.Max(tick, zoneZ-1.85*oneR))
+	oneR := round2(math.Max(2.0*tick, invalidationR1-equilibriumZ))
+	targetS1 := round2(math.Max(tick, equilibriumZ-0.65*oneR))
+	targetS2 := round2(math.Max(tick, equilibriumZ-1.85*oneR))
 
-	rrZ := round2((zoneZ - s2) / oneR)
-	beZ := round2((oneR / (oneR + (zoneZ - s2))) * 100.0)
+	rrZ := round2((equilibriumZ - targetS2) / oneR)
+	beZ := round2((oneR / (oneR + (equilibriumZ - targetS2))) * 100.0)
 
 	isChasing := ltp < zoneLow-0.25*atrSafe
-	chaseRisk := round2(math.Max(tick, r1-ltp))
-	chaseRoom := round2(math.Max(tick, ltp-s2))
+	chaseRisk := round2(math.Max(tick, invalidationR1-ltp))
+	chaseRoom := round2(math.Max(tick, ltp-targetS2))
 	chaseRR := round2(chaseRoom / chaseRisk)
 	chaseBE := round2((chaseRisk / (chaseRisk + chaseRoom)) * 100.0)
 
@@ -292,12 +284,12 @@ func DetectBearishOrderBlock(s *engine.StockMetrics) OrderBlockLevel {
 		Symbol:              s.SymbolString(),
 		Token:               s.InstrumentToken,
 		Direction:           "BEARISH",
-		ZoneLevelZ:          zoneZ,
+		ZoneLevelZ:          equilibriumZ,
 		ZoneLow:             zoneLow,
 		ZoneHigh:            zoneHigh,
-		InvalidationR1:      r1,
-		TargetS1:            s1,
-		TargetS2:            s2,
+		InvalidationR1:      invalidationR1,
+		TargetS1:            targetS1,
+		TargetS2:            targetS2,
 		OneR:                oneR,
 		RiskRewardRatio:     rrZ,
 		BreakevenWinRatePct: beZ,

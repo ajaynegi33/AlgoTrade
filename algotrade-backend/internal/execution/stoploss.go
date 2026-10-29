@@ -156,9 +156,3 @@ func ComputeSellSLLimitPrice(triggerPrice, tickSize float64) float64 {
 	slippageBand := math.Max(StopMinTickMultiplier*tickSize, StopLimitSlippageRatio*triggerPrice)
 	return RoundDownToTick(math.Max(tickSize, triggerPrice-slippageBand), tickSize)
 }
-
-// computeSellSLLimitPrice is a package-private alias for ComputeSellSLLimitPrice
-// ensuring backward-compatibility across all internal/execution callers.
-func computeSellSLLimitPrice(triggerPrice, tickSize float64) float64 {
-	return ComputeSellSLLimitPrice(triggerPrice, tickSize)
-}

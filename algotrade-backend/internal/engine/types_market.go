@@ -1,5 +1,15 @@
 package engine
 
+import "time"
+
+// ISTLocation is the single canonical Indian Standard Time zone for all market calculations
+var ISTLocation = time.FixedZone("IST", 5*3600+1800)
+
+// TodayDateIST returns today's trading date in YYYY-MM-DD format in Indian Standard Time
+func TodayDateIST() string {
+	return time.Now().In(ISTLocation).Format("2006-01-02")
+}
+
 // MarketPulseDTO provides index breadth and macro regime context
 type MarketPulseDTO struct {
 	MarketState            string  `json:"market_state"` // "OPEN", "PRE_OPEN", "CLOSED"

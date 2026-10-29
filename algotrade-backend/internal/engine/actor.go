@@ -207,7 +207,7 @@ func (a *Actor) OnKiteAuthenticated() {
 	}
 	go func() {
 		if a.scannerService != nil {
-			todayStr := time.Now().In(istZone).Format("2006-01-02")
+			todayStr := TodayDateIST()
 			universe, err := a.scannerService.GetUniverse(todayStr)
 			if err != nil || universe == nil || len(universe.Stocks) == 0 || universe.ScanDate != todayStr {
 				if scanned, scanErr := a.scannerService.RunScan(false); scanErr == nil && scanned != nil {
@@ -275,7 +275,7 @@ func (a *Actor) seedUniverse() error {
 
 	// 3. Load Scanned F&O Cash Universe from scanner
 	if a.scannerService != nil {
-		todayStr := time.Now().In(istZone).Format("2006-01-02")
+		todayStr := TodayDateIST()
 		universe, err := a.scannerService.GetUniverse(todayStr)
 		if err == nil && universe != nil && len(universe.Stocks) > 0 {
 			for _, st := range universe.Stocks {

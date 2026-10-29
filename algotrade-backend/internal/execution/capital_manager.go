@@ -44,8 +44,7 @@ type CapitalManager struct {
 }
 
 func NewCapitalManager(db *sql.DB, kiteService *kite.Service) *CapitalManager {
-	ist := time.FixedZone("IST", 5*3600+1800)
-	todayStr := time.Now().In(ist).Format("2006-01-02")
+	todayStr := engine.TodayDateIST()
 
 	cm := &CapitalManager{
 		db:          db,
@@ -161,32 +160,45 @@ func (cm *CapitalManager) ReconcileWithPositionsDB(mode string) {
 		dto.WinRatePct = math.Round((float64(wins)/float64(tradesTaken))*1000.0) / 10.0
 	}
 
-	// Check circuit breakers on ground-truth ledger
-	baseCap := cm.settings.PaperCapital
-	if mode == "LIVE" && cm.liveGrossBase > 0 {
-		baseCap = cm.liveGrossBase
-	}
-	oneR := baseCap * cm.settings.RiskPerTradePct
-
-	if baseCap > 0 && cumNet <= -0.020*baseCap {
-		dto.CircuitBreakerLocked = true
-		dto.LockReason = fmt.Sprintf("Max Daily Loss Reached (₹%.0f / -2.0%% cap)", cumNet)
-	} else if consecLosses >= 2 {
-		dto.CircuitBreakerLocked = true
-		dto.LockReason = "2 Consecutive Losses Circuit Breaker"
-	} else if oneR > 0 && peakNet >= 2.0*oneR && cumNet <= 0.55*peakNet {
-		dto.CircuitBreakerLocked = true
-		dto.LockReason = fmt.Sprintf("Profit-Giveback Lock (Protected ₹%.0f from ₹%.0f peak)", cumNet, peakNet)
-	}
+	dto.PeakNetPnL = peakNet
+	cm.evaluateCircuitBreakersLocked(mode, dto, cumNet)
 
 	cm.dailyLedger[mode] = dto
 	cm.realisedGrossByMode[mode] = cumGross
 	cm.totalChargesByMode[mode] = cumCharges
 	cm.realisedNetByMode[mode] = cumNet
 
-	// Persist corrected ledger to SQLite
+	cm.persistDailyLedgerLocked(mode, dto, cumGross, cumCharges, cumNet)
+}
+
+func (cm *CapitalManager) evaluateCircuitBreakersLocked(mode string, ledger *engine.DailyRiskDTO, cumNet float64) {
+	baseCap := cm.settings.PaperCapital
+	if mode == "LIVE" && cm.liveGrossBase > 0 {
+		baseCap = cm.liveGrossBase
+	}
+	oneR := baseCap * cm.settings.RiskPerTradePct
+
+	// 1. Max Daily Loss Circuit Breaker (-2.0% of Capital or -3.0R)
+	if baseCap > 0 && cumNet <= -0.020*baseCap {
+		ledger.CircuitBreakerLocked = true
+		ledger.LockReason = fmt.Sprintf("Max Daily Loss Reached (₹%.0f / -2.0%% cap)", cumNet)
+	} else if ledger.ConsecutiveLosses >= 2 {
+		// 2. 2 Consecutive Losses Lockout (Preserves capital; stop for the day)
+		ledger.CircuitBreakerLocked = true
+		ledger.LockReason = "2 Consecutive Losses Circuit Breaker"
+	} else if oneR > 0 && ledger.PeakNetPnL >= 2.0*oneR && cumNet <= 0.55*ledger.PeakNetPnL {
+		// 3. Profit-Giveback Lock (Protects banked green days once PeakNetPnL >= +2.0R)
+		ledger.CircuitBreakerLocked = true
+		ledger.LockReason = fmt.Sprintf("Profit-Giveback Lock (Protected ₹%.0f from ₹%.0f peak)", cumNet, ledger.PeakNetPnL)
+	}
+}
+
+func (cm *CapitalManager) persistDailyLedgerLocked(mode string, ledger *engine.DailyRiskDTO, cumGross, cumCharges, cumNet float64) {
+	if cm.db == nil {
+		return
+	}
 	lockedInt := 0
-	if dto.CircuitBreakerLocked {
+	if ledger.CircuitBreakerLocked {
 		lockedInt = 1
 	}
 	_, _ = cm.db.Exec(`
@@ -206,8 +218,8 @@ func (cm *CapitalManager) ReconcileWithPositionsDB(mode string) {
 			peak_net_pnl = excluded.peak_net_pnl,
 			circuit_breaker_locked = excluded.circuit_breaker_locked,
 			lock_reason = excluded.lock_reason;
-	`, cm.tradingDate, mode, tradesTaken, wins, losses, consecLosses,
-		cumGross, cumCharges, cumNet, peakNet, lockedInt, dto.LockReason)
+	`, cm.tradingDate, mode, ledger.TradesTaken, ledger.Wins, ledger.Losses, ledger.ConsecutiveLosses,
+		cumGross, cumCharges, cumNet, ledger.PeakNetPnL, lockedInt, ledger.LockReason)
 }
 
 func (cm *CapitalManager) GetSettings() ExecutionSettings {
@@ -304,8 +316,7 @@ func (cm *CapitalManager) RefreshLiveMargins() error {
 
 // ensureCurrentTradingDateLocked rolls over the daily risk ledger and PnL counters if the server stays up overnight
 func (cm *CapitalManager) ensureCurrentTradingDateLocked() {
-	ist := time.FixedZone("IST", 5*3600+1800)
-	todayStr := time.Now().In(ist).Format("2006-01-02")
+	todayStr := engine.TodayDateIST()
 	if todayStr == cm.tradingDate {
 		return
 	}
@@ -435,53 +446,8 @@ func (cm *CapitalManager) RecordClosedTrade(mode string, grossPnL, charges, netP
 		ledger.PeakNetPnL = cumNet
 	}
 
-	// Evaluate Daily Circuit Breakers
-	baseCap := cm.settings.PaperCapital
-	if mode == "LIVE" && cm.liveGrossBase > 0 {
-		baseCap = cm.liveGrossBase
-	}
-	oneR := baseCap * cm.settings.RiskPerTradePct
-
-	// 1. Max Daily Loss Circuit Breaker (-2.0% of Capital or -3.0R)
-	if baseCap > 0 && cumNet <= -0.020*baseCap {
-		ledger.CircuitBreakerLocked = true
-		ledger.LockReason = fmt.Sprintf("Max Daily Loss Reached (₹%.0f / -2.0%% cap)", cumNet)
-	} else if ledger.ConsecutiveLosses >= 2 {
-		// 2. 2 Consecutive Losses Lockout (Preserves capital; stop for the day)
-		ledger.CircuitBreakerLocked = true
-		ledger.LockReason = "2 Consecutive Losses Circuit Breaker"
-	} else if oneR > 0 && ledger.PeakNetPnL >= 2.0*oneR && cumNet <= 0.55*ledger.PeakNetPnL {
-		// 3. Profit-Giveback Lock (Protects banked green days once PeakNetPnL >= +2.0R)
-		ledger.CircuitBreakerLocked = true
-		ledger.LockReason = fmt.Sprintf("Profit-Giveback Lock (Protected ₹%.0f from ₹%.0f peak)", cumNet, ledger.PeakNetPnL)
-	}
-
-	if cm.db != nil {
-		lockedInt := 0
-		if ledger.CircuitBreakerLocked {
-			lockedInt = 1
-		}
-		_, _ = cm.db.Exec(`
-			INSERT INTO daily_risk_ledger (
-				trading_date, mode, trades_taken, wins, losses, consecutive_losses,
-				realised_gross_pnl, total_charges, realised_net_pnl, peak_net_pnl,
-				circuit_breaker_locked, lock_reason
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(trading_date, mode) DO UPDATE SET
-				trades_taken = excluded.trades_taken,
-				wins = excluded.wins,
-				losses = excluded.losses,
-				consecutive_losses = excluded.consecutive_losses,
-				realised_gross_pnl = excluded.realised_gross_pnl,
-				total_charges = excluded.total_charges,
-				realised_net_pnl = excluded.realised_net_pnl,
-				peak_net_pnl = excluded.peak_net_pnl,
-				circuit_breaker_locked = excluded.circuit_breaker_locked,
-				lock_reason = excluded.lock_reason;
-		`, cm.tradingDate, mode, ledger.TradesTaken, ledger.Wins, ledger.Losses, ledger.ConsecutiveLosses,
-			cm.realisedGrossByMode[mode], cm.totalChargesByMode[mode], cumNet, ledger.PeakNetPnL,
-			lockedInt, ledger.LockReason)
-	}
+	cm.evaluateCircuitBreakersLocked(mode, ledger, cumNet)
+	cm.persistDailyLedgerLocked(mode, ledger, cm.realisedGrossByMode[mode], cm.totalChargesByMode[mode], cumNet)
 }
 
 // SyncUniverseLeverages queries Zerodha POST /margins/orders in 50-stock chunks using LIMIT @ ₹1000

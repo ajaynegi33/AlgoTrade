@@ -89,7 +89,7 @@ func (w *PositionWorker) processPendingWork() {
 		return
 	}
 
-	limitPx := computeSellSLLimitPrice(targetTrigger, w.TickSize)
+	limitPx := ComputeSellSLLimitPrice(targetTrigger, w.TickSize)
 	err := w.broker.ModifySLOrder(w.ctx, slOrdID, rem, targetTrigger, limitPx, ltp, w.TickSize)
 	if err != nil {
 		slog.Warn("SL ratchet modification rejected by broker", "symbol", w.Symbol, "target", targetTrigger, "error", err)
@@ -133,7 +133,7 @@ func (w *PositionWorker) ensureInitialSLPlaced() {
 		return
 	}
 
-	limitPx := computeSellSLLimitPrice(w.InitialStop, w.TickSize)
+	limitPx := ComputeSellSLLimitPrice(w.InitialStop, w.TickSize)
 	slID, err := w.broker.PlaceSLOrder(w.ctx, w.Symbol, w.Token, rem, w.InitialStop, limitPx, ltp, w.TickSize)
 	if err != nil {
 		slog.Error("Initial SL placement failed; executing immediate protective flatten",
@@ -182,7 +182,7 @@ func (w *PositionWorker) executeThreeStepScaleOut() {
 	scaleOutQty := rem / 2
 	runnerQty := rem - scaleOutQty
 	curStop := math.Float64frombits(w.confirmedStopBits.Load())
-	curLimit := computeSellSLLimitPrice(curStop, w.TickSize)
+	curLimit := ComputeSellSLLimitPrice(curStop, w.TickSize)
 	ltp := w.LatestLTP()
 
 	// STEP 1: Shrink resting SL quantity from rem -> runnerQty while KEEPING curStop trigger unchanged
@@ -277,7 +277,7 @@ func (w *PositionWorker) executeThreeStepScaleOut() {
 		w.shadowStopBits.Store(math.Float64bits(beTrigger))
 		w.proposedStopBits.Store(math.Float64bits(beTrigger))
 		if w.modCount.Load() < MaxSafetyModifications {
-			beLimit := computeSellSLLimitPrice(beTrigger, w.TickSize)
+			beLimit := ComputeSellSLLimitPrice(beTrigger, w.TickSize)
 			if err := w.broker.ModifySLOrder(w.ctx, slOrdID, remAfter, beTrigger, beLimit, nowLTP, w.TickSize); err == nil {
 				w.modCount.Add(1)
 				w.lastModUnixMs.Store(time.Now().UnixMilli())

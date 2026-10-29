@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-var istZone = time.FixedZone("IST", 5*3600+1800)
+var istZone = ISTLocation
 
 // CalculateBullishScore performs institutional quantification of a long trade setup
 func CalculateBullishScore( stock *StockMetrics, nifty *StockMetrics, sector *StockMetrics, isLeaderSector bool, breadthRatio float64 ) (score float64, ev float64, pWin float64, reasons ReasonFlag) {
@@ -26,20 +26,20 @@ func CalculateBullishScore( stock *StockMetrics, nifty *StockMetrics, sector *St
 		reasons |= PenaltyBelowPrevClose
 	}
 
-	// 2. Gaussian Value Sweet Spot (S_VWAP)
+	// 2. Gaussian Value Sweet Spot (vwapScore)
 	x := (stock.LTP - stock.ExchangeVWAP) / atrSafe
-	var sVWAP float64
+	var vwapScore float64
 	switch {
 	case x < -0.10:
-		sVWAP = 0.0
+		vwapScore = 0.0
 	case x < 0.00:
-		sVWAP = 45.0 // Testing VWAP support buffer
+		vwapScore = 45.0 // Testing VWAP support buffer
 	case x <= 0.60:
-		sVWAP = 100.0 - 150.0*(x-0.25)*(x-0.25) // Peaks at +0.25 ATR = 100.0
+		vwapScore = 100.0 - 150.0*(x-0.25)*(x-0.25) // Peaks at +0.25 ATR = 100.0
 	case x <= 1.50:
-		sVWAP = 80.0 - ((x-0.60)/0.90)*60.0 // Linear decay down to 20.0
+		vwapScore = 80.0 - ((x-0.60)/0.90)*60.0 // Linear decay down to 20.0
 	default:
-		sVWAP = 10.0
+		vwapScore = 10.0
 		reasons |= PenaltyOverextended
 	}
 
@@ -52,21 +52,21 @@ func CalculateBullishScore( stock *StockMetrics, nifty *StockMetrics, sector *St
 	}
 
 	if clv < 0.55 || (currBar.Open > 0 && stock.LTP <= currBar.Open) {
-		if sVWAP > 40.0 {
-			sVWAP = 40.0
+		if vwapScore > 40.0 {
+			vwapScore = 40.0
 		}
 		reasons |= PenaltyPullbackRedBar
-	} else if sVWAP >= 85.0 {
+	} else if vwapScore >= 85.0 {
 		reasons |= ReasonVWAPSweetSpot
 	}
 
 	// 4. Pullback Count Exhaustion Filter
 	switch {
 	case stock.PullbackCount == 3:
-		sVWAP *= 0.75
+		vwapScore *= 0.75
 	case stock.PullbackCount >= 4:
-		if sVWAP > 30.0 {
-			sVWAP = 30.0
+		if vwapScore > 30.0 {
+			vwapScore = 30.0
 		}
 		reasons |= PenaltyExhaustedTrend
 	}
@@ -254,10 +254,8 @@ func CalculateBullishScore( stock *StockMetrics, nifty *StockMetrics, sector *St
 	}
 
 	// 12. 5-Factor Institutional Composite Bullish Rank Score (0 to 100)
-	// Falsification Fix (Bug B4): Directly weight Anti-Spoof Order Flow (sFlow) and Logistic RVOL (sRVOL)
-	// alongside sVWAP, sRS, and sEV to maximize 60%–70% Long-Only Intraday Win Rate.
-	sRVOL := math.Min(100.0, 105.0/(1.0+math.Exp(-1.65*(compositeRVOL-2.0))))
-	sRS := math.Min(100.0, math.Max(0.0, 50.0+48.4*math.Tanh(0.65*stock.CompositeRS)))
+	rvolScore := math.Min(100.0, 105.0/(1.0+math.Exp(-1.65*(compositeRVOL-2.0))))
+	rsScore := math.Min(100.0, math.Max(0.0, 50.0+48.4*math.Tanh(0.65*stock.CompositeRS)))
 
 	effectiveOBI := float64(stock.SmoothedBuyerRatio)
 	if effectiveOBI <= 0 {
@@ -268,14 +266,14 @@ func CalculateBullishScore( stock *StockMetrics, nifty *StockMetrics, sector *St
 		effectiveAgg = 0.60*float64(stock.FastAggressorEMA) + 0.40*float64(stock.AggressorBuyRatio)
 	}
 	flowComposite := 0.40*effectiveOBI + 0.60*effectiveAgg
-	sFlow := math.Min(100.0, math.Max(0.0, (flowComposite-0.35)*200.0))
-	sEV := math.Min(100.0, math.Max(0.0, (ev+0.40)*55.0))
+	flowScore := math.Min(100.0, math.Max(0.0, (flowComposite-0.35)*200.0))
+	evScore := math.Min(100.0, math.Max(0.0, (ev+0.40)*55.0))
 
-	score = (0.26 * sVWAP) +
-		(0.22 * sRVOL) +
-		(0.18 * sRS) +
-		(0.20 * sFlow) +
-		(0.14 * sEV)
+	score = (0.26 * vwapScore) +
+		(0.22 * rvolScore) +
+		(0.18 * rsScore) +
+		(0.20 * flowScore) +
+		(0.14 * evScore)
 
 	if reasons&PenaltyWideSpread != 0 || reasons&PenaltyBelowPrevClose != 0 {
 		score *= 0.60

@@ -1,5 +1,10 @@
 package execution
 
+import "github.com/ajaynegi33/AlgoTrade/internal/engine"
+
+// Canonical IST location for execution engine
+var ist = engine.ISTLocation
+
 // Standardized Structural Setup Patterns
 const (
 	PatternVWAPPullbackReclaim = "VWAP_PULLBACK_RECLAIM"
@@ -27,6 +32,7 @@ const (
 // Regulatory Exchange Constraints
 const (
 	MaxOrderModifications  = 25 // NSE maximum permissible modifications per order
+	MaxExchangeOrderMods   = MaxOrderModifications
 	MaxSafetyModifications = 24 // Stop ratcheting caps at 24 to reserve mod #25 for market emergency exit
 )
 

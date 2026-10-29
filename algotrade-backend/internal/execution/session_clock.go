@@ -43,7 +43,7 @@ func formatDurationMin(mins int) string {
 func EvaluateGlobalSessionClocks(now time.Time, breadthPct float64, topBullishRVOL float64) engine.GlobalSessionClockDTO {
 	istLoc, err := time.LoadLocation("Asia/Kolkata")
 	if err != nil {
-		istLoc = time.FixedZone("IST", 5*3600+1800)
+		istLoc = ist
 	}
 	nowIST := now.In(istLoc)
 	istMin := nowIST.Hour()*60 + nowIST.Minute()

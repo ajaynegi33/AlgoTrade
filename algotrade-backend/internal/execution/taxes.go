@@ -16,33 +16,7 @@ type TaxBreakdown struct {
 
 // CalculateRoundTripCharges computes the exact Zerodha + NSE Cash MIS round-trip charges in ₹
 func CalculateRoundTripCharges(buyPrice, sellPrice float64, qty int) TaxBreakdown {
-	if qty <= 0 || buyPrice <= 0 || sellPrice <= 0 {
-		return TaxBreakdown{}
-	}
-	q := float64(qty)
-	buyTurnover := buyPrice * q
-	sellTurnover := sellPrice * q
-	totalTurnover := buyTurnover + sellTurnover
-
-	buyBrok := math.Min(20.0, 0.0003*buyTurnover)
-	sellBrok := math.Min(20.0, 0.0003*sellTurnover)
-	stt := math.Round(0.00025 * sellTurnover)
-	exch := 0.0000297 * totalTurnover
-	sebi := 0.000001 * totalTurnover
-	stamp := math.Round(0.00003 * buyTurnover)
-	gst := 0.18 * (buyBrok + sellBrok + exch + sebi)
-	total := buyBrok + sellBrok + stt + exch + sebi + stamp + gst
-
-	return TaxBreakdown{
-		BuyBrokerage:  buyBrok,
-		SellBrokerage: sellBrok,
-		STT:           stt,
-		ExchangeTxn:   exch,
-		SEBICharges:   sebi,
-		StampDuty:     stamp,
-		GST:           gst,
-		TotalCharges:  total,
-	}
+	return CalculatePositionTaxBreakdown(buyPrice, sellPrice, qty, false)
 }
 
 // CalculatePositionTaxBreakdown computes the exact Zerodha + NSE Cash MIS round-trip charges in ₹,

@@ -128,7 +128,8 @@ func (a *Actor) getStockDetailInternal(symbol string) (*StockDetailDTO, bool) {
 
 	orh, orl, hasOR := s.OpeningRange15m()
 
-	// Compute CLV
+	// Compute intraday normalized Close Location Value oscillator [-1.0, +1.0] for StockFalsificationGrid.tsx
+	// (-1 = Day Low, 0 = Midpoint, +1 = Day High; distinct from [0.0, 1.0] single-bar CLV used in math_ranking/gatekeeper)
 	var clv float64
 	if s.High > s.Low {
 		clv = ((s.LTP - s.Low) - (s.High - s.LTP)) / (s.High - s.Low)
@@ -186,12 +187,7 @@ func (a *Actor) getStockDetailInternal(symbol string) (*StockDetailDTO, bool) {
 		}
 	}
 
-	var antiSpoofRatio float64 = 0.50
-	wBid := 0.6*float64(bidTop2) + 0.4*float64(bidRest3)
-	wAsk := 0.6*float64(askTop2) + 0.4*float64(askRest3)
-	if tot := wBid + wAsk; tot > 0 {
-		antiSpoofRatio = wBid / tot
-	}
+	antiSpoofRatio := ComputeAntiSpoofRatio(bidTop2, bidRest3, askTop2, askRest3)
 
 	// Decode reasons
 	reasonsList := make([]string, 0)

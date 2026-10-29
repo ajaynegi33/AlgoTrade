@@ -13,6 +13,8 @@ import (
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 )
 
+var ist = time.FixedZone("IST", 5*3600+1800)
+
 // SlotBaseline holds the 20-day historical time-of-day baseline metrics for a single 5m slot
 type SlotBaseline struct {
 	SlotIdx      int     // 0 to 74
@@ -118,7 +120,6 @@ func (h *HistoricalService) SeedStockBaselines(token uint32, lastPrice float64) 
 			return cached, nil
 		}
 
-		ist := time.FixedZone("IST", 5*3600+1800)
 		nowIST := time.Now().In(ist)
 		minsSince0915 := (nowIST.Hour()*60 + nowIST.Minute()) - (9*60 + 15)
 		isWeekday := nowIST.Weekday() >= time.Monday && nowIST.Weekday() <= time.Friday
@@ -182,7 +183,6 @@ func (h *HistoricalService) computeBaselines(candles []kiteconnect.HistoricalDat
 		return
 	}
 
-	ist := time.FixedZone("IST", 5*3600+1800)
 	nowIST := time.Now().In(ist)
 	todayYear, todayMonth, todayDay := nowIST.Date()
 
@@ -335,7 +335,6 @@ func (h *HistoricalService) loadFromDatabase(token uint32) (*StockBaselineProfil
 	}
 
 	if count == 75 {
-		ist := time.FixedZone("IST", 5*3600+1800)
 		todayIST := time.Now().In(ist).Format("2006-01-02")
 		updatedToday := strings.HasPrefix(latestUpdatedStr, todayIST)
 		return profile, updatedToday, nil
@@ -347,7 +346,6 @@ func (h *HistoricalService) loadTodayBarsFromDatabase(token uint32) []TodaySlotB
 	if h.db == nil {
 		return nil
 	}
-	ist := time.FixedZone("IST", 5*3600+1800)
 	todayPrefix := time.Now().In(ist).Format("2006-01-02") + "%"
 
 	rows, err := h.db.Query(`
@@ -424,7 +422,6 @@ func (h *HistoricalService) persistToDatabase(profile *StockBaselineProfile) {
 	}
 
 	if len(profile.TodayBars) > 0 {
-		ist := time.FixedZone("IST", 5*3600+1800)
 		barStmt, bErr := tx.Prepare(`
 			INSERT INTO historical_5m_bars (instrument_token, bar_time, open, high, low, close, volume)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
