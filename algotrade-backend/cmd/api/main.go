@@ -13,12 +13,12 @@ import (
 	"github.com/ajaynegi33/AlgoTrade/internal/auth"
 	"github.com/ajaynegi33/AlgoTrade/internal/config"
 	"github.com/ajaynegi33/AlgoTrade/internal/database"
-	"github.com/ajaynegi33/AlgoTrade/internal/engine"
-	"github.com/ajaynegi33/AlgoTrade/internal/execution"
+	"github.com/ajaynegi33/AlgoTrade/internal/market"
+	"github.com/ajaynegi33/AlgoTrade/internal/trading"
 	"github.com/ajaynegi33/AlgoTrade/internal/kite"
-	"github.com/ajaynegi33/AlgoTrade/internal/prediction"
+	"github.com/ajaynegi33/AlgoTrade/internal/structure"
 	"github.com/ajaynegi33/AlgoTrade/internal/response"
-	"github.com/ajaynegi33/AlgoTrade/internal/scanner"
+	"github.com/ajaynegi33/AlgoTrade/internal/screener"
 	"github.com/ajaynegi33/AlgoTrade/internal/user"
 	"github.com/ajaynegi33/AlgoTrade/internal/ws"
 )
@@ -66,8 +66,8 @@ func main() {
 	kiteHandler := kite.NewHandler(kiteService)
 
 	// Initialize Stock Universe Scanner Service
-	scannerService := scanner.NewService(db, kiteService)
-	scannerHandler := scanner.NewHandler(scannerService)
+	scannerService := screener.NewService(db, kiteService)
+	scannerHandler := screener.NewHandler(scannerService)
 
 	// Initialize Kite Ticker WebSocket Client (Single shared broker connection)
 	tickerClient := kite.NewTickerClient(kiteService)
@@ -81,12 +81,12 @@ func main() {
 	wsHub := ws.NewClientHub()
 
 	// Initialize Single-Writer Quant Engine Actor
-	engineActor := engine.NewActor(db, tickerClient, histService, wsHub, scannerService)
+	engineActor := market.NewActor(db, tickerClient, histService, wsHub, scannerService)
 
 	// Initialize Phase 2 Autonomous Execution Manager & wire into Engine Actor
-	execManager := execution.NewManager(db, engineActor, kiteService, tickerClient)
+	execManager := trading.NewManager(db, engineActor, kiteService, tickerClient)
 	defer execManager.Stop()
-	execHandler := execution.NewHandler(execManager)
+	execHandler := trading.NewHandler(execManager)
 
 	if err := engineActor.Start(); err != nil {
 		slog.Error("Failed to start Engine Actor", "error", err)
@@ -99,8 +99,8 @@ func main() {
 		engineActor.OnKiteAuthenticated()
 	})
 
-	engineHandler := engine.NewHandler(engineActor, wsHub)
-	predictionHandler := prediction.NewHandler(engineActor)
+	engineHandler := market.NewHandler(engineActor, wsHub)
+	predictionHandler := structure.NewHandler(engineActor)
 
 	// Initialize Handlers
 	authHandler := auth.NewHandler(cfg, userStore)
@@ -131,25 +131,35 @@ func main() {
 	mux.HandleFunc("GET /api/kite/callback", kiteHandler.HandleBrowserCallback) // Direct browser redirect from Zerodha
 	mux.HandleFunc("GET /api/kite/profile", kiteHandler.GetProfile)             // Real Zerodha profile & account margins
 
-	// Stock Universe & 08:30 AM Scanner Routes
+	// Screener & Universe Routes (with legacy scanner aliases)
+	mux.HandleFunc("GET /api/screener/universe", scannerHandler.GetUniverse)
 	mux.HandleFunc("GET /api/scanner/universe", scannerHandler.GetUniverse)
+	mux.Handle("POST /api/screener/run", requireAuth(http.HandlerFunc(scannerHandler.RunScan)))
 	mux.Handle("POST /api/scanner/run", requireAuth(http.HandlerFunc(scannerHandler.RunScan)))
 
-	// Real-Time Engine & WebSocket Stream Routes
+	// Real-Time Market & WebSocket Stream Routes (with legacy engine aliases)
 	mux.HandleFunc("GET /ws/live", wsHub.ServeWS)
+	mux.HandleFunc("GET /api/market/status", engineHandler.GetStatus)
 	mux.HandleFunc("GET /api/engine/status", engineHandler.GetStatus)
+	mux.HandleFunc("GET /api/market/historical-status", engineHandler.GetHistoricalStatus)
 	mux.HandleFunc("GET /api/engine/historical-status", engineHandler.GetHistoricalStatus)
 	mux.HandleFunc("GET /api/stocks/{symbol}", engineHandler.GetStockDetail)
 
-	// Phase 2 Autonomous Execution & Risk Management Routes
+	// Trading & Risk Management Routes (with legacy execution aliases)
+	mux.HandleFunc("GET /api/trading/state", execHandler.GetState)
 	mux.HandleFunc("GET /api/execution/state", execHandler.GetState)
+	mux.HandleFunc("GET /api/trading/history", execHandler.GetHistory)
 	mux.HandleFunc("GET /api/execution/history", execHandler.GetHistory)
+	mux.Handle("POST /api/trading/settings", requireAuth(http.HandlerFunc(execHandler.UpdateSettings)))
 	mux.Handle("POST /api/execution/settings", requireAuth(http.HandlerFunc(execHandler.UpdateSettings)))
+	mux.Handle("POST /api/trading/paper-capital", requireAuth(http.HandlerFunc(execHandler.UpdatePaperCapital)))
 	mux.Handle("POST /api/execution/paper-capital", requireAuth(http.HandlerFunc(execHandler.UpdatePaperCapital)))
+	mux.Handle("POST /api/trading/flatten", requireAuth(http.HandlerFunc(execHandler.Flatten)))
 	mux.Handle("POST /api/execution/flatten", requireAuth(http.HandlerFunc(execHandler.Flatten)))
 	mux.HandleFunc("POST /api/kite/postback", execHandler.HandleKitePostback)
 
-	// OrderBlock Decision Tree & Minimax Alpha-Beta Pruning Prediction Routes
+	// Market Structure & Order Block Routes (with legacy prediction aliases)
+	mux.HandleFunc("GET /api/structure/orderblock-tree", predictionHandler.GetOrderBlockTree)
 	mux.HandleFunc("GET /api/prediction/orderblock-tree", predictionHandler.GetOrderBlockTree)
 
 	// Deferred non-blocking initial scan check on startup
