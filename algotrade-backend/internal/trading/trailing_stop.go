@@ -8,207 +8,206 @@ import (
 )
 
 // OnTickHotPath is executed by the Actor on every incoming tick for this position's instrument.
-func (w *PositionWorker) OnTickHotPath(s *market.StockMetrics, inMacroShock bool) {
-	if w.isClosed.Load() {
+func (worker *PositionWorker) OnTickHotPath(stockMetrics *market.StockMetrics, isInMacroShock bool) {
+	if worker.isClosed.Load() {
 		return
 	}
 
 	// If running in Paper Mode, match resting Paper SL orders against live 5-level depth first
-	if w.Mode == "PAPER" && w.paperBroker != nil {
-		w.paperBroker.EvaluateTickForToken(s)
+	if worker.Mode == "PAPER" && worker.paperBroker != nil {
+		worker.paperBroker.EvaluateTickForToken(stockMetrics)
 	}
 
-	if w.pendingMarketExit.Load() {
+	if worker.isMarketExitPending.Load() {
 		return
 	}
 
-	ltp := s.LTP
-	if ltp <= 0 {
+	lastTradedPrice := stockMetrics.LTP
+	if lastTradedPrice <= 0 {
 		return
 	}
-	w.latestLTPBits.Store(math.Float64bits(ltp))
+	worker.latestLTPBits.Store(math.Float64bits(lastTradedPrice))
 
 	// Only evaluate trailing stops once entry has filled at least 1 share
-	if w.filledEntryQty.Load() <= 0 || w.RemainingQty() <= 0 {
+	if worker.filledEntryQty.Load() <= 0 || worker.GetRemainingQty() <= 0 {
 		return
 	}
 
 	// 1. Update High-Water Mark (HWM)
-	entryPx := w.GetEntryPrice()
-	beStop := w.GetBreakevenStop()
-	hwm := math.Float64frombits(w.highWaterMarkBits.Load())
-	if ltp > hwm {
-		hwm = ltp
-		w.highWaterMarkBits.Store(math.Float64bits(hwm))
+	entryPrice := worker.GetEntryPrice()
+	breakevenStop := worker.GetBreakevenStop()
+	highWaterMark := math.Float64frombits(worker.highWaterMarkBits.Load())
+	if lastTradedPrice > highWaterMark {
+		highWaterMark = lastTradedPrice
+		worker.highWaterMarkBits.Store(math.Float64bits(highWaterMark))
 	}
-	rCur := (ltp - entryPx) / w.OneR
-	rMFE := (hwm - entryPx) / w.OneR
-	confirmedStop := math.Float64frombits(w.confirmedStopBits.Load())
+	currentRMultiple := (lastTradedPrice - entryPrice) / worker.OneR
+	maxFavorableRMultiple := (highWaterMark - entryPrice) / worker.OneR
+	confirmedStopLoss := math.Float64frombits(worker.confirmedStopBits.Load())
 
 	// 2. GUARD A: Gapped-Through / Stranded SL Watchdog (1s Epoch or 3-Tick Breach)
-	if ltp <= confirmedStop {
-		breachStart := w.slBreachSinceUnix.Load()
-		if breachStart == 0 {
-			w.slBreachSinceUnix.Store(s.LastUpdatedUnix)
-		} else if (s.LastUpdatedUnix-breachStart) >= 1 || ltp <= confirmedStop-(3.0*w.TickSize) {
-			w.TriggerEmergencyExit("SL_GAP_THROUGH_BREACH")
+	if lastTradedPrice <= confirmedStopLoss {
+		breachStartTimeUnix := worker.slBreachSinceUnix.Load()
+		if breachStartTimeUnix == 0 {
+			worker.slBreachSinceUnix.Store(stockMetrics.LastUpdatedUnix)
+		} else if (stockMetrics.LastUpdatedUnix-breachStartTimeUnix) >= 1 || lastTradedPrice <= confirmedStopLoss-(3.0*worker.TickSize) {
+			worker.TriggerEmergencyExit("SL_GAP_THROUGH_BREACH")
 			return
 		}
 	} else {
-		w.slBreachSinceUnix.Store(0)
+		worker.slBreachSinceUnix.Store(0)
 	}
 
 	// 3. GUARD B: Gear 4 Virtual Shadow Stop (Active when modCount >= 24; Mod 25 Reserved for Exit!)
-	if w.modCount.Load() >= 24 {
-		shadowStop := math.Float64frombits(w.shadowStopBits.Load())
-		if shadowStop > 0 && ltp <= shadowStop {
-			hits := w.shadowBreachTicks.Add(1)
-			if hits >= 2 || s.FastAggressorEMA < 0.42 || ltp <= shadowStop-(2.0*w.TickSize) {
-				w.TriggerEmergencyExit(ExitReasonShadowStopHit)
+	if worker.modCount.Load() >= 24 {
+		shadowStop := math.Float64frombits(worker.shadowStopBits.Load())
+		if shadowStop > 0 && lastTradedPrice <= shadowStop {
+			consecutiveBreachHits := worker.shadowBreachTicks.Add(1)
+			if consecutiveBreachHits >= 2 || stockMetrics.FastAggressorEMA < 0.42 || lastTradedPrice <= shadowStop-(2.0*worker.TickSize) {
+				worker.TriggerEmergencyExit(ExitReasonShadowStopHit)
 				return
 			}
 		} else {
-			w.shadowBreachTicks.Store(0)
+			worker.shadowBreachTicks.Store(0)
 		}
 	}
 
 	// 4. GUARD C: Volatility-Normalized Sudden Shock & Book-Vacuum Reflex
 	// Uses continuous RollingPeak (tau=20s) + FastAggressorEMA (zero 30s reset blind spot!)
-	atrSafe := math.Max(s.ATR14, ltp*0.0025)
-	effectiveAggBuy := s.AggressorBuyRatio
-	if s.FastAggressorEMA < effectiveAggBuy {
-		effectiveAggBuy = s.FastAggressorEMA
+	safeATR := math.Max(stockMetrics.ATR14, lastTradedPrice*0.0025)
+	effectiveAggressorBuy := stockMetrics.AggressorBuyRatio
+	if stockMetrics.FastAggressorEMA < effectiveAggressorBuy {
+		effectiveAggressorBuy = stockMetrics.FastAggressorEMA
 	}
 
 	// 5. GUARD D: +0.65R High-Frequency Minimum Profit Scale-Out Trigger (Early Harvest at R1)
-	if !w.tranche1Done.Load() && !w.tranche1Pending.Load() && rCur >= 0.65 {
-		w.tranche1Pending.Store(true)
-		w.wake()
+	if !worker.hasTranche1Completed.Load() && !worker.isTranche1Pending.Load() && currentRMultiple >= 0.65 {
+		worker.isTranche1Pending.Store(true)
+		worker.wakeWorker()
 		return
 	}
 
 	// 6. Compute Dynamic Order-Flow Multiplier M_flow & Parabolic Climax Factor C_climax
-	currBar := s.SessionBars[s.CurrentBarIdx]
-	var clv float64 = 0.50
-	if currBar.High > currBar.Low {
-		clv = (ltp - currBar.Low) / (currBar.High - currBar.Low)
+	currentBar := stockMetrics.SessionBars[stockMetrics.CurrentBarIdx]
+	var closeLocationValue float64 = 0.50
+	if currentBar.High > currentBar.Low {
+		closeLocationValue = (lastTradedPrice - currentBar.Low) / (currentBar.High - currentBar.Low)
 	}
-	flowScore := 0.50*float64(effectiveAggBuy) + 0.35*float64(s.SmoothedBuyerRatio) + 0.15*clv
+	flowScore := 0.50*float64(effectiveAggressorBuy) + 0.35*float64(stockMetrics.SmoothedBuyerRatio) + 0.15*closeLocationValue
 
-	structureIntact := ltp >= s.ExchangeVWAP && ltp > w.SignalBarLow
-	var mFlow float64
-	if flowScore >= 0.56 && structureIntact {
-		mFlow = math.Min(1.10, 0.85+(flowScore-0.56)*1.25)
-	} else if structureIntact {
+	isStructureIntact := lastTradedPrice >= stockMetrics.ExchangeVWAP && lastTradedPrice > worker.SignalBarLow
+	var orderFlowMultiplier float64
+	if flowScore >= 0.56 && isStructureIntact {
+		orderFlowMultiplier = math.Min(1.10, 0.85+(flowScore-0.56)*1.25)
+	} else if isStructureIntact {
 		// Structure intact: floor M_flow at 0.65 so normal wicks don't choke the trade
-		mFlow = math.Max(0.65, 0.65+math.Max(0, flowScore-0.35)*0.95)
+		orderFlowMultiplier = math.Max(0.65, 0.65+math.Max(0, flowScore-0.35)*0.95)
 	} else {
-		mFlow = math.Max(0.40, 0.40+math.Max(0, flowScore-0.25)*1.40)
+		orderFlowMultiplier = math.Max(0.40, 0.40+math.Max(0, flowScore-0.25)*1.40)
 	}
 
 	// Parabolic Climax Tightener: When runner is >= +2.2R and extended > 1.8 ATR above VWAP
-	cClimax := 1.0
-	xVWAP := (ltp - s.ExchangeVWAP) / atrSafe
-	if rMFE >= 2.2 && xVWAP > 1.8 {
-		cClimax = math.Max(0.35, 1.0-0.22*(xVWAP-1.8))
+	parabolicClimaxFactor := 1.0
+	vwapExtensionMultiple := (lastTradedPrice - stockMetrics.ExchangeVWAP) / safeATR
+	if maxFavorableRMultiple >= 2.2 && vwapExtensionMultiple > 1.8 {
+		parabolicClimaxFactor = math.Max(0.35, 1.0-0.22*(vwapExtensionMultiple-1.8))
 	}
 
 	// 7. Dynamic Breathing Buffer & High-Frequency Breakeven Ratchet
-	effectiveBase := w.BaseBuffer
-	if !w.tranche1Done.Load() && flowScore < 0.55 {
-		effectiveBase = math.Min(w.BaseBuffer, w.OneR)
+	effectiveBaseBuffer := worker.BaseBuffer
+	if !worker.hasTranche1Completed.Load() && flowScore < 0.55 {
+		effectiveBaseBuffer = math.Min(worker.BaseBuffer, worker.OneR)
 	}
 
-	bDynamic := effectiveBase * mFlow * cClimax
-	unclampedCand := RoundToTick(hwm-bDynamic, w.TickSize)
+	dynamicBreathingBuffer := effectiveBaseBuffer * orderFlowMultiplier * parabolicClimaxFactor
+	unclampedCandidateStop := RoundToTick(highWaterMark-dynamicBreathingBuffer, worker.TickSize)
 
 	// Early Profit Protection: Once trade reaches +0.50R, lock Tax-Free Breakeven immediately!
-	if rMFE >= 0.50 {
-		unclampedCand = math.Max(unclampedCand, beStop)
+	if maxFavorableRMultiple >= 0.50 {
+		unclampedCandidateStop = math.Max(unclampedCandidateStop, breakevenStop)
 	}
-	if w.tranche1Done.Load() && s.CurrentBarIdx > w.EntryBarIdx && s.CurrentBarIdx >= 1 {
-		prev5mLow := s.SessionBars[s.CurrentBarIdx-1].Low - 2.0*w.TickSize
-		unclampedCand = math.Max(unclampedCand, RoundToTick(prev5mLow, w.TickSize))
+	if worker.hasTranche1Completed.Load() && stockMetrics.CurrentBarIdx > worker.EntryBarIdx && stockMetrics.CurrentBarIdx >= 1 {
+		prev5mLow := stockMetrics.SessionBars[stockMetrics.CurrentBarIdx-1].Low - 2.0*worker.TickSize
+		unclampedCandidateStop = math.Max(unclampedCandidateStop, RoundToTick(prev5mLow, worker.TickSize))
 	}
 
 	// 8. OrderBlock Rule: Judge the Zone on Completed 5-Minute Candle Closes (Never on Intra-Candle Wicks)
-	if s.CurrentBarIdx > w.EntryBarIdx && s.CurrentBarIdx >= 1 {
-		prevBar := s.SessionBars[s.CurrentBarIdx-1]
-		if prevBar.Close > 0 && prevBar.Close < w.InitialStop {
-			w.TriggerEmergencyExit("COMPLETED_5M_STRUCTURAL_STOP_CLOSE")
+	if stockMetrics.CurrentBarIdx > worker.EntryBarIdx && stockMetrics.CurrentBarIdx >= 1 {
+		previousBar := stockMetrics.SessionBars[stockMetrics.CurrentBarIdx-1]
+		if previousBar.Close > 0 && previousBar.Close < worker.InitialStop {
+			worker.TriggerEmergencyExit("COMPLETED_5M_STRUCTURAL_STOP_CLOSE")
 			return
 		}
 	}
 
 	// 9. Stop Ratchet Execution
-	if unclampedCand <= confirmedStop {
+	if unclampedCandidateStop <= confirmedStopLoss {
 		return
 	}
 
-	maxLegalTrigger := RoundDownToTick(ltp-math.Max(2.0*w.TickSize, 0.001*ltp), w.TickSize)
-	if ltp <= unclampedCand {
+	maxLegalTrigger := RoundDownToTick(lastTradedPrice-math.Max(2.0*worker.TickSize, 0.001*lastTradedPrice), worker.TickSize)
+	if lastTradedPrice <= unclampedCandidateStop {
 		return
 	}
 
-	safeCand := math.Min(unclampedCand, maxLegalTrigger)
-	if safeCand > confirmedStop {
-		w.ProposeStopRatchet(safeCand, atrSafe, false)
+	safeCandidateStop := math.Min(unclampedCandidateStop, maxLegalTrigger)
+	if safeCandidateStop > confirmedStopLoss {
+		worker.ProposeStopRatchet(safeCandidateStop, safeATR, false)
 	}
 }
 
 // ProposeStopRatchet governs Mods 1–18 (Agile), Mods 19–24 (Coarse), and Gear 4 (Mod 24 Shadow Stop)
-func (w *PositionWorker) ProposeStopRatchet(candidateStop, atrSafe float64, isUrgentShockClamp bool) {
-	mods := w.modCount.Load()
+func (worker *PositionWorker) ProposeStopRatchet(candidateStop, safeATR float64, isUrgentShockClamp bool) {
+	modificationCount := worker.modCount.Load()
 
 	// Always advance Shadow Stop in RAM
 	for {
-		curShadowBits := w.shadowStopBits.Load()
-		if candidateStop <= math.Float64frombits(curShadowBits) {
+		currentShadowBits := worker.shadowStopBits.Load()
+		if candidateStop <= math.Float64frombits(currentShadowBits) {
 			break
 		}
-		if w.shadowStopBits.CompareAndSwap(curShadowBits, math.Float64bits(candidateStop)) {
+		if worker.shadowStopBits.CompareAndSwap(currentShadowBits, math.Float64bits(candidateStop)) {
 			break
 		}
 	}
 
 	// GEAR 4 INVARIANT: At modCount >= 24, NEVER send a price-ratchet PUT! Mod 25 is strictly for Market Exit!
-	if mods >= MaxSafetyModifications {
-		w.currentGear.Store(GearShadowExit)
+	if modificationCount >= MaxSafetyModifications {
+		worker.currentGear.Store(GearShadowExit)
 		return
 	}
 
-	confirmed := math.Float64frombits(w.confirmedStopBits.Load())
-	improvement := candidateStop - confirmed
-	if improvement <= 0 {
+	confirmedStopPrice := math.Float64frombits(worker.confirmedStopBits.Load())
+	priceImprovement := candidateStop - confirmedStopPrice
+	if priceImprovement <= 0 {
 		return
 	}
 
-	nowMs := time.Now().UnixMilli()
-	elapsedMs := nowMs - w.lastModUnixMs.Load()
+	currentUnixMs := time.Now().UnixMilli()
+	elapsedMilliseconds := currentUnixMs - worker.lastModUnixMs.Load()
 
 	if !isUrgentShockClamp {
-		if mods < 18 {
-			minStep := math.Max(2.0*w.TickSize, 0.12*w.BaseBuffer)
-			if improvement < minStep || elapsedMs < 350 {
+		if modificationCount < 18 {
+			minimumStepSize := math.Max(2.0*worker.TickSize, 0.12*worker.BaseBuffer)
+			if priceImprovement < minimumStepSize || elapsedMilliseconds < 350 {
 				return
 			}
 		} else {
-			minStep := math.Max(0.40*w.BaseBuffer, 0.35*atrSafe)
-			if improvement < minStep || elapsedMs < 1500 {
+			minimumStepSize := math.Max(0.40*worker.BaseBuffer, 0.35*safeATR)
+			if priceImprovement < minimumStepSize || elapsedMilliseconds < 1500 {
 				return
 			}
 		}
 	}
 
 	for {
-		oldBits := w.proposedStopBits.Load()
-		if candidateStop <= math.Float64frombits(oldBits) {
+		oldProposedBits := worker.proposedStopBits.Load()
+		if candidateStop <= math.Float64frombits(oldProposedBits) {
 			return
 		}
-		if w.proposedStopBits.CompareAndSwap(oldBits, math.Float64bits(candidateStop)) {
-			w.wake()
+		if worker.proposedStopBits.CompareAndSwap(oldProposedBits, math.Float64bits(candidateStop)) {
+			worker.wakeWorker()
 			return
 		}
 	}
 }
-

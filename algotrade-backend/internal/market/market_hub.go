@@ -25,14 +25,14 @@ type BarFlushItem struct {
 
 // PositionTickListener is the lock-free O(1) hot-path interface for active position workers
 type PositionTickListener interface {
-	OnTickHotPath(s *StockMetrics, inMacroShock bool)
+	OnTickHotPath(stockMetrics *StockMetrics, isInMacroShock bool)
 }
 
 // ExecutionHook is invoked once per second inside the Actor loop with zero lock contention
 type ExecutionHook interface {
 	OnSecondTick(
 		stocks *[maxTrackedStocks]StockMetrics,
-		activeIndices []uint16,
+		activeStockIndices []uint16,
 		bullishSorted []uint16,
 		sectorHealthMap map[uint8]SectorHealth,
 		pulse MarketPulseDTO,
@@ -72,10 +72,10 @@ type Actor struct {
 	// Pure Actor Memory: Owned exclusively by the actor goroutine (zero mutexes in hot loop)
 	stocks         [maxTrackedStocks]StockMetrics
 	slotBaselines  [maxTrackedStocks][75]kite.SlotBaseline
-	workers        [maxTrackedStocks]PositionTickListener
-	tokenMap       map[uint32]uint16
-	symbolMap      map[string]uint16
-	activeIndices   []uint16
+	positionTickListeners [maxTrackedStocks]PositionTickListener
+	stockIndexByToken    map[uint32]uint16
+	stockIndexBySymbol   map[string]uint16
+	activeStockIndices  []uint16
 	sectorHealthMap map[uint8]SectorHealth
 
 	execHook          ExecutionHook
@@ -103,9 +103,9 @@ func NewActor( db *sql.DB, tickerClient *kite.TickerClient, histClient *kite.His
 		histClient:        histClient,
 		wsHub:             wsHub,
 		scannerService:    scannerService,
-		tokenMap:          make(map[uint32]uint16, maxTrackedStocks),
-		symbolMap:         make(map[string]uint16, maxTrackedStocks),
-		activeIndices:     make([]uint16, 0, maxTrackedStocks),
+		stockIndexByToken:     make(map[uint32]uint16, maxTrackedStocks),
+		stockIndexBySymbol:    make(map[string]uint16, maxTrackedStocks),
+		activeStockIndices:    make([]uint16, 0, maxTrackedStocks),
 		sectorHealthMap:   make(map[uint8]SectorHealth, 16),
 		detailReqChan:     make(chan detailReq, 64),
 		workerReqChan:     make(chan registerWorkerReq, 64),
@@ -119,181 +119,181 @@ func NewActor( db *sql.DB, tickerClient *kite.TickerClient, histClient *kite.His
 }
 
 // SetExecutionHook wires the Phase 2 Execution Manager into the Actor's 1s loop
-func (a *Actor) SetExecutionHook(hook ExecutionHook) {
-	a.execHook = hook
+func (actor *Actor) SetExecutionHook(hook ExecutionHook) {
+	actor.execHook = hook
 }
 
 // BindPositionWorker registers or unregisters a PositionWorker on the O(1) hot path (thread-safe via Actor loop)
-func (a *Actor) BindPositionWorker(token uint32, symbol string, worker PositionTickListener) uint16 {
-	if !a.isRunning.Load() {
-		idx, ok := a.tokenMap[token]
+func (actor *Actor) BindPositionWorker(token uint32, symbol string, worker PositionTickListener) uint16 {
+	if !actor.isRunning.Load() {
+		idx, ok := actor.stockIndexByToken[token]
 		if !ok && worker != nil {
-			idx = a.addStock(token, symbol, screener.SectorNifty50, 0.05)
+			idx = actor.registerTrackedStock(token, symbol, screener.SectorNifty50, 0.05)
 		}
 		if int(idx) < maxTrackedStocks {
-			a.workers[idx] = worker
+			actor.positionTickListeners[idx] = worker
 		}
 		return idx
 	}
 	reply := make(chan uint16, 1)
 	select {
-	case a.workerReqChan <- registerWorkerReq{token: token, symbol: symbol, worker: worker, reply: reply}:
+	case actor.workerReqChan <- registerWorkerReq{token: token, symbol: symbol, worker: worker, reply: reply}:
 		select {
 		case idx := <-reply:
 			return idx
 		case <-time.After(2 * time.Second):
 			return 0
 		}
-	case <-a.ctx.Done():
+	case <-actor.ctx.Done():
 		return 0
 	}
 }
 
 // Start boots the actor goroutine and background SQLite writer
-func (a *Actor) Start() error {
-	if a.isRunning.CompareAndSwap(false, true) {
-		a.initTodayEpoch()
+func (actor *Actor) Start() error {
+	if actor.isRunning.CompareAndSwap(false, true) {
+		actor.initializeTodayEpoch()
 
 		// 1. Initialize universe & baselines
-		if err := a.seedUniverse(); err != nil {
+		if err := actor.seedUniverseFromScreener(); err != nil {
 			slog.Warn("Universe seed encountered issue, will run with partial set", "error", err)
 		}
 
 		// 2. Start background SQLite bar flush worker
-		go a.sqliteBarWriter()
+		go actor.sqliteBarWriter()
 
 		// 3. Start Actor hot loop
-		go a.runLoop()
+		go actor.runLoop()
 
 		// 4. Pre-seed 20-Day Baselines & Today's Intraday Bars in background
-		a.TriggerHistoricalReseed()
+		actor.TriggerHistoricalReseed()
 
 		slog.Info("Single-Writer Engine Actor started successfully",
-			"tracked_stocks", len(a.activeIndices),
-			"token_map_size", len(a.tokenMap),
+			"tracked_stocks", len(actor.activeStockIndices),
+			"token_map_size", len(actor.stockIndexByToken),
 		)
 	}
 	return nil
 }
 
 // TriggerHistoricalReseed starts or re-runs background 20-day historical baseline & intraday bar seeding
-func (a *Actor) TriggerHistoricalReseed() {
-	if a.histClient == nil {
+func (actor *Actor) TriggerHistoricalReseed() {
+	if actor.histClient == nil {
 		return
 	}
-	if !a.seedingInProgress.CompareAndSwap(false, true) {
+	if !actor.seedingInProgress.CompareAndSwap(false, true) {
 		return
 	}
-	go a.seedBaselinesAsync()
+	go actor.seedBaselinesAsynchronously()
 }
 
 // OnKiteAuthenticated is invoked when Zerodha Kite OAuth succeeds or restores a valid session.
 // It syncs any newly scanned universe stocks and triggers historical baseline + intraday bar seeding.
-func (a *Actor) OnKiteAuthenticated() {
-	if a.histClient != nil {
-		a.histClient.ClearNoSessionError()
+func (actor *Actor) OnKiteAuthenticated() {
+	if actor.histClient != nil {
+		actor.histClient.ClearNoSessionError()
 	}
 	go func() {
-		if a.scannerService != nil {
+		if actor.scannerService != nil {
 			todayStr := TodayDateIST()
-			universe, err := a.scannerService.GetUniverse(todayStr)
+			universe, err := actor.scannerService.GetUniverse(todayStr)
 			if err != nil || universe == nil || len(universe.Stocks) == 0 || universe.ScanDate != todayStr {
-				if scanned, scanErr := a.scannerService.RunScan(false); scanErr == nil && scanned != nil {
+				if scanned, scanErr := actor.scannerService.RunScan(false); scanErr == nil && scanned != nil {
 					universe = scanned
 				}
 			}
-			if universe != nil && len(universe.Stocks) > 0 && a.isRunning.Load() {
+			if universe != nil && len(universe.Stocks) > 0 && actor.isRunning.Load() {
 				select {
-				case a.universeSyncChan <- universe.Stocks:
-				case <-a.ctx.Done():
+				case actor.universeSyncChan <- universe.Stocks:
+				case <-actor.ctx.Done():
 					return
 				}
 			}
 		}
-		a.TriggerHistoricalReseed()
+		actor.TriggerHistoricalReseed()
 	}()
 }
 
 // Stop shuts down the actor
-func (a *Actor) Stop() {
-	if a.isRunning.CompareAndSwap(true, false) {
-		a.cancel()
+func (actor *Actor) Stop() {
+	if actor.isRunning.CompareAndSwap(true, false) {
+		actor.cancel()
 		slog.Info("Engine Actor stopped")
 	}
 }
 
 // GetStats returns actor performance stats
-func (a *Actor) GetStats() (trackedCount int, ticksProcessed uint64) {
-	return len(a.activeIndices), a.ticksProcessed.Load()
+func (actor *Actor) GetStats() (trackedCount int, ticksProcessed uint64) {
+	return len(actor.activeStockIndices), actor.ticksProcessed.Load()
 }
 
 // GetStockPtrByIndex returns a pointer to the pre-allocated StockMetrics slot for crash-recovery rehydration
-func (a *Actor) GetStockPtrByIndex(idx uint16) *StockMetrics {
-	if int(idx) >= len(a.stocks) {
+func (actor *Actor) GetStockPtrByIndex(idx uint16) *StockMetrics {
+	if int(idx) >= len(actor.stocks) {
 		return nil
 	}
-	return &a.stocks[idx]
+	return &actor.stocks[idx]
 }
 
-func (a *Actor) initTodayEpoch() {
+func (actor *Actor) initializeTodayEpoch() {
 	now := time.Now().In(istZone)
 	y, m, d := now.Date()
 	today0915 := time.Date(y, m, d, 9, 15, 0, 0, istZone)
-	a.today0915Epoch = today0915.Unix()
+	actor.today0915Epoch = today0915.Unix()
 }
 
-func (a *Actor) seedUniverse() error {
+func (actor *Actor) seedUniverseFromScreener() error {
 	// Load Scanned F&O Cash Universe from scanner
-	if a.scannerService != nil {
+	if actor.scannerService != nil {
 		todayStr := TodayDateIST()
-		universe, err := a.scannerService.GetUniverse(todayStr)
+		universe, err := actor.scannerService.GetUniverse(todayStr)
 		if err == nil && universe != nil && len(universe.Stocks) > 0 {
 			for _, st := range universe.Stocks {
-				secID, _, _ := screener.ResolveSector(a.db, st.Tradingsymbol)
+				secID, _, _ := screener.ResolveSector(actor.db, st.Tradingsymbol)
 				tickSize := float32(st.TickSize)
 				if tickSize <= 0 {
 					tickSize = 0.05
 				}
-				idx := a.addStock(uint32(st.InstrumentToken), st.Tradingsymbol, secID, tickSize)
-				a.stocks[idx].LotSize = uint32(st.LotSize)
-				a.stocks[idx].PrevClose = st.LastPrice
+				idx := actor.registerTrackedStock(uint32(st.InstrumentToken), st.Tradingsymbol, secID, tickSize)
+				actor.stocks[idx].LotSize = uint32(st.LotSize)
+				actor.stocks[idx].PrevClose = st.LastPrice
 				if st.MISLeverage > 0 {
-					a.stocks[idx].MISLeverage = float32(st.MISLeverage)
+					actor.stocks[idx].MISLeverage = float32(st.MISLeverage)
 				} else {
-					a.stocks[idx].MISLeverage = 5.0
+					actor.stocks[idx].MISLeverage = 5.0
 				}
-				a.stocks[idx].IsTradeable = true
+				actor.stocks[idx].IsTradeable = true
 			}
 		}
 	}
 
 	// 4. Subscribe all tokens on Kite Ticker
-	if a.tickerClient != nil {
-		tokens := make([]uint32, 0, len(a.tokenMap))
-		for tok := range a.tokenMap {
+	if actor.tickerClient != nil {
+		tokens := make([]uint32, 0, len(actor.stockIndexByToken))
+		for tok := range actor.stockIndexByToken {
 			tokens = append(tokens, tok)
 		}
-		_ = a.tickerClient.Subscribe(tokens)
+		_ = actor.tickerClient.Subscribe(tokens)
 	}
 
 	return nil
 }
 
-func (a *Actor) addStock(token uint32, symbol string, sectorID uint8, tickSize float32) uint16 {
+func (actor *Actor) registerTrackedStock(token uint32, symbol string, sectorID uint8, tickSize float32) uint16 {
 	upper := strings.ToUpper(strings.TrimSpace(symbol))
-	if idx, exists := a.tokenMap[token]; exists {
-		a.symbolMap[upper] = idx
+	if idx, exists := actor.stockIndexByToken[token]; exists {
+		actor.stockIndexBySymbol[upper] = idx
 		return idx
 	}
 
-	nextIdx := uint16(len(a.tokenMap))
+	nextIdx := uint16(len(actor.stockIndexByToken))
 	if int(nextIdx) >= maxTrackedStocks {
 		return 0
 	}
 
-	a.tokenMap[token] = nextIdx
-	a.symbolMap[upper] = nextIdx
-	s := &a.stocks[nextIdx]
+	actor.stockIndexByToken[token] = nextIdx
+	actor.stockIndexBySymbol[upper] = nextIdx
+	s := &actor.stocks[nextIdx]
 	s.InstrumentToken = token
 	s.SetSymbol(symbol)
 	s.SectorID = sectorID
@@ -307,35 +307,35 @@ func (a *Actor) addStock(token uint32, symbol string, sectorID uint8, tickSize f
 	}
 
 	// Initialize bar 0
-	s.SessionBars[0] = OHLCVBar{Timestamp: a.today0915Epoch}
+	s.SessionBars[0] = OHLCVBar{Timestamp: actor.today0915Epoch}
 
-	a.activeIndices = append(a.activeIndices, nextIdx)
+	actor.activeStockIndices = append(actor.activeStockIndices, nextIdx)
 
 	return nextIdx
 }
 
-func (a *Actor) seedBaselinesAsync() {
-	defer a.seedingInProgress.Store(false)
-	if a.histClient == nil {
+func (actor *Actor) seedBaselinesAsynchronously() {
+	defer actor.seedingInProgress.Store(false)
+	if actor.histClient == nil {
 		return
 	}
 
 	var targets []seedTarget
-	if a.isRunning.Load() {
+	if actor.isRunning.Load() {
 		reply := make(chan []seedTarget, 1)
 		select {
-		case a.seedTargetReqChan <- reply:
+		case actor.seedTargetReqChan <- reply:
 			select {
 			case targets = <-reply:
-			case <-a.ctx.Done():
+			case <-actor.ctx.Done():
 				return
 			}
-		case <-a.ctx.Done():
+		case <-actor.ctx.Done():
 			return
 		}
 	} else {
-		for _, idx := range a.activeIndices {
-			s := &a.stocks[idx]
+		for _, idx := range actor.activeStockIndices {
+			s := &actor.stocks[idx]
 			if !s.IsWarm {
 				targets = append(targets, seedTarget{token: s.InstrumentToken, prevClose: s.PrevClose})
 			}
@@ -344,36 +344,36 @@ func (a *Actor) seedBaselinesAsync() {
 
 	for _, t := range targets {
 		select {
-		case <-a.ctx.Done():
+		case <-actor.ctx.Done():
 			return
 		default:
 		}
-		profile, err := a.histClient.SeedStockBaselines(t.token, t.prevClose)
+		profile, err := actor.histClient.SeedStockBaselines(t.token, t.prevClose)
 		if err == nil && profile != nil {
-			if a.isRunning.Load() {
+			if actor.isRunning.Load() {
 				select {
-				case a.baselineSeedChan <- profile:
-				case <-a.ctx.Done():
+				case actor.baselineSeedChan <- profile:
+				case <-actor.ctx.Done():
 					return
 				}
 			} else {
-				a.applyBaselineProfile(profile)
+				actor.applyBaselineProfile(profile)
 			}
 		}
 	}
 	slog.Info("Completed 20-day baseline seeding for active equities", "seeded_count", len(targets))
 }
 
-func (a *Actor) applyBaselineProfile(profile *kite.StockBaselineProfile) {
+func (actor *Actor) applyBaselineProfile(profile *kite.StockBaselineProfile) {
 	if profile == nil {
 		return
 	}
-	idx, exists := a.tokenMap[profile.Token]
+	idx, exists := actor.stockIndexByToken[profile.Token]
 	if !exists || int(idx) >= maxTrackedStocks {
 		return
 	}
-	s := &a.stocks[idx]
-	a.slotBaselines[idx] = profile.Slots
+	s := &actor.stocks[idx]
+	actor.slotBaselines[idx] = profile.Slots
 
 	// Backfill today's completed 5m intraday bars (09:15 AM onwards, including 15m ORH/ORL slots 0,1,2)
 	if len(profile.TodayBars) > 0 {
@@ -392,7 +392,7 @@ func (a *Actor) applyBaselineProfile(profile *kite.StockBaselineProfile) {
 					Low:       tb.Low,
 					Close:     tb.Close,
 					Volume:    tb.Volume,
-					Timestamp: a.today0915Epoch + int64(tb.SlotIdx)*300,
+					Timestamp: actor.today0915Epoch + int64(tb.SlotIdx)*300,
 				}
 			}
 			if tb.SlotIdx > maxSlot {
@@ -444,17 +444,17 @@ func (a *Actor) applyBaselineProfile(profile *kite.StockBaselineProfile) {
 	s.IsWarm = !profile.IsFallback
 }
 
-func (a *Actor) runLoop() {
+func (actor *Actor) runLoop() {
 	var rawFeed <-chan []byte
-	if a.tickerClient != nil {
-		rawFeed = a.tickerClient.SubscribeRaw()
+	if actor.tickerClient != nil {
+		rawFeed = actor.tickerClient.SubscribeRaw()
 	}
 	periodic1s := time.NewTicker(1000 * time.Millisecond)
 	defer periodic1s.Stop()
 
 	for {
 		select {
-		case <-a.ctx.Done():
+		case <-actor.ctx.Done():
 			return
 
 		case rawBytes, ok := <-rawFeed:
@@ -463,16 +463,16 @@ func (a *Actor) runLoop() {
 			}
 			ticks := ParseBinaryFrame(rawBytes)
 			for i := range ticks {
-				a.processTick(&ticks[i])
+				actor.processTick(&ticks[i])
 			}
 
-		case profile := <-a.baselineSeedChan:
-			a.applyBaselineProfile(profile)
+		case profile := <-actor.baselineSeedChan:
+			actor.applyBaselineProfile(profile)
 
-		case reply := <-a.seedTargetReqChan:
-			targets := make([]seedTarget, 0, len(a.activeIndices))
-			for _, idx := range a.activeIndices {
-				s := &a.stocks[idx]
+		case reply := <-actor.seedTargetReqChan:
+			targets := make([]seedTarget, 0, len(actor.activeStockIndices))
+			for _, idx := range actor.activeStockIndices {
+				s := &actor.stocks[idx]
 				// Re-seed if still on synthetic fallback (!s.IsWarm) or if today's 15m ORB bars (slots 0..2) are missing
 				if !s.IsWarm || s.SessionBars[0].Open == 0 {
 					targets = append(targets, seedTarget{
@@ -483,54 +483,54 @@ func (a *Actor) runLoop() {
 			}
 			reply <- targets
 
-		case scannedStocks := <-a.universeSyncChan:
+		case scannedStocks := <-actor.universeSyncChan:
 			var newTokens []uint32
 			for _, st := range scannedStocks {
 				tok := uint32(st.InstrumentToken)
-				_, existed := a.tokenMap[tok]
-				secID, _, _ := screener.ResolveSector(a.db, st.Tradingsymbol)
+				_, existed := actor.stockIndexByToken[tok]
+				secID, _, _ := screener.ResolveSector(actor.db, st.Tradingsymbol)
 				tickSize := float32(st.TickSize)
 				if tickSize <= 0 {
 					tickSize = 0.05
 				}
-				idx := a.addStock(tok, st.Tradingsymbol, secID, tickSize)
-				a.stocks[idx].LotSize = uint32(st.LotSize)
-				if a.stocks[idx].PrevClose <= 0 && st.LastPrice > 0 {
-					a.stocks[idx].PrevClose = st.LastPrice
+				idx := actor.registerTrackedStock(tok, st.Tradingsymbol, secID, tickSize)
+				actor.stocks[idx].LotSize = uint32(st.LotSize)
+				if actor.stocks[idx].PrevClose <= 0 && st.LastPrice > 0 {
+					actor.stocks[idx].PrevClose = st.LastPrice
 				}
 				if st.MISLeverage > 0 {
-					a.stocks[idx].MISLeverage = float32(st.MISLeverage)
-				} else if a.stocks[idx].MISLeverage <= 0 {
-					a.stocks[idx].MISLeverage = 5.0
+					actor.stocks[idx].MISLeverage = float32(st.MISLeverage)
+				} else if actor.stocks[idx].MISLeverage <= 0 {
+					actor.stocks[idx].MISLeverage = 5.0
 				}
-				a.stocks[idx].IsTradeable = true
+				actor.stocks[idx].IsTradeable = true
 				if !existed {
 					newTokens = append(newTokens, tok)
 				}
 			}
-			if len(newTokens) > 0 && a.tickerClient != nil {
-				_ = a.tickerClient.Subscribe(newTokens)
+			if len(newTokens) > 0 && actor.tickerClient != nil {
+				_ = actor.tickerClient.Subscribe(newTokens)
 			}
 
 		case <-periodic1s.C:
-			a.computeAndBroadcastSnapshot()
+			actor.computeAndBroadcastSnapshot()
 
-		case req := <-a.detailReqChan:
-			dto, found := a.getStockDetailInternal(req.symbol)
+		case req := <-actor.detailReqChan:
+			dto, found := actor.getStockDetailInternal(req.symbol)
 			req.reply <- detailResp{dto: dto, found: found}
 
-		case wReq := <-a.workerReqChan:
-			idx, exists := a.tokenMap[wReq.token]
+		case wReq := <-actor.workerReqChan:
+			idx, exists := actor.stockIndexByToken[wReq.token]
 			if !exists && wReq.worker != nil {
-				secID, _, _ := screener.ResolveSector(a.db, wReq.symbol)
-				idx = a.addStock(wReq.token, wReq.symbol, secID, 0.05)
-				a.stocks[idx].IsTradeable = true
-				if a.tickerClient != nil {
-					_ = a.tickerClient.Subscribe([]uint32{wReq.token})
+				secID, _, _ := screener.ResolveSector(actor.db, wReq.symbol)
+				idx = actor.registerTrackedStock(wReq.token, wReq.symbol, secID, 0.05)
+				actor.stocks[idx].IsTradeable = true
+				if actor.tickerClient != nil {
+					_ = actor.tickerClient.Subscribe([]uint32{wReq.token})
 				}
 			}
 			if int(idx) < maxTrackedStocks {
-				a.workers[idx] = wReq.worker
+				actor.positionTickListeners[idx] = wReq.worker
 			}
 			wReq.reply <- idx
 		}

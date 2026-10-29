@@ -20,38 +20,38 @@ func CalculateRoundTripCharges(buyPrice, sellPrice float64, qty int) TaxBreakdow
 }
 
 // CalculatePositionTaxBreakdown computes the exact Zerodha + NSE Cash MIS round-trip charges in ₹,
-// accounting for 2 sell order legs when splitExit (Tranche 1 +1R 50% scale-out + Runner exit) is true.
-func CalculatePositionTaxBreakdown(buyPrice, sellPrice float64, qty int, splitExit bool) TaxBreakdown {
+// accounting for 2 sell order legs when isSplitExit (Tranche 1 +1R 50% scale-out + Runner exit) is true.
+func CalculatePositionTaxBreakdown(buyPrice, sellPrice float64, qty int, isSplitExit bool) TaxBreakdown {
 	if qty <= 0 || buyPrice <= 0 || sellPrice <= 0 {
 		return TaxBreakdown{}
 	}
-	q := float64(qty)
-	buyTurnover := buyPrice * q
-	sellTurnover := sellPrice * q
+	sharesCount := float64(qty)
+	buyTurnover := buyPrice * sharesCount
+	sellTurnover := sellPrice * sharesCount
 	totalTurnover := buyTurnover + sellTurnover
 
-	buyBrok := math.Min(20.0, 0.0003*buyTurnover)
-	var sellBrok float64
-	if splitExit && qty >= 2 {
-		q1 := float64(qty / 2)
-		q2 := float64(qty - (qty / 2))
-		sellBrok = math.Min(20.0, 0.0003*(sellPrice*q1)) + math.Min(20.0, 0.0003*(sellPrice*q2))
+	buyBrokerageFee := math.Min(20.0, 0.0003*buyTurnover)
+	var sellBrokerageFee float64
+	if isSplitExit && qty >= 2 {
+		tranche1Quantity := float64(qty / 2)
+		runnerQuantity := float64(qty - (qty / 2))
+		sellBrokerageFee = math.Min(20.0, 0.0003*(sellPrice*tranche1Quantity)) + math.Min(20.0, 0.0003*(sellPrice*runnerQuantity))
 	} else {
-		sellBrok = math.Min(20.0, 0.0003*sellTurnover)
+		sellBrokerageFee = math.Min(20.0, 0.0003*sellTurnover)
 	}
 
 	stt := math.Round(0.00025 * sellTurnover)
 	exch := math.Round(0.0000297*totalTurnover*100.0) / 100.0
 	sebi := math.Round(0.000001*totalTurnover*100.0) / 100.0
 	stamp := math.Round(0.00003 * buyTurnover)
-	gst := math.Round(0.18*(buyBrok+sellBrok+exch+sebi)*100.0) / 100.0
-	buyBrok = math.Round(buyBrok*100.0) / 100.0
-	sellBrok = math.Round(sellBrok*100.0) / 100.0
-	total := math.Round((buyBrok+sellBrok+stt+exch+sebi+stamp+gst)*100.0) / 100.0
+	gst := math.Round(0.18*(buyBrokerageFee+sellBrokerageFee+exch+sebi)*100.0) / 100.0
+	buyBrokerageFee = math.Round(buyBrokerageFee*100.0) / 100.0
+	sellBrokerageFee = math.Round(sellBrokerageFee*100.0) / 100.0
+	total := math.Round((buyBrokerageFee+sellBrokerageFee+stt+exch+sebi+stamp+gst)*100.0) / 100.0
 
 	return TaxBreakdown{
-		BuyBrokerage:  buyBrok,
-		SellBrokerage: sellBrok,
+		BuyBrokerage:  buyBrokerageFee,
+		SellBrokerage: sellBrokerageFee,
 		STT:           stt,
 		ExchangeTxn:   exch,
 		SEBICharges:   sebi,

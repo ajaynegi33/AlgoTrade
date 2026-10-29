@@ -21,8 +21,8 @@ type GlobalSessionClockDTO struct {
 	Phase              string                 `json:"phase"`                // "OPENING_NOISE_BLACKOUT", "MORNING_DISCOVERY_DRIVE", "MIDDAY_COMPRESSION", "EUROPE_OVERLAP_EXPANSION", "EXIT_ONLY_LOCKOUT", "AUTO_SQUAREOFF_SWEEP", "MARKET_CLOSED"
 	PhaseLabel         string                 `json:"phase_label"`          // Human-readable playbook badge
 	PlaybookNote       string                 `json:"playbook_note"`        // Actionable desk note
-	TapeOverrideActive bool                   `json:"tape_override_active"` // True when strong domestic breadth/RVOL overrides midday lull
-	AllowNewEntries    bool                   `json:"allow_new_entries"`
+	IsTapeOverrideActive bool                 `json:"tape_override_active"` // True when strong domestic breadth/RVOL overrides midday lull
+	IsNewEntryAllowed  bool                   `json:"allow_new_entries"`
 	MinBullishScore    float64                `json:"min_bullish_score"`
 	MinRVOL            float64                `json:"min_rvol"`
 	SizeMultiplier     float64                `json:"size_multiplier"`
@@ -59,7 +59,7 @@ type DailyRiskDTO struct {
 	WinRatePct           float64 `json:"win_rate_pct"`
 	ConsecutiveLosses    int     `json:"consecutive_losses"`
 	PeakNetPnL           float64 `json:"peak_net_pnl"`
-	CircuitBreakerLocked bool    `json:"circuit_breaker_locked"`
+	IsCircuitBreakerLocked bool `json:"circuit_breaker_locked"`
 	LockReason           string  `json:"lock_reason,omitempty"`
 }
 
@@ -89,7 +89,7 @@ type ActivePositionDTO struct {
 	MaxMods          int     `json:"max_mods"` // 25
 	CurrentGear      int     `json:"current_gear"`
 	GearLabel        string  `json:"gear_label"`
-	Tranche1Done     bool    `json:"tranche1_done"`
+	HasTranche1Completed bool `json:"tranche1_done"`
 	UnrealisedPnL    float64 `json:"unrealised_pnl"`
 	RealisedGrossPnL float64 `json:"realised_gross_pnl"`
 	EstimatedCharges float64 `json:"estimated_charges"`
@@ -109,12 +109,12 @@ type CandidateGateDiagnosticDTO struct {
 	BullishScore   float64 `json:"bullish_score"`
 	CompositeRVOL  float64 `json:"composite_rvol"`
 	EV             float64 `json:"ev"`
-	RegimeOK       bool    `json:"regime_ok"`
-	ScoreOK        bool    `json:"score_ok"`
-	RVOLOK         bool    `json:"rvol_ok"`
-	BookQualityOK  bool    `json:"book_quality_ok"`
+	IsRegimeValid  bool    `json:"regime_ok"`
+	IsScoreValid   bool    `json:"score_ok"`
+	IsRVOLValid    bool    `json:"rvol_ok"`
+	IsBookQualityValid bool `json:"book_quality_ok"`
 	PatternMatched string  `json:"pattern_matched"` // "VWAP_PULLBACK_RECLAIM" | "ORB_15M_BREAKOUT" | ""
-	SizingApproved bool    `json:"sizing_approved"`
+	IsSizingApproved bool `json:"sizing_approved"`
 	OverallStatus  string  `json:"overall_status"`  // "READY" | "ACTIVE_OR_COOLDOWN" | "BLOCKED"
 	BlockingReason string  `json:"blocking_reason"` // Exact human-readable gate that held back or approved the stock
 }
@@ -122,8 +122,8 @@ type CandidateGateDiagnosticDTO struct {
 // ExecutionStateDTO is the complete Phase 2 telemetry payload
 type ExecutionStateDTO struct {
 	Mode              string                       `json:"mode"` // "PAPER" | "LIVE"
-	AutoExecute       bool                         `json:"auto_execute"`
-	MacroShockActive  bool                         `json:"macro_shock_active"`
+	IsAutoExecuteEnabled bool                   `json:"auto_execute"`
+	IsMacroShockActive  bool                     `json:"macro_shock_active"`
 	GateStatus        string                       `json:"gate_status"` // e.g. "ARMED_SCANNING", "PAUSED_MANUAL", "LOCKED_BEAR_REGIME", "LOCKED_CIRCUIT_BREAKER"
 	GateReason        string                       `json:"gate_reason"`
 	Capital           CapitalSummaryDTO            `json:"capital"`
@@ -205,7 +205,7 @@ type TradeHistoryItemDTO struct {
 	RCaptureEfficiencyPct float64            `json:"r_capture_efficiency_pct"`
 	ModCount              int                `json:"mod_count"`
 	FinalGear             int                `json:"final_gear"`
-	Tranche1Done          bool               `json:"tranche1_done"`
+	HasTranche1Completed  bool               `json:"tranche1_done"`
 	ExitReason            string             `json:"exit_reason"`
 	Orders                []TradeOrderLegDTO `json:"orders,omitempty"`
 }

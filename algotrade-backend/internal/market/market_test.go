@@ -157,7 +157,7 @@ func TestSectorRestriction(t *testing.T) {
 
 func TestGetStockDetail_ETERNAL(t *testing.T) {
 	actor := NewActor(nil, nil, nil, nil, nil)
-	idx := actor.addStock(1304833, "ETERNAL", 1, 0.05)
+	idx := actor.registerTrackedStock(1304833, "ETERNAL", 1, 0.05)
 	s := &actor.stocks[idx]
 	s.LTP = 316.60
 	s.PrevClose = 304.45
@@ -201,8 +201,8 @@ func TestGetStockDetail_ETERNAL(t *testing.T) {
 
 func TestApplyBaselineProfileBackfillsTodayBarsAndOR15m(t *testing.T) {
 	actor := NewActor(nil, nil, nil, nil, nil)
-	actor.initTodayEpoch()
-	idx := actor.addStock(779521, "SBIN", screener.SectorBank, 0.05)
+	actor.initializeTodayEpoch()
+	idx := actor.registerTrackedStock(779521, "SBIN", screener.SectorBank, 0.05)
 
 	profile := &kite.StockBaselineProfile{
 		Token:      779521,

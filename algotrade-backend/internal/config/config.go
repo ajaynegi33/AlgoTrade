@@ -39,8 +39,8 @@ type Config struct {
 }
 
 // IsKiteConfigured returns true if Kite API key and secret are both provided
-func (c *Config) IsKiteConfigured() bool {
-	return c.KiteAPIKey != "" && c.KiteAPISecret != ""
+func (config *Config) IsKiteConfigured() bool {
+	return config.KiteAPIKey != "" && config.KiteAPISecret != ""
 }
 
 type ConfigValidationError struct {
@@ -48,16 +48,16 @@ type ConfigValidationError struct {
 	InvalidFields map[string]string
 }
 
-func (e *ConfigValidationError) Error() string {
-	var sb strings.Builder
-	sb.WriteString("configuration validation failed:\n")
-	if len(e.MissingFields) > 0 {
-		sb.WriteString(fmt.Sprintf("  - missing required variables: %s\n", strings.Join(e.MissingFields, ", ")))
+func (err *ConfigValidationError) Error() string {
+	var errorStringBuilder strings.Builder
+	errorStringBuilder.WriteString("configuration validation failed:\n")
+	if len(err.MissingFields) > 0 {
+		errorStringBuilder.WriteString(fmt.Sprintf("  - missing required variables: %s\n", strings.Join(err.MissingFields, ", ")))
 	}
-	for k, v := range e.InvalidFields {
-		sb.WriteString(fmt.Sprintf("  - invalid variable %s: %s\n", k, v))
+	for fieldName, fieldError := range err.InvalidFields {
+		errorStringBuilder.WriteString(fmt.Sprintf("  - invalid variable %s: %s\n", fieldName, fieldError))
 	}
-	return sb.String()
+	return errorStringBuilder.String()
 }
 
 // loadEnvFile reads a .env file and sets variables that are not already present in the environment
@@ -129,10 +129,10 @@ func findAndLoadEnvFile(paths ...string) (string, error) {
 		"algotrade-backend/.env",
 	}
 
-	for _, p := range candidates {
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
-			if err := loadEnvFile(p); err == nil {
-				return p, nil
+	for _, candidatePath := range candidates {
+		if fileInfo, err := os.Stat(candidatePath); err == nil && !fileInfo.IsDir() {
+			if err := loadEnvFile(candidatePath); err == nil {
+				return candidatePath, nil
 			}
 		}
 	}
@@ -141,9 +141,9 @@ func findAndLoadEnvFile(paths ...string) (string, error) {
 	cwd, err := os.Getwd()
 	if err == nil {
 		dir := cwd
-		for i := 0; i < 4; i++ {
+		for directoryLevel := 0; directoryLevel < 4; directoryLevel++ {
 			testPath := filepath.Join(dir, ".env")
-			if fi, err := os.Stat(testPath); err == nil && !fi.IsDir() {
+			if fileInfo, err := os.Stat(testPath); err == nil && !fileInfo.IsDir() {
 				if err := loadEnvFile(testPath); err == nil {
 					return testPath, nil
 				}
@@ -170,11 +170,11 @@ func LoadAndValidate(paths ...string) (*Config, error) {
 	invalid := make(map[string]string)
 
 	getRequired := func(key string) string {
-		v := strings.TrimSpace(os.Getenv(key))
-		if v == "" {
+		variableValue := strings.TrimSpace(os.Getenv(key))
+		if variableValue == "" {
 			missing = append(missing, key)
 		}
-		return v
+		return variableValue
 	}
 
 	portStr := getRequired("PORT")
@@ -200,8 +200,8 @@ func LoadAndValidate(paths ...string) (*Config, error) {
 
 	frontendURL := getRequired("FRONTEND_URL")
 	if frontendURL != "" {
-		u, err := url.Parse(frontendURL)
-		if err != nil || u.Scheme == "" || u.Host == "" {
+		parsedURL, err := url.Parse(frontendURL)
+		if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
 			invalid["FRONTEND_URL"] = "must be a valid URL with scheme (e.g. http://localhost:3000)"
 		} else {
 			frontendURL = strings.TrimRight(frontendURL, "/")
@@ -231,7 +231,7 @@ func LoadAndValidate(paths ...string) (*Config, error) {
 		}
 	}
 
-	isProd := strings.EqualFold(envStr, "production")
+	isProduction := strings.EqualFold(envStr, "production")
 
 	dbPath := strings.TrimSpace(os.Getenv("DATABASE_PATH"))
 	if dbPath == "" {
@@ -252,7 +252,7 @@ func LoadAndValidate(paths ...string) (*Config, error) {
 		Env:                envStr,
 		AccessTokenExpiry:  5 * time.Minute,
 		RefreshTokenExpiry: 24 * time.Hour,
-		IsProduction:       isProd,
+		IsProduction:       isProduction,
 		AuthUserEmail:      authUserEmail,
 		AuthUserPassword:   authUserPassword,
 		AuthUserName:       authUserName,

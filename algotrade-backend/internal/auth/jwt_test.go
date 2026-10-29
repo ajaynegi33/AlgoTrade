@@ -18,9 +18,9 @@ type mockUserStore struct {
 	user     *User
 }
 
-func (m *mockUserStore) Authenticate(email, password string) (*User, error) {
-	if email == m.email && password == m.password {
-		return m.user, nil
+func (mockStore *mockUserStore) Authenticate(email, password string) (*User, error) {
+	if email == mockStore.email && password == mockStore.password {
+		return mockStore.user, nil
 	}
 	return nil, errors.New("invalid credentials")
 }

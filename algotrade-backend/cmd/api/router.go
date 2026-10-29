@@ -41,8 +41,8 @@ func buildRouter(
 	requireAuth := auth.AuthMiddleware(cfg.JWTSecret)
 
 	// Public Health Check
-	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
-		response.Success(w, http.StatusOK, map[string]string{
+	mux.HandleFunc("GET /api/health", func(writer http.ResponseWriter, request *http.Request) {
+		response.Success(writer, http.StatusOK, map[string]string{
 			"status":    "healthy",
 			"timestamp": time.Now().UTC().Format(time.RFC3339),
 		})
@@ -90,11 +90,11 @@ func buildRouter(
 	mux.HandleFunc("POST /api/kite/postback", tradeHandler.HandleKitePostback)
 
 	// Market Structure & Order Block Routes (legacy compatibility - returns empty list)
-	mux.HandleFunc("GET /api/structure/orderblock-tree", func(w http.ResponseWriter, r *http.Request) {
-		response.Success(w, http.StatusOK, []any{})
+	mux.HandleFunc("GET /api/structure/orderblock-tree", func(writer http.ResponseWriter, request *http.Request) {
+		response.Success(writer, http.StatusOK, []any{})
 	})
-	mux.HandleFunc("GET /api/prediction/orderblock-tree", func(w http.ResponseWriter, r *http.Request) {
-		response.Success(w, http.StatusOK, []any{})
+	mux.HandleFunc("GET /api/prediction/orderblock-tree", func(writer http.ResponseWriter, request *http.Request) {
+		response.Success(writer, http.StatusOK, []any{})
 	})
 
 	// Wrap Global Middlewares: Recovery -> CORS -> Router

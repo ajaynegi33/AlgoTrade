@@ -14,13 +14,13 @@ type mockStore struct {
 	user *User
 }
 
-func (m *mockStore) Authenticate(email, password string) (*auth.User, error) {
+func (mockStore *mockStore) Authenticate(email, password string) (*auth.User, error) {
 	return nil, nil
 }
 
-func (m *mockStore) GetByID(id string) (*User, error) {
-	if m.user != nil && m.user.ID == id {
-		return m.user, nil
+func (mockStore *mockStore) GetByID(id string) (*User, error) {
+	if mockStore.user != nil && mockStore.user.ID == id {
+		return mockStore.user, nil
 	}
 	return nil, ErrUserNotFound
 }

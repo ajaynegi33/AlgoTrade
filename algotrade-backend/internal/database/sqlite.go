@@ -65,12 +65,12 @@ func Init(dbPath string) (*sql.DB, error) {
 	}
 
 	// Open dedicated concurrent read pool on WAL database
-	roDB, roErr := sql.Open("sqlite", connStr)
-	if roErr == nil {
-		roDB.SetMaxOpenConns(8)
-		roDB.SetMaxIdleConns(4)
-		roDB.SetConnMaxLifetime(time.Hour)
-		readDBInstance = roDB
+	readOnlyDB, readOnlyErr := sql.Open("sqlite", connStr)
+	if readOnlyErr == nil {
+		readOnlyDB.SetMaxOpenConns(8)
+		readOnlyDB.SetMaxIdleConns(4)
+		readOnlyDB.SetConnMaxLifetime(time.Hour)
+		readDBInstance = readOnlyDB
 	} else {
 		readDBInstance = db
 	}

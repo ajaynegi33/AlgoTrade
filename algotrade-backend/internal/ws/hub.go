@@ -30,23 +30,23 @@ var upgrader = websocket.Upgrader{
 
 // ClientHub manages connected browser WebSocket tabs
 type ClientHub struct {
-	clients        map[*websocket.Conn]bool
-	clientCount    atomic.Int64
-	broadcastChan  chan interface{} // Buffered channel size 1 for drop-oldest snapshot
-	registerChan   chan *websocket.Conn
-	unregisterChan chan *websocket.Conn
-	mu             sync.Mutex
-	bufferPool     sync.Pool
-	isClosed       atomic.Bool
+	connectedClients map[*websocket.Conn]bool
+	clientCount      atomic.Int64
+	broadcastChan    chan interface{} // Buffered channel size 1 for drop-oldest snapshot
+	registerChan     chan *websocket.Conn
+	unregisterChan   chan *websocket.Conn
+	mu               sync.Mutex
+	bufferPool       sync.Pool
+	isClosed         atomic.Bool
 }
 
 // NewClientHub creates a new frontend WebSocket hub
 func NewClientHub() *ClientHub {
 	hub := &ClientHub{
-		clients:        make(map[*websocket.Conn]bool),
-		broadcastChan:  make(chan interface{}, 1),
-		registerChan:   make(chan *websocket.Conn),
-		unregisterChan: make(chan *websocket.Conn),
+		connectedClients: make(map[*websocket.Conn]bool),
+		broadcastChan:    make(chan interface{}, 1),
+		registerChan:     make(chan *websocket.Conn),
+		unregisterChan:   make(chan *websocket.Conn),
 		bufferPool: sync.Pool{
 			New: func() interface{} {
 				return bytes.NewBuffer(make([]byte, 0, 32768))
@@ -58,38 +58,38 @@ func NewClientHub() *ClientHub {
 }
 
 // ClientCount returns the number of currently connected browser clients
-func (h *ClientHub) ClientCount() int64 {
-	return h.clientCount.Load()
+func (hub *ClientHub) ClientCount() int64 {
+	return hub.clientCount.Load()
 }
 
 // Broadcast pushes a snapshot to all connected browser clients.
 // Non-blocking: if the hub is busy, older frame is dropped. The caller NEVER blocks.
-func (h *ClientHub) Broadcast(snapshot interface{}) {
-	if h.clientCount.Load() == 0 || h.isClosed.Load() {
+func (hub *ClientHub) Broadcast(snapshot interface{}) {
+	if hub.clientCount.Load() == 0 || hub.isClosed.Load() {
 		return // Zero connected clients: zero allocation, zero CPU work
 	}
 
 	select {
-	case h.broadcastChan <- snapshot:
+	case hub.broadcastChan <- snapshot:
 	default:
 		// Hub busy: drop frame to ensure engine Actor is never blocked
 	}
 }
 
 // ServeWS upgrades the HTTP request to WebSocket and registers the client
-func (h *ClientHub) ServeWS(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+func (hub *ClientHub) ServeWS(writer http.ResponseWriter, request *http.Request) {
+	conn, err := upgrader.Upgrade(writer, request, nil)
 	if err != nil {
 		slog.Warn("Failed to upgrade websocket connection", "error", err)
 		return
 	}
 
-	h.registerChan <- conn
+	hub.registerChan <- conn
 
 	// Reader pump to detect client disconnects & handle pongs
 	go func() {
 		defer func() {
-			h.unregisterChan <- conn
+			hub.unregisterChan <- conn
 			_ = conn.Close()
 		}()
 
@@ -109,63 +109,63 @@ func (h *ClientHub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-func (h *ClientHub) run() {
+func (hub *ClientHub) run() {
 	ticker := time.NewTicker(pingPeriod)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case conn := <-h.registerChan:
-			h.mu.Lock()
-			h.clients[conn] = true
-			h.clientCount.Store(int64(len(h.clients)))
-			h.mu.Unlock()
-			slog.Info("Frontend browser client connected", "active_clients", h.clientCount.Load())
+		case conn := <-hub.registerChan:
+			hub.mu.Lock()
+			hub.connectedClients[conn] = true
+			hub.clientCount.Store(int64(len(hub.connectedClients)))
+			hub.mu.Unlock()
+			slog.Info("Frontend browser client connected", "active_clients", hub.clientCount.Load())
 
-		case conn := <-h.unregisterChan:
-			h.mu.Lock()
-			if _, ok := h.clients[conn]; ok {
-				delete(h.clients, conn)
+		case conn := <-hub.unregisterChan:
+			hub.mu.Lock()
+			if _, ok := hub.connectedClients[conn]; ok {
+				delete(hub.connectedClients, conn)
 				_ = conn.Close()
-				h.clientCount.Store(int64(len(h.clients)))
+				hub.clientCount.Store(int64(len(hub.connectedClients)))
 			}
-			h.mu.Unlock()
-			slog.Info("Frontend browser client disconnected", "active_clients", h.clientCount.Load())
+			hub.mu.Unlock()
+			slog.Info("Frontend browser client disconnected", "active_clients", hub.clientCount.Load())
 
-		case snapshot := <-h.broadcastChan:
-			h.broadcastSnapshot(snapshot)
+		case snapshot := <-hub.broadcastChan:
+			hub.broadcastSnapshot(snapshot)
 
 		case <-ticker.C:
-			h.pingClients()
+			hub.pingClients()
 		}
 	}
 }
 
-func (h *ClientHub) broadcastSnapshot(snapshot interface{}) {
-	h.mu.Lock()
-	if len(h.clients) == 0 {
-		h.mu.Unlock()
+func (hub *ClientHub) broadcastSnapshot(snapshot interface{}) {
+	hub.mu.Lock()
+	if len(hub.connectedClients) == 0 {
+		hub.mu.Unlock()
 		return
 	}
 
 	// Copy client pointers to avoid holding mutex during I/O
-	activeClients := make([]*websocket.Conn, 0, len(h.clients))
-	for conn := range h.clients {
+	activeClients := make([]*websocket.Conn, 0, len(hub.connectedClients))
+	for conn := range hub.connectedClients {
 		activeClients = append(activeClients, conn)
 	}
-	h.mu.Unlock()
+	hub.mu.Unlock()
 
 	// Get reusable buffer from pool
-	buf := h.bufferPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	defer h.bufferPool.Put(buf)
+	buffer := hub.bufferPool.Get().(*bytes.Buffer)
+	buffer.Reset()
+	defer hub.bufferPool.Put(buffer)
 
-	enc := json.NewEncoder(buf)
-	if err := enc.Encode(snapshot); err != nil {
+	jsonEncoder := json.NewEncoder(buffer)
+	if err := jsonEncoder.Encode(snapshot); err != nil {
 		slog.Error("Failed to encode snapshot JSON", "error", err)
 		return
 	}
-	payload := buf.Bytes()
+	payload := buffer.Bytes()
 
 	// Broadcast with strict 250ms deadline per client
 	var deadClients []*websocket.Conn
@@ -178,30 +178,30 @@ func (h *ClientHub) broadcastSnapshot(snapshot interface{}) {
 
 	// Clean up dead or slow clients
 	if len(deadClients) > 0 {
-		h.mu.Lock()
+		hub.mu.Lock()
 		for _, conn := range deadClients {
-			if _, ok := h.clients[conn]; ok {
-				delete(h.clients, conn)
+			if _, ok := hub.connectedClients[conn]; ok {
+				delete(hub.connectedClients, conn)
 				_ = conn.Close()
 			}
 		}
-		h.clientCount.Store(int64(len(h.clients)))
-		h.mu.Unlock()
-		slog.Warn("Evicted slow/disconnected browser clients", "evicted", len(deadClients), "remaining", h.clientCount.Load())
+		hub.clientCount.Store(int64(len(hub.connectedClients)))
+		hub.mu.Unlock()
+		slog.Warn("Evicted slow/disconnected browser clients", "evicted", len(deadClients), "remaining", hub.clientCount.Load())
 	}
 }
 
-func (h *ClientHub) pingClients() {
-	h.mu.Lock()
-	if len(h.clients) == 0 {
-		h.mu.Unlock()
+func (hub *ClientHub) pingClients() {
+	hub.mu.Lock()
+	if len(hub.connectedClients) == 0 {
+		hub.mu.Unlock()
 		return
 	}
-	activeClients := make([]*websocket.Conn, 0, len(h.clients))
-	for conn := range h.clients {
+	activeClients := make([]*websocket.Conn, 0, len(hub.connectedClients))
+	for conn := range hub.connectedClients {
 		activeClients = append(activeClients, conn)
 	}
-	h.mu.Unlock()
+	hub.mu.Unlock()
 
 	var deadClients []*websocket.Conn
 	for _, conn := range activeClients {
@@ -212,14 +212,14 @@ func (h *ClientHub) pingClients() {
 	}
 
 	if len(deadClients) > 0 {
-		h.mu.Lock()
+		hub.mu.Lock()
 		for _, conn := range deadClients {
-			if _, ok := h.clients[conn]; ok {
-				delete(h.clients, conn)
+			if _, ok := hub.connectedClients[conn]; ok {
+				delete(hub.connectedClients, conn)
 				_ = conn.Close()
 			}
 		}
-		h.clientCount.Store(int64(len(h.clients)))
-		h.mu.Unlock()
+		hub.clientCount.Store(int64(len(hub.connectedClients)))
+		hub.mu.Unlock()
 	}
 }

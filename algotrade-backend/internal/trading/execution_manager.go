@@ -69,7 +69,7 @@ func NewManager( db *sql.DB, actor *market.Actor, kiteService *kite.Service, tic
 		tickerClient.SetOrderUpdateHandler(m.reconciler.HandleWebSocketTextFrame)
 		tickerClient.SetReconnectHandler(func() {
 			slog.Info("Kite Ticker reconnected: running immediate REST order reconciliation")
-			_, _ = m.reconciler.SyncOrdersCoalesced(m.ctx, m.activeBroker())
+			_, _ = m.reconciler.SyncOrdersCoalesced(m.ctx, m.getActiveBroker())
 		})
 	}
 
@@ -94,119 +94,119 @@ func NewManager( db *sql.DB, actor *market.Actor, kiteService *kite.Service, tic
 	return m
 }
 
-func (m *Manager) Stop() {
-	m.cancel()
+func (manager *Manager) Stop() {
+	manager.cancel()
 }
 
-func (m *Manager) activeBroker() ExecutionBroker {
-	if m.capitalMgr.GetSettings().Mode == "LIVE" {
-		return m.liveBroker
+func (manager *Manager) getActiveBroker() ExecutionBroker {
+	if manager.capitalMgr.GetSettings().Mode == "LIVE" {
+		return manager.liveBroker
 	}
-	return m.paperBroker
+	return manager.paperBroker
 }
 
-func (m *Manager) handleOrderDelta(positionID, legType string, ev OrderUpdateEvent, deltaFilled int) {
-	m.mu.RLock()
-	w, exists := m.activeWorkers[positionID]
-	m.mu.RUnlock()
-	if exists && w != nil {
-		w.OnOrderDelta(legType, ev, deltaFilled)
+func (manager *Manager) handleOrderDelta(positionID, legType string, orderEvent OrderUpdateEvent, deltaFilled int) {
+	manager.mu.RLock()
+	worker, isWorkerFound := manager.activeWorkers[positionID]
+	manager.mu.RUnlock()
+	if isWorkerFound && worker != nil {
+		worker.OnOrderDelta(legType, orderEvent, deltaFilled)
 	}
 }
 
-func (m *Manager) onWorkerClosed(w *PositionWorker) {
-	dto := w.ToDTO()
+func (manager *Manager) onWorkerClosed(worker *PositionWorker) {
+	dto := worker.ToDTO()
 
-	m.mu.Lock()
-	delete(m.activeWorkers, w.PositionID)
-	if cur, ok := m.symbolToWorker[w.Symbol]; ok && cur.PositionID == w.PositionID {
-		delete(m.symbolToWorker, w.Symbol)
+	manager.mu.Lock()
+	delete(manager.activeWorkers, worker.PositionID)
+	if currentWorker, isSymbolMapped := manager.symbolToWorker[worker.Symbol]; isSymbolMapped && currentWorker.PositionID == worker.PositionID {
+		delete(manager.symbolToWorker, worker.Symbol)
 	}
-	m.symbolCooldowns[w.Symbol] = time.Now().Add(15 * time.Minute)
-	m.closedPositions = append([]market.ActivePositionDTO{dto}, m.closedPositions...)
-	if len(m.closedPositions) > 50 {
-		m.closedPositions = m.closedPositions[:50]
+	manager.symbolCooldowns[worker.Symbol] = time.Now().Add(15 * time.Minute)
+	manager.closedPositions = append([]market.ActivePositionDTO{dto}, manager.closedPositions...)
+	if len(manager.closedPositions) > 50 {
+		manager.closedPositions = manager.closedPositions[:50]
 	}
-	m.mu.Unlock()
+	manager.mu.Unlock()
 
-	if m.actor != nil {
-		m.actor.BindPositionWorker(w.Token, w.Symbol, nil)
+	if manager.actor != nil {
+		manager.actor.BindPositionWorker(worker.Token, worker.Symbol, nil)
 	}
 
 	// Only record in daily risk ledger if at least 1 share was actually traded
-	if w.filledEntryQty.Load() > 0 {
-		m.capitalMgr.RecordClosedTrade(w.Mode, dto.RealisedGrossPnL, dto.EstimatedCharges, dto.NetTotalPnL)
+	if worker.filledEntryQty.Load() > 0 {
+		manager.capitalMgr.RecordClosedTrade(worker.Mode, dto.RealisedGrossPnL, dto.EstimatedCharges, dto.NetTotalPnL)
 	}
-	if w.Mode == "LIVE" {
-		go func() { _ = m.capitalMgr.RefreshLiveMargins() }()
+	if worker.Mode == "LIVE" {
+		go func() { _ = manager.capitalMgr.RefreshLiveMargins() }()
 	}
 }
 
 // OnSecondTick is called every 1.0s inside Actor.computeAndBroadcastSnapshot
-func (m *Manager) OnSecondTick(
+func (manager *Manager) OnSecondTick(
 	stocks *[512]market.StockMetrics,
-	activeIndices []uint16,
-	bullishSorted []uint16,
+	activeStockIndices []uint16,
+	bullishSortedStockIndices []uint16,
 	sectorHealthMap map[uint8]market.SectorHealth,
 	pulse market.MarketPulseDTO,
 ) *market.ExecutionStateDTO {
 	now := time.Now()
 	var topRVOL float64
-	if len(bullishSorted) > 0 {
-		top := &stocks[bullishSorted[0]]
-		topRVOL = max(top.RVOLSession, 0.85*top.RVOLPace5m)
+	if len(bullishSortedStockIndices) > 0 {
+		topRankedStock := &stocks[bullishSortedStockIndices[0]]
+		topRVOL = max(topRankedStock.RVOLSession, 0.85*topRankedStock.RVOLPace5m)
 	}
 
 	sessionClock := EvaluateGlobalSessionClocks(now, pulse.BreadthAboveVWAP, topRVOL)
-	settings := m.capitalMgr.GetSettings()
+	settings := manager.capitalMgr.GetSettings()
 
 	// Collect active position telemetry & blocked margin
-	m.mu.RLock()
-	activeList := make([]*PositionWorker, 0, len(m.activeWorkers))
-	for _, w := range m.activeWorkers {
-		if w.Mode == settings.Mode && !w.isClosed.Load() {
-			activeList = append(activeList, w)
+	manager.mu.RLock()
+	activePositionWorkers := make([]*PositionWorker, 0, len(manager.activeWorkers))
+	for _, worker := range manager.activeWorkers {
+		if worker.Mode == settings.Mode && !worker.isClosed.Load() {
+			activePositionWorkers = append(activePositionWorkers, worker)
 		}
 	}
-	closedCopy := make([]market.ActivePositionDTO, 0, len(m.closedPositions))
-	for _, cp := range m.closedPositions {
-		if cp.Mode == settings.Mode {
-			closedCopy = append(closedCopy, cp)
+	closedPositionDTOs := make([]market.ActivePositionDTO, 0, len(manager.closedPositions))
+	for _, closedPosition := range manager.closedPositions {
+		if closedPosition.Mode == settings.Mode {
+			closedPositionDTOs = append(closedPositionDTOs, closedPosition)
 		}
 	}
-	m.mu.RUnlock()
+	manager.mu.RUnlock()
 
 	// Guarantee deterministic FIFO chronological entry order (oldest entry first)
-	slices.SortFunc(activeList, func(a, b *PositionWorker) int {
-		if a.OpenedAt.Before(b.OpenedAt) {
+	slices.SortFunc(activePositionWorkers, func(workerA, workerB *PositionWorker) int {
+		if workerA.OpenedAt.Before(workerB.OpenedAt) {
 			return -1
 		}
-		if a.OpenedAt.After(b.OpenedAt) {
+		if workerA.OpenedAt.After(workerB.OpenedAt) {
 			return 1
 		}
-		return strings.Compare(a.PositionID, b.PositionID)
+		return strings.Compare(workerA.PositionID, workerB.PositionID)
 	})
 
 	var blockedMargin, unrealisedPnL float64
-	activeDTOs := make([]market.ActivePositionDTO, 0, len(activeList))
-	for _, w := range activeList {
+	activeDTOs := make([]market.ActivePositionDTO, 0, len(activePositionWorkers))
+	for _, worker := range activePositionWorkers {
 		// Mandatory 15:14 IST Auto-Squareoff Sweep
 		if sessionClock.Phase == "AUTO_SQUAREOFF_SWEEP" {
-			w.TriggerEmergencyExit("MANDATORY_1514_IST_MIS_SQUAREOFF")
+			worker.TriggerEmergencyExit("MANDATORY_1514_IST_MIS_SQUAREOFF")
 		}
 
-		dto := w.ToDTO()
+		dto := worker.ToDTO()
 		activeDTOs = append(activeDTOs, dto)
 		unrealisedPnL += dto.UnrealisedPnL
 		qtyForMargin := max(dto.RemainingQty, dto.InitialQty)
-		lev := w.MISLeverage
-		if lev < 1.0 {
-			lev = 5.0
+		misLeverage := worker.MISLeverage
+		if misLeverage < 1.0 {
+			misLeverage = 5.0
 		}
-		blockedMargin += (float64(qtyForMargin) * dto.EntryPrice) / lev
+		blockedMargin += (float64(qtyForMargin) * dto.EntryPrice) / misLeverage
 	}
 
-	capDTO, dailyRiskDTO, drawdownMult := m.capitalMgr.ComputeCapitalSummary(
+	capDTO, dailyRiskDTO, drawdownMult := manager.capitalMgr.ComputeCapitalSummary(
 		blockedMargin,
 		unrealisedPnL,
 		len(activeDTOs),
@@ -217,22 +217,22 @@ func (m *Manager) OnSecondTick(
 	gateReason := "Auto-Execute is paused. Toggle ARMED to enable autonomous signal "
 
 	// Always compute Top 5 Candidate Gate Diagnostics for the Trader Cockpit Inspector
-	candidate, pickStatus, pickReason, candidateGates := PickBestLongCandidate(
+	candidate, pickStatus, pickReason, candidateGateDiagnostics := PickBestLongCandidate(
 		stocks,
-		bullishSorted,
+		bullishSortedStockIndices,
 		sectorHealthMap,
 		sessionClock,
 		capDTO.NetEquity,
 		capDTO.FreeMargin,
 		settings.RiskPerTradePct,
 		drawdownMult,
-		m.isSymbolUnavailable,
+		manager.isSymbolUnavailable,
 	)
 
-	if dailyRiskDTO.CircuitBreakerLocked {
+	if dailyRiskDTO.IsCircuitBreakerLocked {
 		gateStatus = "LOCKED_CIRCUIT_BREAKER"
 		gateReason = dailyRiskDTO.LockReason
-	} else if settings.Mode == "LIVE" && (m.kiteService == nil || !m.kiteService.GetStatus().IsConnected) {
+	} else if settings.Mode == "LIVE" && (manager.kiteService == nil || !manager.kiteService.GetStatus().IsConnected) {
 		gateStatus = "LOCKED_KITE_OFFLINE"
 		gateReason = "Zerodha Kite session is disconnected. Authenticate to trade in LIVE mode."
 	} else if len(activeDTOs) >= settings.MaxOpenPositions {
@@ -242,7 +242,7 @@ func (m *Manager) OnSecondTick(
 		gateStatus = pickStatus
 		gateReason = pickReason
 		if candidate != nil {
-			m.spawnCandidateWorker(*candidate, settings.Mode, &stocks[candidate.StockIdx])
+			manager.spawnCandidateWorker(*candidate, settings.Mode, &stocks[candidate.StockIdx])
 		}
 	} else if candidate != nil {
 		gateStatus = "PAUSED_SIGNAL_READY"
@@ -251,103 +251,103 @@ func (m *Manager) OnSecondTick(
 	}
 
 	stateDTO := &market.ExecutionStateDTO{
-		Mode:              settings.Mode,
-		AutoExecute:       settings.AutoExecute,
-		MacroShockActive:  false,
-		GateStatus:        gateStatus,
+		Mode:                 settings.Mode,
+		IsAutoExecuteEnabled: settings.AutoExecute,
+		IsMacroShockActive:   false,
+		GateStatus:           gateStatus,
 		GateReason:        gateReason,
 		Capital:           capDTO,
 		DailyRisk:         dailyRiskDTO,
 		SessionClock:      sessionClock,
 		ActivePositions:   activeDTOs,
-		ClosedPositions:   closedCopy,
-		TopCandidateGates: candidateGates,
+		ClosedPositions:   closedPositionDTOs,
+		TopCandidateGates: candidateGateDiagnostics,
 	}
 
-	m.lastStateDTO.Store(stateDTO)
+	manager.lastStateDTO.Store(stateDTO)
 	return stateDTO
 }
 
-func (m *Manager) isSymbolUnavailable(symbol string, _ uint32) bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if _, open := m.symbolToWorker[symbol]; open {
+func (manager *Manager) isSymbolUnavailable(symbol string, _ uint32) bool {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	if _, open := manager.symbolToWorker[symbol]; open {
 		return true
 	}
-	if until, ok := m.symbolCooldowns[symbol]; ok && time.Now().Before(until) {
+	if until, ok := manager.symbolCooldowns[symbol]; ok && time.Now().Before(until) {
 		return true
 	}
 	return false
 }
 
-func (m *Manager) spawnCandidateWorker(cand CandidateSignal, mode string, stockPtr *market.StockMetrics) {
-	m.mu.Lock()
-	if _, exists := m.symbolToWorker[cand.Symbol]; exists {
-		m.mu.Unlock()
+func (manager *Manager) spawnCandidateWorker(candidate CandidateSignal, mode string, targetStock *market.StockMetrics) {
+	manager.mu.Lock()
+	if _, exists := manager.symbolToWorker[candidate.Symbol]; exists {
+		manager.mu.Unlock()
 		return
 	}
-	seq := m.posSeq.Add(1)
-	posID := fmt.Sprintf("POS-%s-%d", cand.Symbol, seq)
+	seq := manager.posSeq.Add(1)
+	positionID := fmt.Sprintf("POS-%s-%d", candidate.Symbol, seq)
 	todayStr := market.TodayDateIST()
 
-	var broker ExecutionBroker = m.paperBroker
+	var broker ExecutionBroker = manager.paperBroker
 	if mode == "LIVE" {
-		broker = m.liveBroker
+		broker = manager.liveBroker
 	}
 
-	lev := float64(stockPtr.MISLeverage)
-	if lev < 1.0 {
-		lev = 5.0
+	misLeverage := float64(targetStock.MISLeverage)
+	if misLeverage < 1.0 {
+		misLeverage = 5.0
 	}
 
-	worker := NewPositionWorker(m.ctx, WorkerConfig{
-		PositionID:           posID,
+	worker := NewPositionWorker(manager.ctx, WorkerConfig{
+		PositionID:           positionID,
 		TradingDate:          todayStr,
 		Mode:                 mode,
-		Symbol:               cand.Symbol,
-		Token:                cand.Token,
-		StockIdx:             cand.StockIdx,
-		PatternType:          cand.PatternType,
-		TickSize:             float64(stockPtr.TickSize),
-		MISLeverage:          lev,
-		EntryBarIdx:          stockPtr.CurrentBarIdx,
-		Sizing:               cand.Sizing,
+		Symbol:               candidate.Symbol,
+		Token:                candidate.Token,
+		StockIdx:             candidate.StockIdx,
+		PatternType:          candidate.PatternType,
+		TickSize:             float64(targetStock.TickSize),
+		MISLeverage:          misLeverage,
+		EntryBarIdx:          targetStock.CurrentBarIdx,
+		Sizing:               candidate.Sizing,
 		EntryTimeoutDuration: 5 * time.Minute,
 		Broker:               broker,
-		PaperBroker:          m.paperBroker,
-		Reconciler:           m.reconciler,
-		DB:                   m.db,
-		GetStockPtr:          func() *market.StockMetrics { return stockPtr },
-		OnClosed:             m.onWorkerClosed,
+		PaperBroker:          manager.paperBroker,
+		Reconciler:           manager.reconciler,
+		DB:                   manager.db,
+		GetStockPtr:          func() *market.StockMetrics { return targetStock },
+		OnClosed:             manager.onWorkerClosed,
 	})
 
-	m.activeWorkers[posID] = worker
-	m.symbolToWorker[cand.Symbol] = worker
-	m.lastEntryTime = time.Now()
-	m.mu.Unlock()
+	manager.activeWorkers[positionID] = worker
+	manager.symbolToWorker[candidate.Symbol] = worker
+	manager.lastEntryTime = time.Now()
+	manager.mu.Unlock()
 
-	if m.actor != nil {
-		m.actor.BindPositionWorker(cand.Token, cand.Symbol, worker)
+	if manager.actor != nil {
+		manager.actor.BindPositionWorker(candidate.Token, candidate.Symbol, worker)
 	}
 
 	go func() {
 		if err := worker.Start(); err != nil {
-			slog.Warn("Candidate PositionWorker failed to start", "symbol", cand.Symbol, "error", err)
+			slog.Warn("Candidate PositionWorker failed to start", "symbol", candidate.Symbol, "error", err)
 		} else {
 			slog.Info("Spawned autonomous PositionWorker",
-				"position_id", posID,
+				"position_id", positionID,
 				"mode", mode,
-				"symbol", cand.Symbol,
-				"pattern", cand.PatternType,
-				"qty", cand.Sizing.Quantity,
-				"entry", cand.Sizing.EntryLimitPrice,
-				"stop", cand.Sizing.StopSpec.InitialStop,
+				"symbol", candidate.Symbol,
+				"pattern", candidate.PatternType,
+				"qty", candidate.Sizing.Quantity,
+				"entry", candidate.Sizing.EntryLimitPrice,
+				"stop", candidate.Sizing.StopSpec.InitialStop,
 			)
 		}
 	}()
 }
 
-func (m *Manager) backgroundMaintenanceLoop() {
+func (manager *Manager) backgroundMaintenanceLoop() {
 	reconcileTicker := time.NewTicker(10 * time.Second)
 	defer reconcileTicker.Stop()
 
@@ -356,32 +356,32 @@ func (m *Manager) backgroundMaintenanceLoop() {
 
 	for {
 		select {
-		case <-m.ctx.Done():
+		case <-manager.ctx.Done():
 			return
 
 		case <-reconcileTicker.C:
-			m.mu.RLock()
-			activeCount := len(m.activeWorkers)
-			m.mu.RUnlock()
+			manager.mu.RLock()
+			activeCount := len(manager.activeWorkers)
+			manager.mu.RUnlock()
 			if activeCount > 0 {
-				_, _ = m.reconciler.SyncOrdersCoalesced(m.ctx, m.activeBroker())
+				_, _ = manager.reconciler.SyncOrdersCoalesced(manager.ctx, manager.getActiveBroker())
 			}
 
 		case <-marginTicker.C:
-			if m.capitalMgr.GetSettings().Mode == "LIVE" {
-				_ = m.capitalMgr.RefreshLiveMargins()
+			if manager.capitalMgr.GetSettings().Mode == "LIVE" {
+				_ = manager.capitalMgr.RefreshLiveMargins()
 			}
 		}
 	}
 }
 
-func (m *Manager) loadClosedPositionsFromDB() {
-	if m.db == nil {
+func (manager *Manager) loadClosedPositionsFromDB() {
+	if manager.db == nil {
 		return
 	}
 	todayStr := market.TodayDateIST()
 
-	rows, err := m.db.Query(`
+	rows, err := manager.db.Query(`
 		SELECT position_id, mode, symbol, instrument_token, state, pattern_type,
 		       entry_price, initial_stop, current_stop, shadow_stop, breakeven_stop, base_buffer,
 		       high_water_mark, one_r, initial_qty, mod_count, current_gear, tranche1_done,
@@ -395,20 +395,20 @@ func (m *Manager) loadClosedPositionsFromDB() {
 	}
 	defer rows.Close()
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
 	for rows.Next() {
 		var dto market.ActivePositionDTO
-		var t1Int int
+		var hasTranche1CompletedInt int
 		if err := rows.Scan(
 			&dto.PositionID, &dto.Mode, &dto.Symbol, &dto.InstrumentToken, &dto.State, &dto.PatternType,
 			&dto.EntryPrice, &dto.InitialStop, &dto.CurrentStop, &dto.ShadowStop, &dto.BreakevenStop, &dto.BaseBuffer,
-			&dto.HighWaterMark, &dto.OneR, &dto.InitialQty, &dto.ModCount, &dto.CurrentGear, &t1Int,
+			&dto.HighWaterMark, &dto.OneR, &dto.InitialQty, &dto.ModCount, &dto.CurrentGear, &hasTranche1CompletedInt,
 			&dto.RealisedGrossPnL, &dto.EstimatedCharges, &dto.NetTotalPnL, &dto.ExitReason,
 		); err == nil {
 			dto.MaxMods = MaxExchangeOrderMods
-			dto.Tranche1Done = t1Int != 0
-			m.closedPositions = append(m.closedPositions, dto)
+			dto.HasTranche1Completed = hasTranche1CompletedInt != 0
+			manager.closedPositions = append(manager.closedPositions, dto)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -417,22 +417,22 @@ func (m *Manager) loadClosedPositionsFromDB() {
 }
 
 // rehydrateOpenPositionsFromDB restores any open position workers after an unexpected server restart
-func (m *Manager) rehydrateOpenPositionsFromDB() {
-	if m.db == nil {
+func (manager *Manager) rehydrateOpenPositionsFromDB() {
+	if manager.db == nil {
 		return
 	}
 	todayStr := market.TodayDateIST()
 
-	type rawOpenPos struct {
-		posID, mode, symbol, state, pattern, entryOrd, slOrd, scaleOrd, openedAtStr string
-		token                                                                       uint32
-		entryPx, initStop, curStop, shStop, beStop, baseBuf, hwm, oneR              float64
-		initQty, modCnt, gear, t1Int                                               int
-		filledEntry, filledExit                                                    int64
+	type rawOpenPosition struct {
+		positionID, mode, symbol, state, pattern, entryOrderID, slOrderID, scaleOutOrderID, openedAtStr string
+		token                                                                                               uint32
+		entryPrice, initialStop, currentStop, shadowStop, breakevenStop, baseBuffer, highWaterMark, oneR     float64
+		initialQuantity, modCount, gear, hasTranche1CompletedInt                                            int
+		filledEntryQuantity, filledExitQuantity                                                             int64
 	}
-	var openList []rawOpenPos
+	var rawOpenPositions []rawOpenPosition
 
-	rows, err := m.db.Query(`
+	rows, err := manager.db.Query(`
 		SELECT position_id, mode, symbol, instrument_token, state, pattern_type,
 		       entry_order_id, sl_order_id, scale_out_order_id,
 		       entry_price, initial_stop, current_stop, shadow_stop, breakeven_stop, base_buffer,
@@ -449,16 +449,16 @@ func (m *Manager) rehydrateOpenPositionsFromDB() {
 	defer rows.Close()
 
 	for rows.Next() {
-		var p rawOpenPos
-		if sErr := rows.Scan(
-			&p.posID, &p.mode, &p.symbol, &p.token, &p.state, &p.pattern,
-			&p.entryOrd, &p.slOrd, &p.scaleOrd,
-			&p.entryPx, &p.initStop, &p.curStop, &p.shStop, &p.beStop, &p.baseBuf,
-			&p.hwm, &p.oneR, &p.initQty, &p.filledEntry, &p.filledExit,
-			&p.modCnt, &p.gear, &p.t1Int, &p.openedAtStr,
-		); sErr == nil {
-			if !(p.filledEntry > 0 && p.filledExit >= p.filledEntry) {
-				openList = append(openList, p)
+		var positionRecord rawOpenPosition
+		if scanErr := rows.Scan(
+			&positionRecord.positionID, &positionRecord.mode, &positionRecord.symbol, &positionRecord.token, &positionRecord.state, &positionRecord.pattern,
+			&positionRecord.entryOrderID, &positionRecord.slOrderID, &positionRecord.scaleOutOrderID,
+			&positionRecord.entryPrice, &positionRecord.initialStop, &positionRecord.currentStop, &positionRecord.shadowStop, &positionRecord.breakevenStop, &positionRecord.baseBuffer,
+			&positionRecord.highWaterMark, &positionRecord.oneR, &positionRecord.initialQuantity, &positionRecord.filledEntryQuantity, &positionRecord.filledExitQuantity,
+			&positionRecord.modCount, &positionRecord.gear, &positionRecord.hasTranche1CompletedInt, &positionRecord.openedAtStr,
+		); scanErr == nil {
+			if !(positionRecord.filledEntryQuantity > 0 && positionRecord.filledExitQuantity >= positionRecord.filledEntryQuantity) {
+				rawOpenPositions = append(rawOpenPositions, positionRecord)
 			}
 		}
 	}
@@ -466,132 +466,132 @@ func (m *Manager) rehydrateOpenPositionsFromDB() {
 		slog.Error("Failed iterating open positions for rehydration", "error", err)
 	}
 
-	for _, p := range openList {
-		var broker ExecutionBroker = m.paperBroker
-		if p.mode == "LIVE" {
-			broker = m.liveBroker
+	for _, positionRecord := range rawOpenPositions {
+		var broker ExecutionBroker = manager.paperBroker
+		if positionRecord.mode == "LIVE" {
+			broker = manager.liveBroker
 		}
 
 		sizing := SizingDecision{
-			Approved:        true,
-			Quantity:        p.initQty,
+			IsApproved:      true,
+			Quantity:        positionRecord.initialQuantity,
 			DustFloorQty:    1,
-			EntryLimitPrice: p.entryPx,
-			BreakevenStop:   p.beStop,
+			EntryLimitPrice: positionRecord.entryPrice,
+			BreakevenStop:   positionRecord.breakevenStop,
 			StopSpec: StopAndBufferSpec{
-				BaseBuffer:   p.baseBuf,
-				InitialStop:  p.initStop,
-				OneR:         p.oneR,
-				SignalBarLow: p.initStop,
+				BaseBuffer:   positionRecord.baseBuffer,
+				InitialStop:  positionRecord.initialStop,
+				OneR:         positionRecord.oneR,
+				SignalBarLow: positionRecord.initialStop,
 			},
 		}
 
-		w := NewPositionWorker(m.ctx, WorkerConfig{
-			PositionID:  p.posID,
+		worker := NewPositionWorker(manager.ctx, WorkerConfig{
+			PositionID:  positionRecord.positionID,
 			TradingDate: todayStr,
-			Mode:        p.mode,
-			Symbol:      p.symbol,
-			Token:       p.token,
-			PatternType: p.pattern,
+			Mode:        positionRecord.mode,
+			Symbol:      positionRecord.symbol,
+			Token:       positionRecord.token,
+			PatternType: positionRecord.pattern,
 			TickSize:    0.05,
 			MISLeverage: 5.0,
 			Sizing:      sizing,
 			Broker:      broker,
-			PaperBroker: m.paperBroker,
-			Reconciler:  m.reconciler,
-			DB:          m.db,
-			OnClosed:    m.onWorkerClosed,
+			PaperBroker: manager.paperBroker,
+			Reconciler:  manager.reconciler,
+			DB:          manager.db,
+			OnClosed:    manager.onWorkerClosed,
 		})
 
-		w.state = p.state
-		w.entryOrderID = p.entryOrd
-		w.slOrderID = p.slOrd
-		w.scaleOutOrderID = p.scaleOrd
-		w.entryCostRupees = float64(p.filledEntry) * p.entryPx
-		w.exitProceeds = float64(p.filledExit) * p.entryPx
-		w.filledEntryQty.Store(p.filledEntry)
-		w.filledExitQty.Store(p.filledExit)
-		w.confirmedStopBits.Store(math.Float64bits(p.curStop))
-		w.shadowStopBits.Store(math.Float64bits(p.shStop))
-		w.proposedStopBits.Store(math.Float64bits(p.curStop))
-		w.highWaterMarkBits.Store(math.Float64bits(p.hwm))
-		w.modCount.Store(int32(p.modCnt))
-		w.currentGear.Store(int32(p.gear))
-		w.tranche1Done.Store(p.t1Int != 0)
-		if p.openedAtStr != "" {
-			if t, err := time.Parse(time.RFC3339, p.openedAtStr); err == nil {
-				w.OpenedAt = t
-				w.OpenedAtUnix = t.Unix()
-			} else if t, err := time.Parse("2006-01-02 15:04:05", p.openedAtStr); err == nil {
-				w.OpenedAt = t
-				w.OpenedAtUnix = t.Unix()
+		worker.state = positionRecord.state
+		worker.entryOrderID = positionRecord.entryOrderID
+		worker.slOrderID = positionRecord.slOrderID
+		worker.scaleOutOrderID = positionRecord.scaleOutOrderID
+		worker.entryCostRupees = float64(positionRecord.filledEntryQuantity) * positionRecord.entryPrice
+		worker.exitProceeds = float64(positionRecord.filledExitQuantity) * positionRecord.entryPrice
+		worker.filledEntryQty.Store(positionRecord.filledEntryQuantity)
+		worker.filledExitQty.Store(positionRecord.filledExitQuantity)
+		worker.confirmedStopBits.Store(math.Float64bits(positionRecord.currentStop))
+		worker.shadowStopBits.Store(math.Float64bits(positionRecord.shadowStop))
+		worker.proposedStopBits.Store(math.Float64bits(positionRecord.currentStop))
+		worker.highWaterMarkBits.Store(math.Float64bits(positionRecord.highWaterMark))
+		worker.modCount.Store(int32(positionRecord.modCount))
+		worker.currentGear.Store(int32(positionRecord.gear))
+		worker.hasTranche1Completed.Store(positionRecord.hasTranche1CompletedInt != 0)
+		if positionRecord.openedAtStr != "" {
+			if t, err := time.Parse(time.RFC3339, positionRecord.openedAtStr); err == nil {
+				worker.OpenedAt = t
+				worker.OpenedAtUnix = t.Unix()
+			} else if t, err := time.Parse("2006-01-02 15:04:05", positionRecord.openedAtStr); err == nil {
+				worker.OpenedAt = t
+				worker.OpenedAtUnix = t.Unix()
 			}
 		}
 
-		if p.entryOrd != "" {
-			m.reconciler.SeedOrderFilled(p.entryOrd, int(p.filledEntry))
-			m.reconciler.RegisterOrder(p.entryOrd, p.posID, "ENTRY", p.symbol, "BUY", "LIMIT", p.initQty, p.entryPx, 0, OrderStatusComplete)
+		if positionRecord.entryOrderID != "" {
+			manager.reconciler.SeedOrderFilled(positionRecord.entryOrderID, int(positionRecord.filledEntryQuantity))
+			manager.reconciler.RegisterOrder(positionRecord.entryOrderID, positionRecord.positionID, "ENTRY", positionRecord.symbol, "BUY", "LIMIT", positionRecord.initialQuantity, positionRecord.entryPrice, 0, OrderStatusComplete)
 		}
-		if p.scaleOrd != "" && p.filledExit > 0 {
-			m.reconciler.SeedOrderFilled(p.scaleOrd, int(p.filledExit))
-			m.reconciler.RegisterOrder(p.scaleOrd, p.posID, "SCALE_OUT", p.symbol, "SELL", "LIMIT", int(p.filledExit), p.entryPx, 0, OrderStatusComplete)
+		if positionRecord.scaleOutOrderID != "" && positionRecord.filledExitQuantity > 0 {
+			manager.reconciler.SeedOrderFilled(positionRecord.scaleOutOrderID, int(positionRecord.filledExitQuantity))
+			manager.reconciler.RegisterOrder(positionRecord.scaleOutOrderID, positionRecord.positionID, "SCALE_OUT", positionRecord.symbol, "SELL", "LIMIT", int(positionRecord.filledExitQuantity), positionRecord.entryPrice, 0, OrderStatusComplete)
 		}
-		if p.slOrd != "" {
-			if p.scaleOrd == "" && p.filledExit > 0 {
-				m.reconciler.SeedOrderFilled(p.slOrd, int(p.filledExit))
+		if positionRecord.slOrderID != "" {
+			if positionRecord.scaleOutOrderID == "" && positionRecord.filledExitQuantity > 0 {
+				manager.reconciler.SeedOrderFilled(positionRecord.slOrderID, int(positionRecord.filledExitQuantity))
 			}
-			remQty := int(p.filledEntry - p.filledExit)
-			m.reconciler.RegisterOrder(p.slOrd, p.posID, "SL", p.symbol, "SELL", "SL", remQty, p.curStop, p.curStop, OrderStatusTrigPending)
-			if p.mode == "PAPER" && m.paperBroker != nil && remQty > 0 {
-				limitPx := ComputeSellSLLimitPrice(p.curStop, w.TickSize)
-				m.paperBroker.SeedRestingOrder(p.slOrd, p.symbol, p.token, remQty, p.curStop, limitPx, p.modCnt, OrderStatusTrigPending)
+			remQty := int(positionRecord.filledEntryQuantity - positionRecord.filledExitQuantity)
+			manager.reconciler.RegisterOrder(positionRecord.slOrderID, positionRecord.positionID, "SL", positionRecord.symbol, "SELL", "SL", remQty, positionRecord.currentStop, positionRecord.currentStop, OrderStatusTrigPending)
+			if positionRecord.mode == "PAPER" && manager.paperBroker != nil && remQty > 0 {
+				limitPx := ComputeSellSLLimitPrice(positionRecord.currentStop, worker.TickSize)
+				manager.paperBroker.SeedRestingOrder(positionRecord.slOrderID, positionRecord.symbol, positionRecord.token, remQty, positionRecord.currentStop, limitPx, positionRecord.modCount, OrderStatusTrigPending)
 			}
 		}
 
-		if m.actor != nil {
-			idx := m.actor.BindPositionWorker(p.token, p.symbol, w)
-			w.StockIdx = idx
-			if stockPtr := m.actor.GetStockPtrByIndex(idx); stockPtr != nil {
-				w.getStockPtr = func() *market.StockMetrics { return stockPtr }
+		if manager.actor != nil {
+			idx := manager.actor.BindPositionWorker(positionRecord.token, positionRecord.symbol, worker)
+			worker.StockIdx = idx
+			if stockPtr := manager.actor.GetStockPtrByIndex(idx); stockPtr != nil {
+				worker.getStockPtr = func() *market.StockMetrics { return stockPtr }
 				if stockPtr.TickSize > 0 {
-					w.TickSize = float64(stockPtr.TickSize)
+					worker.TickSize = float64(stockPtr.TickSize)
 				}
 				if stockPtr.MISLeverage >= 1.0 {
-					w.MISLeverage = float64(stockPtr.MISLeverage)
+					worker.MISLeverage = float64(stockPtr.MISLeverage)
 				}
 			}
 		}
 
-		m.mu.Lock()
-		m.activeWorkers[p.posID] = w
-		m.symbolToWorker[p.symbol] = w
-		m.mu.Unlock()
+		manager.mu.Lock()
+		manager.activeWorkers[positionRecord.positionID] = worker
+		manager.symbolToWorker[positionRecord.symbol] = worker
+		manager.mu.Unlock()
 
-		go w.workerLoop()
-		if p.state == StateEmergencyFlatten && w.RemainingQty() > 0 {
-			exitR := w.exitReason
-			if exitR == "" {
-				exitR = "REHYDRATED_EMERGENCY_FLATTEN"
+		go worker.workerLoop()
+		if positionRecord.state == StateEmergencyFlatten && worker.RemainingQty() > 0 {
+			exitReason := worker.exitReason
+			if exitReason == "" {
+				exitReason = "REHYDRATED_EMERGENCY_FLATTEN"
 			}
-			go w.ForceEmergencyExit(exitR)
+			go worker.ForceEmergencyExit(exitReason)
 		}
 		slog.Info("Rehydrated open PositionWorker from SQLite crash recovery",
-			"position_id", p.posID, "symbol", p.symbol, "state", p.state, "remaining_qty", w.RemainingQty())
+			"position_id", positionRecord.positionID, "symbol", positionRecord.symbol, "state", positionRecord.state, "remaining_qty", worker.RemainingQty())
 	}
 }
 
 // GetCurrentState returns the latest 1s ExecutionStateDTO (or builds one on demand)
-func (m *Manager) GetCurrentState() *market.ExecutionStateDTO {
-	if cached := m.lastStateDTO.Load(); cached != nil {
+func (manager *Manager) GetCurrentState() *market.ExecutionStateDTO {
+	if cached := manager.lastStateDTO.Load(); cached != nil {
 		return cached
 	}
 	now := time.Now()
 	clock := EvaluateGlobalSessionClocks(now, 50.0, 1.0)
-	settings := m.capitalMgr.GetSettings()
-	capDTO, riskDTO, _ := m.capitalMgr.ComputeCapitalSummary(0, 0, 0, clock.SizeMultiplier)
+	settings := manager.capitalMgr.GetSettings()
+	capDTO, riskDTO, _ := manager.capitalMgr.ComputeCapitalSummary(0, 0, 0, clock.SizeMultiplier)
 	return &market.ExecutionStateDTO{
 		Mode:            settings.Mode,
-		AutoExecute:     settings.AutoExecute,
+		IsAutoExecuteEnabled: settings.AutoExecute,
 		GateStatus:      "PAUSED_MANUAL",
 		GateReason:      "Ready",
 		Capital:         capDTO,
@@ -603,67 +603,67 @@ func (m *Manager) GetCurrentState() *market.ExecutionStateDTO {
 }
 
 // UpdateSettings updates mode/auto_execute/risk settings safely
-func (m *Manager) UpdateSettings(s ExecutionSettings) (*market.ExecutionStateDTO, error) {
-	m.mu.RLock()
-	openCount := len(m.activeWorkers)
-	m.mu.RUnlock()
+func (manager *Manager) UpdateSettings(settings ExecutionSettings) (*market.ExecutionStateDTO, error) {
+	manager.mu.RLock()
+	openCount := len(manager.activeWorkers)
+	manager.mu.RUnlock()
 
-	if err := m.capitalMgr.UpdateSettings(s, openCount); err != nil {
+	if err := manager.capitalMgr.UpdateSettings(settings, openCount); err != nil {
 		return nil, err
 	}
-	if s.Mode == "LIVE" {
-		_ = m.capitalMgr.RefreshLiveMargins()
+	if settings.Mode == "LIVE" {
+		_ = manager.capitalMgr.RefreshLiveMargins()
 	}
-	return m.GetCurrentState(), nil
+	return manager.GetCurrentState(), nil
 }
 
 // UpdatePaperCapital updates virtual paper capital (₹500 to ₹100Cr) in real time
-func (m *Manager) UpdatePaperCapital(paperCapital float64) (*market.ExecutionStateDTO, error) {
-	if err := m.capitalMgr.UpdatePaperCapital(paperCapital); err != nil {
+func (manager *Manager) UpdatePaperCapital(paperCapital float64) (*market.ExecutionStateDTO, error) {
+	if err := manager.capitalMgr.UpdatePaperCapital(paperCapital); err != nil {
 		return nil, err
 	}
-	return m.GetCurrentState(), nil
+	return manager.GetCurrentState(), nil
 }
 
 // FlattenPosition triggers immediate emergency flatten for one position or all open positions
-func (m *Manager) FlattenPosition(positionID string, flattenAll bool) (int, error) {
-	m.mu.RLock()
-	var targets []*PositionWorker
-	if flattenAll {
-		for _, w := range m.activeWorkers {
-			if !w.isClosed.Load() {
-				targets = append(targets, w)
+func (manager *Manager) FlattenPosition(positionID string, shouldFlattenAll bool) (int, error) {
+	manager.mu.RLock()
+	var targetWorkers []*PositionWorker
+	if shouldFlattenAll {
+		for _, worker := range manager.activeWorkers {
+			if !worker.isClosed.Load() {
+				targetWorkers = append(targetWorkers, worker)
 			}
 		}
-	} else if w, ok := m.activeWorkers[positionID]; ok && !w.isClosed.Load() {
-		targets = append(targets, w)
+	} else if worker, ok := manager.activeWorkers[positionID]; ok && !worker.isClosed.Load() {
+		targetWorkers = append(targetWorkers, worker)
 	}
-	m.mu.RUnlock()
+	manager.mu.RUnlock()
 
-	if len(targets) == 0 && !flattenAll {
+	if len(targetWorkers) == 0 && !shouldFlattenAll {
 		return 0, fmt.Errorf("active position %s not found", positionID)
 	}
 
-	for _, w := range targets {
-		w.ForceEmergencyExit("USER_MANUAL_FLATTEN")
+	for _, worker := range targetWorkers {
+		worker.ForceEmergencyExit("USER_MANUAL_FLATTEN")
 	}
-	return len(targets), nil
+	return len(targetWorkers), nil
 }
 
 // HandleKiteWebhookPostback verifies Zerodha's SHA-256 checksum and routes the order update.
-// Falsification Guard (Bug B1): Never allow an empty checksum to bypass verification in LIVE mode
+// Falsification Guard: Never allow an empty checksum to bypass verification in LIVE mode
 // or when a Kite API secret is configured.
-func (m *Manager) HandleKiteWebhookPostback(ev OrderUpdateEvent) error {
-	requireAuth := m.capitalMgr.GetSettings().Mode == "LIVE" || (m.kiteService != nil && m.kiteService.HasAPISecret())
+func (manager *Manager) HandleKiteWebhookPostback(orderEvent OrderUpdateEvent) error {
+	requireAuth := manager.capitalMgr.GetSettings().Mode == "LIVE" || (manager.kiteService != nil && manager.kiteService.HasAPISecret())
 	if requireAuth {
-		if ev.Checksum == "" || m.kiteService == nil || !m.kiteService.VerifyPostbackChecksum(ev.OrderID, ev.OrderTimestamp, ev.Checksum) {
+		if orderEvent.Checksum == "" || manager.kiteService == nil || !manager.kiteService.VerifyPostbackChecksum(orderEvent.OrderID, orderEvent.OrderTimestamp, orderEvent.Checksum) {
 			slog.Warn("Rejected unauthorized or forged Kite webhook postback",
-				"order_id", ev.OrderID,
-				"has_checksum", ev.Checksum != "",
+				"order_id", orderEvent.OrderID,
+				"has_checksum", orderEvent.Checksum != "",
 			)
-			return fmt.Errorf("invalid or missing postback checksum for order_id=%s", ev.OrderID)
+			return fmt.Errorf("invalid or missing postback checksum for order_id=%s", orderEvent.OrderID)
 		}
 	}
-	m.reconciler.ProcessOrderEvent(ev)
+	manager.reconciler.ProcessOrderEvent(orderEvent)
 	return nil
 }

@@ -882,7 +882,7 @@ export default function TradeHistoryAndTaxPage() {
                 <span className="text-[11px] font-black text-slate-900 uppercase">
                   Strategy Pattern Attribution
                 </span>
-                <span className="text-[10px] text-slate-400">Pattern A vs Pattern B</span>
+                <span className="text-[10px] text-slate-400">VWAP Pullback vs 15m ORB</span>
               </div>
               {summary.by_pattern.length === 0 ? (
                 <p className="text-xs text-slate-400">No closed pattern data yet.</p>
@@ -1114,8 +1114,8 @@ export default function TradeHistoryAndTaxPage() {
               className="px-3 py-1.5 rounded-xl border border-slate-200 bg-slate-50 text-[11px] font-bold text-slate-700 focus:outline-none focus:border-emerald-500 cursor-pointer"
             >
               <option value="ALL">All Patterns</option>
-              <option value="VWAP_PULLBACK">Pattern A: VWAP Pullback</option>
-              <option value="ORB_15M">Pattern B: 15m ORB</option>
+              <option value="VWAP_PULLBACK">VWAP Pullback Reclaim</option>
+              <option value="ORB_15M">15-Minute ORB Breakout</option>
             </select>
           </div>
 

@@ -22,43 +22,43 @@ func NewHandler(actor *Actor, wsHub *ws.ClientHub) *Handler {
 }
 
 // GetStatus returns real-time health and throughput metrics
-func (h *Handler) GetStatus(w http.ResponseWriter, r *http.Request) {
-	tracked, ticks := h.actor.GetStats()
+func (handler *Handler) GetStatus(writer http.ResponseWriter, request *http.Request) {
+	trackedStocksCount, processedTicksCount := handler.actor.GetStats()
 	clientCount := int64(0)
-	if h.wsHub != nil {
-		clientCount = h.wsHub.ClientCount()
+	if handler.wsHub != nil {
+		clientCount = handler.wsHub.ClientCount()
 	}
 
-	response.JSON(w, http.StatusOK, map[string]interface{}{
+	response.JSON(writer, http.StatusOK, map[string]interface{}{
 		"status":          "running",
-		"tracked_stocks":  tracked,
-		"ticks_processed": ticks,
+		"tracked_stocks":  trackedStocksCount,
+		"ticks_processed": processedTicksCount,
 		"active_clients":  clientCount,
 	})
 }
 
 // GetHistoricalStatus returns whether the Kite Historical API subscription is active
-func (h *Handler) GetHistoricalStatus(w http.ResponseWriter, r *http.Request) {
-	isHealthy, errMsg := h.actor.histClient.IsHealthy()
-	response.JSON(w, http.StatusOK, map[string]interface{}{
+func (handler *Handler) GetHistoricalStatus(writer http.ResponseWriter, request *http.Request) {
+	isHealthy, errorMessage := handler.actor.histClient.IsHealthy()
+	response.JSON(writer, http.StatusOK, map[string]interface{}{
 		"is_active": isHealthy,
-		"error":     errMsg,
+		"error":     errorMessage,
 	})
 }
 
 // GetStockDetail handles GET /api/stocks/{symbol}
-func (h *Handler) GetStockDetail(w http.ResponseWriter, r *http.Request) {
-	symbol := r.PathValue("symbol")
+func (handler *Handler) GetStockDetail(writer http.ResponseWriter, request *http.Request) {
+	symbol := request.PathValue("symbol")
 	if symbol == "" {
-		response.Error(w, http.StatusBadRequest, "INVALID_SYMBOL", "Stock symbol is required")
+		response.Error(writer, http.StatusBadRequest, "INVALID_SYMBOL", "Stock symbol is required")
 		return
 	}
 
-	detail, found := h.actor.GetStockDetail(symbol)
-	if !found {
-		response.Error(w, http.StatusNotFound, "STOCK_NOT_FOUND", "Stock not found in tracked F&O universe")
+	stockDetail, isStockFound := handler.actor.GetStockDetail(symbol)
+	if !isStockFound {
+		response.Error(writer, http.StatusNotFound, "STOCK_NOT_FOUND", "Stock not found in tracked F&O universe")
 		return
 	}
 
-	response.Success(w, http.StatusOK, detail)
+	response.Success(writer, http.StatusOK, stockDetail)
 }

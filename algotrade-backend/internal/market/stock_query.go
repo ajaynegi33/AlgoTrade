@@ -9,8 +9,8 @@ import (
 	"github.com/ajaynegi33/AlgoTrade/internal/screener"
 )
 
-func (a *Actor) sqliteBarWriter() {
-	if a.db == nil {
+func (actor *Actor) sqliteBarWriter() {
+	if actor.db == nil {
 		return
 	}
 
@@ -23,7 +23,7 @@ func (a *Actor) sqliteBarWriter() {
 			close = excluded.close,
 			volume = excluded.volume;
 	`
-	stmt, err := a.db.Prepare(insertSQL)
+	stmt, err := actor.db.Prepare(insertSQL)
 	if err != nil {
 		slog.Error("Failed to prepare bar flush statement", "error", err)
 		return
@@ -32,9 +32,9 @@ func (a *Actor) sqliteBarWriter() {
 
 	for {
 		select {
-		case <-a.ctx.Done():
+		case <-actor.ctx.Done():
 			return
-		case item := <-a.barFlushChan:
+		case item := <-actor.barFlushChan:
 			barTime := time.Unix(item.Bar.Timestamp, 0).In(istZone).Format("2006-01-02 15:04:05")
 			_, _ = stmt.Exec(
 				item.Token,
@@ -50,50 +50,50 @@ func (a *Actor) sqliteBarWriter() {
 }
 
 // GetStockDetail returns the full quantitative and order book state for a specific stock (serialized via Actor loop)
-func (a *Actor) GetStockDetail(symbol string) (*StockDetailDTO, bool) {
-	if !a.isRunning.Load() {
-		return a.getStockDetailInternal(symbol)
+func (actor *Actor) GetStockDetail(symbol string) (*StockDetailDTO, bool) {
+	if !actor.isRunning.Load() {
+		return actor.getStockDetailInternal(symbol)
 	}
 	reply := make(chan detailResp, 1)
 	select {
-	case a.detailReqChan <- detailReq{symbol: symbol, reply: reply}:
+	case actor.detailReqChan <- detailReq{symbol: symbol, reply: reply}:
 		select {
 		case res := <-reply:
 			return res.dto, res.found
 		case <-time.After(2 * time.Second):
 			return nil, false
 		}
-	case <-a.ctx.Done():
+	case <-actor.ctx.Done():
 		return nil, false
 	}
 }
 
-func (a *Actor) getStockDetailInternal(symbol string) (*StockDetailDTO, bool) {
+func (actor *Actor) getStockDetailInternal(symbol string) (*StockDetailDTO, bool) {
 	upperSym := strings.ToUpper(strings.TrimSpace(symbol))
 
-	targetIdx, found := a.symbolMap[upperSym]
+	targetIdx, found := actor.stockIndexBySymbol[upperSym]
 
 	// Dynamic fallback: check SQLite scanned_stocks table in case stock was added dynamically
-	if !found && a.db != nil {
+	if !found && actor.db != nil {
 		var token uint32
 		var tradingsymbol string
 		var lotSize int
 		var tickSize, lastPrice float64
-		err := a.db.QueryRow(`
+		err := actor.db.QueryRow(`
 			SELECT instrument_token, tradingsymbol, lot_size, tick_size, last_price
 			FROM scanned_stocks
 			WHERE tradingsymbol = ?
 			ORDER BY scan_date DESC LIMIT 1
 		`, upperSym).Scan(&token, &tradingsymbol, &lotSize, &tickSize, &lastPrice)
 		if err == nil && token > 0 {
-			secID, _, _ := screener.ResolveSector(a.db, tradingsymbol)
+			secID, _, _ := screener.ResolveSector(actor.db, tradingsymbol)
 			if tickSize <= 0 {
 				tickSize = 0.05
 			}
-			targetIdx = a.addStock(token, tradingsymbol, secID, float32(tickSize))
-			a.stocks[targetIdx].LotSize = uint32(lotSize)
-			a.stocks[targetIdx].PrevClose = lastPrice
-			a.stocks[targetIdx].IsTradeable = true
+			targetIdx = actor.registerTrackedStock(token, tradingsymbol, secID, float32(tickSize))
+			actor.stocks[targetIdx].LotSize = uint32(lotSize)
+			actor.stocks[targetIdx].PrevClose = lastPrice
+			actor.stocks[targetIdx].IsTradeable = true
 			found = true
 		}
 	}
@@ -102,43 +102,43 @@ func (a *Actor) getStockDetailInternal(symbol string) (*StockDetailDTO, bool) {
 		return nil, false
 	}
 
-	s := &a.stocks[targetIdx]
+	stockMetrics := &actor.stocks[targetIdx]
 
 	var chg, chgPct float64
-	if s.PrevClose > 0 && s.LTP > 0 {
-		chg = s.LTP - s.PrevClose
-		chgPct = (chg / s.PrevClose) * 100.0
+	if stockMetrics.PrevClose > 0 && stockMetrics.LTP > 0 {
+		chg = stockMetrics.LTP - stockMetrics.PrevClose
+		chgPct = (chg / stockMetrics.PrevClose) * 100.0
 	}
 
 	var vwapDist, vwapDistPct float64
-	if s.ExchangeVWAP > 0 && s.LTP > 0 {
-		vwapDist = s.LTP - s.ExchangeVWAP
-		vwapDistPct = (vwapDist / s.ExchangeVWAP) * 100.0
+	if stockMetrics.ExchangeVWAP > 0 && stockMetrics.LTP > 0 {
+		vwapDist = stockMetrics.LTP - stockMetrics.ExchangeVWAP
+		vwapDistPct = (vwapDist / stockMetrics.ExchangeVWAP) * 100.0
 	}
 
-	orh, orl, hasOR := s.OpeningRange15m()
+	openingRangeHigh, openingRangeLow, isRangeReady := stockMetrics.OpeningRange15m()
 
 	// Compute intraday normalized Close Location Value oscillator [-1.0, +1.0] for StockFalsificationGrid.tsx
 	// (-1 = Day Low, 0 = Midpoint, +1 = Day High; distinct from [0.0, 1.0] single-bar CLV used in math_ranking/gatekeeper)
-	var clv float64
-	if s.High > s.Low {
-		clv = ((s.LTP - s.Low) - (s.High - s.LTP)) / (s.High - s.Low)
+	var closeLocationValueOscillator float64
+	if stockMetrics.High > stockMetrics.Low {
+		closeLocationValueOscillator = ((stockMetrics.LTP - stockMetrics.Low) - (stockMetrics.High - stockMetrics.LTP)) / (stockMetrics.High - stockMetrics.Low)
 	}
 
 	// Format session bars
-	bars := make([]SessionBarDTO, 0, int(s.CurrentBarIdx)+1)
-	for i := 0; i <= int(s.CurrentBarIdx) && i < 75; i++ {
-		b := s.SessionBars[i]
-		if b.Open > 0 || b.Close > 0 || b.Volume > 0 {
-			barTimeStr := time.Unix(b.Timestamp, 0).In(istZone).Format("15:04")
+	bars := make([]SessionBarDTO, 0, int(stockMetrics.CurrentBarIdx)+1)
+	for i := 0; i <= int(stockMetrics.CurrentBarIdx) && i < 75; i++ {
+		bar := stockMetrics.SessionBars[i]
+		if bar.Open > 0 || bar.Close > 0 || bar.Volume > 0 {
+			barTimeStr := time.Unix(bar.Timestamp, 0).In(istZone).Format("15:04")
 			bars = append(bars, SessionBarDTO{
-				Timestamp: b.Timestamp,
+				Timestamp: bar.Timestamp,
 				Time:      barTimeStr,
-				Open:      b.Open,
-				High:      b.High,
-				Low:       b.Low,
-				Close:     b.Close,
-				Volume:    b.Volume,
+				Open:      bar.Open,
+				High:      bar.High,
+				Low:       bar.Low,
+				Close:     bar.Close,
+				Volume:    bar.Volume,
 			})
 		}
 	}
@@ -150,30 +150,30 @@ func (a *Actor) getStockDetailInternal(symbol string) (*StockDetailDTO, bool) {
 	var bidTop2, bidRest3, askTop2, askRest3 uint64
 
 	for lvl := 0; lvl < 5; lvl++ {
-		b := s.BidLevels[lvl]
+		bidLevel := stockMetrics.BidLevels[lvl]
 		bids[lvl] = DepthLevelDTO{
-			Price:  math.Round(float64(b.Price)*100.0) / 100.0,
-			Qty:    b.Qty,
-			Orders: b.Orders,
+			Price:  math.Round(float64(bidLevel.Price)*100.0) / 100.0,
+			Qty:    bidLevel.Qty,
+			Orders: bidLevel.Orders,
 		}
-		totalBidQty += uint64(b.Qty)
+		totalBidQty += uint64(bidLevel.Qty)
 		if lvl < 2 {
-			bidTop2 += uint64(b.Qty)
+			bidTop2 += uint64(bidLevel.Qty)
 		} else {
-			bidRest3 += uint64(b.Qty)
+			bidRest3 += uint64(bidLevel.Qty)
 		}
 
-		aL := s.AskLevels[lvl]
+		askLevel := stockMetrics.AskLevels[lvl]
 		asks[lvl] = DepthLevelDTO{
-			Price:  math.Round(float64(aL.Price)*100.0) / 100.0,
-			Qty:    aL.Qty,
-			Orders: aL.Orders,
+			Price:  math.Round(float64(askLevel.Price)*100.0) / 100.0,
+			Qty:    askLevel.Qty,
+			Orders: askLevel.Orders,
 		}
-		totalAskQty += uint64(aL.Qty)
+		totalAskQty += uint64(askLevel.Qty)
 		if lvl < 2 {
-			askTop2 += uint64(aL.Qty)
+			askTop2 += uint64(askLevel.Qty)
 		} else {
-			askRest3 += uint64(aL.Qty)
+			askRest3 += uint64(askLevel.Qty)
 		}
 	}
 
@@ -181,88 +181,88 @@ func (a *Actor) getStockDetailInternal(symbol string) (*StockDetailDTO, bool) {
 
 	// Decode reasons
 	reasonsList := make([]string, 0)
-	if s.Reasons&ReasonVWAPSweetSpot != 0 {
+	if stockMetrics.Reasons&ReasonVWAPSweetSpot != 0 {
 		reasonsList = append(reasonsList, "VWAP Sweet Spot")
 	}
-	if s.Reasons&ReasonRVOLSurge != 0 {
+	if stockMetrics.Reasons&ReasonRVOLSurge != 0 {
 		reasonsList = append(reasonsList, "High RVOL Volume Surge")
 	}
-	if s.Reasons&ReasonSectorLeader != 0 {
+	if stockMetrics.Reasons&ReasonSectorLeader != 0 {
 		reasonsList = append(reasonsList, "Leading Sector Tailwinds")
 	}
-	if s.Reasons&ReasonOrderBookWall != 0 {
+	if stockMetrics.Reasons&ReasonOrderBookWall != 0 {
 		reasonsList = append(reasonsList, "Anti-Spoof Order Depth Wall")
 	}
-	if s.Reasons&ReasonORBBreakout != 0 {
+	if stockMetrics.Reasons&ReasonORBBreakout != 0 {
 		reasonsList = append(reasonsList, "15m Opening Range Breakout")
 	}
-	if s.Reasons&ReasonHighEV != 0 {
+	if stockMetrics.Reasons&ReasonHighEV != 0 {
 		reasonsList = append(reasonsList, "High Expected Value (EV ≥ +0.40R)")
 	}
-	if s.Reasons&ReasonBearishBreakdown != 0 {
+	if stockMetrics.Reasons&ReasonBearishBreakdown != 0 {
 		reasonsList = append(reasonsList, "Bearish Breakdown Below VWAP")
 	}
-	if s.Reasons&ReasonSectorLagging != 0 {
+	if stockMetrics.Reasons&ReasonSectorLagging != 0 {
 		reasonsList = append(reasonsList, "Lagging Sector Drag")
 	}
-	if s.Reasons&PenaltyWideSpread != 0 {
+	if stockMetrics.Reasons&PenaltyWideSpread != 0 {
 		reasonsList = append(reasonsList, "Penalty: Wide Bid-Ask Spread (>0.10%)")
 	}
-	if s.Reasons&PenaltyBelowPrevClose != 0 {
+	if stockMetrics.Reasons&PenaltyBelowPrevClose != 0 {
 		reasonsList = append(reasonsList, "Penalty: Trading Below Previous Close")
 	}
-	if s.Reasons&PenaltyOverextended != 0 {
+	if stockMetrics.Reasons&PenaltyOverextended != 0 {
 		reasonsList = append(reasonsList, "Penalty: Overextended > 1.5 ATR From VWAP")
 	}
-	if s.Reasons&PenaltyLowVolume != 0 {
+	if stockMetrics.Reasons&PenaltyLowVolume != 0 {
 		reasonsList = append(reasonsList, "Penalty: Dry Volume (<1.0x RVOL)")
 	}
-	if s.Reasons&PenaltyPullbackRedBar != 0 {
+	if stockMetrics.Reasons&PenaltyPullbackRedBar != 0 {
 		reasonsList = append(reasonsList, "Penalty: Red Pullback Bar Unreclaimed")
 	}
-	if s.Reasons&PenaltyExhaustedTrend != 0 {
+	if stockMetrics.Reasons&PenaltyExhaustedTrend != 0 {
 		reasonsList = append(reasonsList, "Penalty: 3rd+ Late-Stage Pullback")
 	}
-	if s.Reasons&PenaltyIcebergSell != 0 {
+	if stockMetrics.Reasons&PenaltyIcebergSell != 0 {
 		reasonsList = append(reasonsList, "Penalty: Iceberg Sell Distribution")
 	}
 
 	dto := &StockDetailDTO{
-		Symbol:            s.SymbolString(),
-		Token:             s.InstrumentToken,
-		Sector:            screener.GetSectorName(s.SectorID),
-		SectorID:          s.SectorID,
-		LotSize:           s.LotSize,
-		TickSize:          s.TickSize,
-		IsTradeable:       s.IsTradeable,
-		LTP:               s.LTP,
-		Open:              s.Open,
-		High:              s.High,
-		Low:               s.Low,
-		PrevClose:         s.PrevClose,
+		Symbol:            stockMetrics.SymbolString(),
+		Token:             stockMetrics.InstrumentToken,
+		Sector:            screener.GetSectorName(stockMetrics.SectorID),
+		SectorID:          stockMetrics.SectorID,
+		LotSize:           stockMetrics.LotSize,
+		TickSize:          stockMetrics.TickSize,
+		IsTradeable:       stockMetrics.IsTradeable,
+		LTP:               stockMetrics.LTP,
+		Open:              stockMetrics.Open,
+		High:              stockMetrics.High,
+		Low:               stockMetrics.Low,
+		PrevClose:         stockMetrics.PrevClose,
 		Change:            chg,
 		ChangePercent:     chgPct,
-		VWAP:              s.ExchangeVWAP,
+		VWAP:              stockMetrics.ExchangeVWAP,
 		VWAPDistance:      vwapDist,
 		VWAPDistancePct:   vwapDistPct,
-		ORH:               orh,
-		ORL:               orl,
-		HasOR15m:          hasOR,
-		CLV:               clv,
-		ATR14:             s.ATR14,
-		ADX14:             s.ADX14,
-		Volume:            s.Volume,
-		RVOLSession:       s.RVOLSession,
-		RVOLPace5m:        s.RVOLPace5m,
-		BullishScore:      s.BullishScore,
-		BearishScore:      s.BearishScore,
-		CompositeRS:       s.CompositeRS,
-		BuyerRatio:        s.SmoothedBuyerRatio,
-		AggressorBuyRatio: s.AggressorBuyRatio,
-		EV:                s.EV,
-		PWin:              s.PWin,
-		StopProxy:         s.StopProxy,
-		TargetProxy:       s.TargetProxy,
+		ORH:               openingRangeHigh,
+		ORL:               openingRangeLow,
+		HasOR15m:          isRangeReady,
+		CLV:               closeLocationValueOscillator,
+		ATR14:             stockMetrics.ATR14,
+		ADX14:             stockMetrics.ADX14,
+		Volume:            stockMetrics.Volume,
+		RVOLSession:       stockMetrics.RVOLSession,
+		RVOLPace5m:        stockMetrics.RVOLPace5m,
+		BullishScore:      stockMetrics.BullishScore,
+		BearishScore:      stockMetrics.BearishScore,
+		CompositeRS:       stockMetrics.CompositeRS,
+		BuyerRatio:        stockMetrics.SmoothedBuyerRatio,
+		AggressorBuyRatio: stockMetrics.AggressorBuyRatio,
+		EV:                stockMetrics.EV,
+		PWin:              stockMetrics.PWin,
+		StopProxy:         stockMetrics.StopProxy,
+		TargetProxy:       stockMetrics.TargetProxy,
 		Reasons:           reasonsList,
 		Bids:              bids,
 		Asks:              asks,
@@ -270,7 +270,7 @@ func (a *Actor) getStockDetailInternal(symbol string) (*StockDetailDTO, bool) {
 		TotalAskQty:       totalAskQty,
 		AntiSpoofRatio:    antiSpoofRatio,
 		Bars:              bars,
-		LastUpdated:       s.LastUpdatedUnix,
+		LastUpdated:       stockMetrics.LastUpdatedUnix,
 	}
 
 	return dto, true

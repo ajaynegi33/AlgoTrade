@@ -36,7 +36,7 @@ flowchart TB
         PBK -->|Gate 0| G0["Macro Flash Shock & Bearish Gate"]
         PBK -->|Gate 1| G1["Top 5 Bullish Outliers Filter"]
         PBK -->|Gate 2| G2["Order Book Microstructure & Ask Wall Filter"]
-        PBK -->|Gate 3| G3["Structural Pattern Recognition: Pattern A (VWAP) / Pattern B (ORB)"]
+        PBK -->|Gate 3| G3["Structural Pattern Recognition: VWAP Pullback Reclaim / 15-Minute ORB Breakout"]
         PBK -->|Gate 4| G4["ComputePositionSize() (4 Institutional Constraints)"]
         PBK -->|Gate 5| G5["Mandatory Net-Profitability Gate at +1.0R (1.5x Taxes)"]
     end
@@ -151,7 +151,7 @@ flowchart TB
    - `09:20–11:30`: **MORNING_DISCOVERY_DRIVE** (`AllowNewEntries = true`, `MinScore = 75`, `MinRVOL = 1.5`, `SizeMultiplier = 1.0`).
    - `11:30–13:30`: **MIDDAY_COMPRESSION** (Europe pre-market):
      - If Breadth $\ge 60\%$ and top RVOL $\ge 2.2$, activates **Domestic Tape Override** (`MinScore = 78`, `SizeMultiplier = 0.90`).
-     - Otherwise, strict compression guard (`MinScore = 82`, `SizeMultiplier = 0.65`, Pattern B locked).
+     - Otherwise, strict compression guard (`MinScore = 82`, `SizeMultiplier = 0.65`, 15-Minute ORB locked).
    - `13:30–14:45`: **EUROPE_OVERLAP_EXPANSION** (`AllowNewEntries = true`, `MinScore = 76`, `SizeMultiplier = 1.0`).
    - `14:45–15:14`: **EXIT_ONLY_LOCKOUT** (`AllowNewEntries = false`).
    - `15:14–15:30`: **AUTO_SQUAREOFF_SWEEP** (`AllowNewEntries = false`). Emergency flattens all open MIS positions.
@@ -164,12 +164,12 @@ flowchart TB
      - Disqualifying bitmask must have no penalties.
      - Ask Wall check: Rejects if $\text{Ask1 Qty} > 4 \times (\text{Bid1 Qty} + \text{Bid2 Qty})$.
    - **Gate 5 (Structural Pattern Recognition)**:
-     - **Pattern A (VWAP Pullback Reclaim)**:
+     - **VWAP Pullback Reclaim Setup**:
        - Price is within $0.05 \dots 0.55\text{ ATR}$ above VWAP.
        - Previous 5m candle low dipped near VWAP ($\le \text{VWAP} + 0.35\text{ATR}$).
        - Current price reclaimed previous bar's midpoint and candle open $+ 2\text{ ticks}$.
        - $\text{CLV} \ge 0.58$, $\text{AggressorBuyRatio} \ge 0.56$, $\text{FastAggressorEMA} \ge 0.55$.
-     - **Pattern B (15-Minute Opening Range Breakout - ORB)**:
+     - **15-Minute Opening Range Breakout (ORB) Setup**:
        - Session bar $\ge 3$ ($\ge 09:30\text{ IST}$).
        - 15m opening range width $\le 1.8\text{ ATR}$.
        - $\text{LTP} > \text{ORH} + 1\text{ tick}$, extension $\le 0.35\text{ ATR}$.
@@ -379,7 +379,7 @@ stateDiagram-v2
 | `internal/engine/actor.go` | `computeAndBroadcastSnapshot()` | `Actor.runLoop` (1s ticker) | Computes breadth, 6-state regime, sector ranks, sorts bullish stocks, invokes execution hook. |
 | `internal/execution/manager.go` | `OnSecondTick()` | `Actor.computeAndBroadcastSnapshot` | Evaluates session clock, checks active positions, triggers candidate picking, handles 15:14 square-off. |
 | `internal/execution/session_clock.go` | `EvaluateGlobalSessionClocks()` | `Manager.OnSecondTick` | Computes DST-aware global clocks and selects 1 of 6 NSE intraday phases. |
-| `internal/execution/session_clock.go` | `PickBestLongCandidate()` | `Manager.OnSecondTick` | Executes Gates 0–5, evaluates Pattern A (VWAP Pullback) & Pattern B (ORB), outputs top candidate. |
+| `internal/execution/session_clock.go` | `PickBestLongCandidate()` | `Manager.OnSecondTick` | Executes Gates 0–5, evaluates VWAP Pullback Reclaim & 15-Minute ORB Breakout, outputs top candidate. |
 | `internal/execution/sizer.go` | `ComputePositionSize()` | `PickBestLongCandidate` | Computes 4 constraints (Risk, Margin, Concentration, Liquidity) and enforces 1.5x tax net profit gate. |
 | `internal/execution/stoploss.go` | `ComputeStopAndBufferSpec()` | `ComputePositionSize` | Calculates non-inverting stop bounds [DeltaMin, DeltaMax], BaseBuffer, and checks No-Chase rule. |
 | `internal/execution/stoploss.go` | `BreakevenTriggerPrice()` | `sizer.go`, `position_worker.go` | Computes exact SL price covering round-trip statutory taxes on entire trade + cushion. |

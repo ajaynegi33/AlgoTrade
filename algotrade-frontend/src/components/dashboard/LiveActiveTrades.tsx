@@ -103,7 +103,7 @@ export const LiveActiveTrades = memo(function LiveActiveTrades({
             No Open Intraday Positions
           </p>
           <p className="text-[11px] text-slate-400 mt-1">
-            When Auto-Execution is ARMED and Stage 0 + Session Clock gates are green, Pattern A (VWAP Pullback) and Pattern B (15m ORB) entries appear here in real time.
+            When Auto-Execution is ARMED and Stage 0 + Session Clock gates are green, VWAP Pullback Reclaim and 15-Minute ORB Breakout entries appear here in real time.
           </p>
         </div>
       ) : (

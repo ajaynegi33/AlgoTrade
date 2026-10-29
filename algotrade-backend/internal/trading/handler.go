@@ -21,174 +21,174 @@ func NewHandler(manager *Manager) *Handler {
 }
 
 // GetState handles GET /api/execution/state
-func (h *Handler) GetState(w http.ResponseWriter, r *http.Request) {
-	if h.manager == nil {
-		response.Error(w, http.StatusServiceUnavailable, "EXECUTION_UNAVAILABLE", "Execution manager is not initialized")
+func (handler *Handler) GetState(writer http.ResponseWriter, request *http.Request) {
+	if handler.manager == nil {
+		response.Error(writer, http.StatusServiceUnavailable, "EXECUTION_UNAVAILABLE", "Execution manager is not initialized")
 		return
 	}
-	response.Success(w, http.StatusOK, h.manager.GetCurrentState())
+	response.Success(writer, http.StatusOK, handler.manager.GetCurrentState())
 }
 
 // GetHistory handles GET /api/execution/history
-func (h *Handler) GetHistory(w http.ResponseWriter, r *http.Request) {
-	if h.manager == nil {
-		response.Error(w, http.StatusServiceUnavailable, "EXECUTION_UNAVAILABLE", "Execution manager is not initialized")
+func (handler *Handler) GetHistory(writer http.ResponseWriter, request *http.Request) {
+	if handler.manager == nil {
+		response.Error(writer, http.StatusServiceUnavailable, "EXECUTION_UNAVAILABLE", "Execution manager is not initialized")
 		return
 	}
-	q := r.URL.Query()
-	mode := q.Get("mode")
-	fromDate := q.Get("from")
-	toDate := q.Get("to")
+	queryParams := request.URL.Query()
+	mode := queryParams.Get("mode")
+	fromDate := queryParams.Get("from")
+	toDate := queryParams.Get("to")
 	limit := 500
-	if lStr := q.Get("limit"); lStr != "" {
-		if parsed, err := strconv.Atoi(lStr); err == nil && parsed > 0 {
+	if limitString := queryParams.Get("limit"); limitString != "" {
+		if parsed, err := strconv.Atoi(limitString); err == nil && parsed > 0 {
 			limit = parsed
 		}
 	}
-	history := h.manager.GetTradeHistory(mode, fromDate, toDate, limit)
-	response.Success(w, http.StatusOK, history)
+	history := handler.manager.GetTradeHistory(mode, fromDate, toDate, limit)
+	response.Success(writer, http.StatusOK, history)
 }
 
 // UpdateSettings handles POST /api/execution/settings
-func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
-	if h.manager == nil {
-		response.Error(w, http.StatusServiceUnavailable, "EXECUTION_UNAVAILABLE", "Execution manager is not initialized")
+func (handler *Handler) UpdateSettings(writer http.ResponseWriter, request *http.Request) {
+	if handler.manager == nil {
+		response.Error(writer, http.StatusServiceUnavailable, "EXECUTION_UNAVAILABLE", "Execution manager is not initialized")
 		return
 	}
 
-	var req struct {
+	var requestBody struct {
 		Mode             *string  `json:"mode"`
 		AutoExecute      *bool    `json:"auto_execute"`
 		PaperCapital     *float64 `json:"paper_capital"`
 		RiskPerTradePct  *float64 `json:"risk_per_trade_pct"`
 		MaxOpenPositions *int     `json:"max_open_positions"`
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 16384))
+	bodyBytes, err := io.ReadAll(io.LimitReader(request.Body, 16384))
 	if err != nil {
-		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Failed to read request body")
+		response.Error(writer, http.StatusBadRequest, "INVALID_BODY", "Failed to read request body")
 		return
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		response.Error(w, http.StatusBadRequest, "INVALID_JSON", "Invalid JSON payload")
+	if err := json.Unmarshal(bodyBytes, &requestBody); err != nil {
+		response.Error(writer, http.StatusBadRequest, "INVALID_JSON", "Invalid JSON payload")
 		return
 	}
 
-	cur := h.manager.capitalMgr.GetSettings()
-	if req.Mode != nil {
-		cur.Mode = *req.Mode
+	currentSettings := handler.manager.capitalMgr.GetSettings()
+	if requestBody.Mode != nil {
+		currentSettings.Mode = *requestBody.Mode
 	}
-	if req.AutoExecute != nil {
-		cur.AutoExecute = *req.AutoExecute
+	if requestBody.AutoExecute != nil {
+		currentSettings.AutoExecute = *requestBody.AutoExecute
 	}
-	if req.PaperCapital != nil {
-		cur.PaperCapital = *req.PaperCapital
+	if requestBody.PaperCapital != nil {
+		currentSettings.PaperCapital = *requestBody.PaperCapital
 	}
-	if req.RiskPerTradePct != nil {
-		cur.RiskPerTradePct = *req.RiskPerTradePct
+	if requestBody.RiskPerTradePct != nil {
+		currentSettings.RiskPerTradePct = *requestBody.RiskPerTradePct
 	}
-	if req.MaxOpenPositions != nil {
-		cur.MaxOpenPositions = *req.MaxOpenPositions
+	if requestBody.MaxOpenPositions != nil {
+		currentSettings.MaxOpenPositions = *requestBody.MaxOpenPositions
 	}
 
-	updatedState, updateErr := h.manager.UpdateSettings(cur)
+	updatedState, updateErr := handler.manager.UpdateSettings(currentSettings)
 	if updateErr != nil {
-		response.Error(w, http.StatusBadRequest, "SETTINGS_UPDATE_REJECTED", updateErr.Error())
+		response.Error(writer, http.StatusBadRequest, "SETTINGS_UPDATE_REJECTED", updateErr.Error())
 		return
 	}
 
-	response.Success(w, http.StatusOK, updatedState)
+	response.Success(writer, http.StatusOK, updatedState)
 }
 
 // UpdatePaperCapital handles POST /api/execution/paper-capital
-func (h *Handler) UpdatePaperCapital(w http.ResponseWriter, r *http.Request) {
-	if h.manager == nil {
-		response.Error(w, http.StatusServiceUnavailable, "EXECUTION_UNAVAILABLE", "Execution manager is not initialized")
+func (handler *Handler) UpdatePaperCapital(writer http.ResponseWriter, request *http.Request) {
+	if handler.manager == nil {
+		response.Error(writer, http.StatusServiceUnavailable, "EXECUTION_UNAVAILABLE", "Execution manager is not initialized")
 		return
 	}
 
-	var req struct {
+	var requestBody struct {
 		PaperCapital float64 `json:"paper_capital"`
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 8192))
+	bodyBytes, err := io.ReadAll(io.LimitReader(request.Body, 8192))
 	if err != nil {
-		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Failed to read request body")
+		response.Error(writer, http.StatusBadRequest, "INVALID_BODY", "Failed to read request body")
 		return
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		response.Error(w, http.StatusBadRequest, "INVALID_JSON", "Invalid JSON payload")
+	if err := json.Unmarshal(bodyBytes, &requestBody); err != nil {
+		response.Error(writer, http.StatusBadRequest, "INVALID_JSON", "Invalid JSON payload")
 		return
 	}
 
-	updatedState, updateErr := h.manager.UpdatePaperCapital(req.PaperCapital)
+	updatedState, updateErr := handler.manager.UpdatePaperCapital(requestBody.PaperCapital)
 	if updateErr != nil {
-		response.Error(w, http.StatusBadRequest, "INVALID_CAPITAL", updateErr.Error())
+		response.Error(writer, http.StatusBadRequest, "INVALID_CAPITAL", updateErr.Error())
 		return
 	}
 
-	response.Success(w, http.StatusOK, updatedState)
+	response.Success(writer, http.StatusOK, updatedState)
 }
 
 // Flatten handles POST /api/execution/flatten
-func (h *Handler) Flatten(w http.ResponseWriter, r *http.Request) {
-	if h.manager == nil {
-		response.Error(w, http.StatusServiceUnavailable, "EXECUTION_UNAVAILABLE", "Execution manager is not initialized")
+func (handler *Handler) Flatten(writer http.ResponseWriter, request *http.Request) {
+	if handler.manager == nil {
+		response.Error(writer, http.StatusServiceUnavailable, "EXECUTION_UNAVAILABLE", "Execution manager is not initialized")
 		return
 	}
 
-	var req struct {
+	var requestBody struct {
 		PositionID string `json:"position_id"`
 		All        bool   `json:"all"`
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 8192))
+	bodyBytes, err := io.ReadAll(io.LimitReader(request.Body, 8192))
 	if err != nil {
-		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Failed to read request body")
+		response.Error(writer, http.StatusBadRequest, "INVALID_BODY", "Failed to read request body")
 		return
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		response.Error(w, http.StatusBadRequest, "INVALID_JSON", "Invalid JSON payload")
-		return
-	}
-
-	if !req.All && req.PositionID == "" {
-		response.Error(w, http.StatusBadRequest, "MISSING_TARGET", "Provide position_id or set all=true")
+	if err := json.Unmarshal(bodyBytes, &requestBody); err != nil {
+		response.Error(writer, http.StatusBadRequest, "INVALID_JSON", "Invalid JSON payload")
 		return
 	}
 
-	flattenedCount, flatErr := h.manager.FlattenPosition(req.PositionID, req.All)
+	if !requestBody.All && requestBody.PositionID == "" {
+		response.Error(writer, http.StatusBadRequest, "MISSING_TARGET", "Provide position_id or set all=true")
+		return
+	}
+
+	flattenedCount, flatErr := handler.manager.FlattenPosition(requestBody.PositionID, requestBody.All)
 	if flatErr != nil {
-		response.Error(w, http.StatusNotFound, "FLATTEN_ERROR", flatErr.Error())
+		response.Error(writer, http.StatusNotFound, "FLATTEN_ERROR", flatErr.Error())
 		return
 	}
 
-	response.Success(w, http.StatusOK, map[string]interface{}{
+	response.Success(writer, http.StatusOK, map[string]interface{}{
 		"flattened_count": flattenedCount,
-		"state":           h.manager.GetCurrentState(),
+		"state":           handler.manager.GetCurrentState(),
 	})
 }
 
 // HandleKitePostback handles POST /api/kite/postback (Zerodha Order Webhook)
-func (h *Handler) HandleKitePostback(w http.ResponseWriter, r *http.Request) {
-	if h.manager == nil {
-		response.Error(w, http.StatusServiceUnavailable, "EXECUTION_UNAVAILABLE", "Execution manager is not initialized")
+func (handler *Handler) HandleKitePostback(writer http.ResponseWriter, request *http.Request) {
+	if handler.manager == nil {
+		response.Error(writer, http.StatusServiceUnavailable, "EXECUTION_UNAVAILABLE", "Execution manager is not initialized")
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 65536))
+	bodyBytes, err := io.ReadAll(io.LimitReader(request.Body, 65536))
 	if err != nil {
-		response.Error(w, http.StatusBadRequest, "INVALID_BODY", "Failed to read webhook body")
+		response.Error(writer, http.StatusBadRequest, "INVALID_BODY", "Failed to read webhook body")
 		return
 	}
 
-	var ev OrderUpdateEvent
-	if err := json.Unmarshal(body, &ev); err != nil {
-		response.Error(w, http.StatusBadRequest, "INVALID_JSON", "Invalid webhook payload")
+	var orderEvent OrderUpdateEvent
+	if err := json.Unmarshal(bodyBytes, &orderEvent); err != nil {
+		response.Error(writer, http.StatusBadRequest, "INVALID_JSON", "Invalid webhook payload")
 		return
 	}
 
-	if err := h.manager.HandleKiteWebhookPostback(ev); err != nil {
-		response.Error(w, http.StatusForbidden, "CHECKSUM_FAILED", err.Error())
+	if err := handler.manager.HandleKiteWebhookPostback(orderEvent); err != nil {
+		response.Error(writer, http.StatusForbidden, "CHECKSUM_FAILED", err.Error())
 		return
 	}
 
-	response.Success(w, http.StatusOK, map[string]string{"status": "ok"})
+	response.Success(writer, http.StatusOK, map[string]string{"status": "ok"})
 }

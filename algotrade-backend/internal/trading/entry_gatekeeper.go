@@ -19,14 +19,21 @@ type CandidateSignal struct {
 	Sizing       SizingDecision
 }
 
-// PickBestLongCandidate runs Stage 0 Regime Filtering, Pattern A & B Structural Detection, and Pre-Trade Gatekeeping,
+// PickBestLongCandidate runs Stage 0 Regime Filtering, Strategy Setup Structural Detection, and Pre-Trade Gatekeeping,
 // while also producing the Top 5 CandidateGateDiagnosticDTO telemetry array for the Trader Cockpit UI.
-func PickBestLongCandidate( stocks *[512]market.StockMetrics, bullishSorted []uint16, sectorHealthMap map[uint8]market.SectorHealth, sessionClock market.GlobalSessionClockDTO, netEquity, freeMargin, riskPct, drawdownMult float64, isSymbolUnavailable func(symbol string, token uint32) bool ) (*CandidateSignal, string, string, []market.CandidateGateDiagnosticDTO) {
-	regimeOK := true
+func PickBestLongCandidate(
+	stocks *[512]market.StockMetrics,
+	bullishSortedStockIndices []uint16,
+	sectorHealthMap map[uint8]market.SectorHealth,
+	sessionClock market.GlobalSessionClockDTO,
+	netEquity, freeMargin, riskPct, drawdownMult float64,
+	isSymbolUnavailable func(symbol string, token uint32) bool,
+) (*CandidateSignal, string, string, []market.CandidateGateDiagnosticDTO) {
+	isRegimeValid := true
 	var regimeLockStatus, regimeLockReason string
 
-	if !sessionClock.AllowNewEntries {
-		regimeOK = false
+	if !sessionClock.IsNewEntryAllowed {
+		isRegimeValid = false
 		regimeLockStatus = "LOCKED_SESSION_WINDOW"
 		regimeLockReason = sessionClock.PlaybookNote
 	}
@@ -34,58 +41,58 @@ func PickBestLongCandidate( stocks *[512]market.StockMetrics, bullishSorted []ui
 	minScore := sessionClock.MinBullishScore
 	minRVOL := sessionClock.MinRVOL
 	sizeMult := sessionClock.SizeMultiplier
-	allowPatternB := true
+	isOpeningRangeBreakoutAllowed := true
 
-	if sessionClock.Phase == "MIDDAY_COMPRESSION" && !sessionClock.TapeOverrideActive {
-		allowPatternB = false
+	if sessionClock.Phase == "MIDDAY_COMPRESSION" && !sessionClock.IsTapeOverrideActive {
+		isOpeningRangeBreakoutAllowed = false
 	}
 
-	maxScan := min(5, len(bullishSorted))
-	diagnostics := make([]market.CandidateGateDiagnosticDTO, 0, maxScan)
+	maxScan := min(5, len(bullishSortedStockIndices))
+	candidateDiagnostics := make([]market.CandidateGateDiagnosticDTO, 0, maxScan)
 	var winningSignal *CandidateSignal
 
 	// Scan Top 5 Ranked Bullish Outliers
-	for rk := 0; rk < maxScan; rk++ {
-		idx := bullishSorted[rk]
-		s := &stocks[idx]
-		sym := s.SymbolString()
-		compRVOL := math.Max(s.RVOLSession, 0.85*s.RVOLPace5m)
+	for rankIndex := 0; rankIndex < maxScan; rankIndex++ {
+		stockIndex := bullishSortedStockIndices[rankIndex]
+		stock := &stocks[stockIndex]
+		symbol := stock.SymbolString()
+		compositeRVOL := math.Max(stock.RVOLSession, 0.85*stock.RVOLPace5m)
 
-		diag := market.CandidateGateDiagnosticDTO{
-			Rank:          rk + 1,
-			Symbol:        sym,
-			Sector:        screener.GetSectorName(s.SectorID),
-			LTP:           s.LTP,
-			BullishScore:  s.BullishScore,
-			CompositeRVOL: compRVOL,
-			EV:            s.EV,
-			RegimeOK:      regimeOK,
+		candidateDiagnostic := market.CandidateGateDiagnosticDTO{
+			Rank:          rankIndex + 1,
+			Symbol:        symbol,
+			Sector:        screener.GetSectorName(stock.SectorID),
+			LTP:           stock.LTP,
+			BullishScore:  stock.BullishScore,
+			CompositeRVOL: compositeRVOL,
+			EV:            stock.EV,
+			IsRegimeValid: isRegimeValid,
 			OverallStatus: "BLOCKED",
 		}
 
-		if !s.IsTradeable || !s.IsWarm || s.LTP <= 0 || s.ExchangeVWAP <= 0 || s.CurrentBarIdx < 1 {
-			diag.BlockingReason = "Warming up 5m bars / VWAP feed"
-			diagnostics = append(diagnostics, diag)
+		if !stock.IsTradeable || !stock.IsWarm || stock.LTP <= 0 || stock.ExchangeVWAP <= 0 || stock.CurrentBarIdx < 1 {
+			candidateDiagnostic.BlockingReason = "Warming up 5m bars / VWAP feed"
+			candidateDiagnostics = append(candidateDiagnostics, candidateDiagnostic)
 			continue
 		}
-		if isSymbolUnavailable != nil && isSymbolUnavailable(sym, s.InstrumentToken) {
-			diag.OverallStatus = "ACTIVE_OR_COOLDOWN"
-			diag.BlockingReason = "Position already active or in 15m post-exit cooldown"
-			diagnostics = append(diagnostics, diag)
+		if isSymbolUnavailable != nil && isSymbolUnavailable(symbol, stock.InstrumentToken) {
+			candidateDiagnostic.OverallStatus = "ACTIVE_OR_COOLDOWN"
+			candidateDiagnostic.BlockingReason = "Position already active or in 15m post-exit cooldown"
+			candidateDiagnostics = append(candidateDiagnostics, candidateDiagnostic)
 			continue
 		}
 
 		// Sector-Level Circuit Breaker: If this specific sector is restricted, block this stock ONLY!
-		if secHealth, ok := sectorHealthMap[s.SectorID]; ok && secHealth.IsRestricted {
-			diag.RegimeOK = false
-			diag.OverallStatus = "BLOCKED"
-			diag.BlockingReason = fmt.Sprintf("Sector (%s) is RESTRICTED: %s", diag.Sector, secHealth.RestrictionReason)
-			diagnostics = append(diagnostics, diag)
+		if secHealth, ok := sectorHealthMap[stock.SectorID]; ok && secHealth.IsRestricted {
+			candidateDiagnostic.IsRegimeValid = false
+			candidateDiagnostic.OverallStatus = "BLOCKED"
+			candidateDiagnostic.BlockingReason = fmt.Sprintf("Sector (%s) is RESTRICTED: %s", candidateDiagnostic.Sector, secHealth.RestrictionReason)
+			candidateDiagnostics = append(candidateDiagnostics, candidateDiagnostic)
 			continue
 		}
 
-		diag.ScoreOK = s.BullishScore >= minScore && s.EV >= 0.25
-		diag.RVOLOK = compRVOL >= minRVOL
+		candidateDiagnostic.IsScoreValid = stock.BullishScore >= minScore && stock.EV >= 0.25
+		candidateDiagnostic.IsRVOLValid = compositeRVOL >= minRVOL
 
 		// Disqualifying Penalty Bitmask & Toxic Ask Wall Check
 		disqualifyingMask := market.PenaltyWideSpread |
@@ -93,122 +100,122 @@ func PickBestLongCandidate( stocks *[512]market.StockMetrics, bullishSorted []ui
 			market.PenaltyExhaustedTrend |
 			market.PenaltyIcebergSell |
 			market.PenaltyPullbackRedBar
-		hasPenalty := (s.Reasons & disqualifyingMask) != 0
-		top2Bid := uint64(s.BidLevels[0].Qty) + uint64(s.BidLevels[1].Qty)
-		hasAskWall := top2Bid == 0 || uint64(s.AskLevels[0].Qty) > 4*top2Bid
-		diag.BookQualityOK = !hasPenalty && !hasAskWall
+		hasPenalty := (stock.Reasons & disqualifyingMask) != 0
+		top2Bid := uint64(stock.BidLevels[0].Qty) + uint64(stock.BidLevels[1].Qty)
+		hasAskWall := top2Bid == 0 || uint64(stock.AskLevels[0].Qty) > 4*top2Bid
+		candidateDiagnostic.IsBookQualityValid = !hasPenalty && !hasAskWall
 
-		atrSafe := math.Max(s.ATR14, s.LTP*0.0025)
-		tickSize := float64(s.TickSize)
+		atrSafe := math.Max(stock.ATR14, stock.LTP*0.0025)
+		tickSize := float64(stock.TickSize)
 		if tickSize <= 0 {
 			tickSize = 0.05
 		}
 
-		currBar := s.SessionBars[s.CurrentBarIdx]
-		prevBar := s.SessionBars[s.CurrentBarIdx-1]
-		var clv float64 = 0.50
-		if currBar.High > currBar.Low {
-			clv = (s.LTP - currBar.Low) / (currBar.High - currBar.Low)
+		currentBar := stock.SessionBars[stock.CurrentBarIdx]
+		previousBar := stock.SessionBars[stock.CurrentBarIdx-1]
+		var closeLocationValue float64 = 0.50
+		if currentBar.High > currentBar.Low {
+			closeLocationValue = (stock.LTP - currentBar.Low) / (currentBar.High - currentBar.Low)
 		}
 
 		var matchedPattern string
 		var signalBarLow float64
 
-		// Pattern A: Institutional VWAP Pullback & Midpoint Reclaim (Aligned with CalculateBullishScore sVWAP)
-		xVWAP := (s.LTP - s.ExchangeVWAP) / atrSafe
-		prevMid := (prevBar.Open + prevBar.Close) / 2.0
-		if xVWAP >= 0.05 && xVWAP <= 0.55 &&
-			prevBar.Low > 0 &&
-			prevBar.Low <= s.ExchangeVWAP+0.35*atrSafe &&
-			prevBar.Low >= s.ExchangeVWAP-0.15*atrSafe &&
-			s.LTP > math.Max(currBar.Open+2.0*tickSize, prevMid) &&
-			clv >= 0.58 &&
-			s.AggressorBuyRatio >= 0.56 &&
-			s.FastAggressorEMA >= 0.55 &&
-			s.SmoothedBuyerRatio >= 0.55 {
+		// Strategy Setup 1: VWAP Pullback Reclaim (Aligned with CalculateBullishScore sVWAP)
+		distanceToVWAPInATR := (stock.LTP - stock.ExchangeVWAP) / atrSafe
+		previousBarMidpoint := (previousBar.Open + previousBar.Close) / 2.0
+		if distanceToVWAPInATR >= 0.05 && distanceToVWAPInATR <= 0.55 &&
+			previousBar.Low > 0 &&
+			previousBar.Low <= stock.ExchangeVWAP+0.35*atrSafe &&
+			previousBar.Low >= stock.ExchangeVWAP-0.15*atrSafe &&
+			stock.LTP > math.Max(currentBar.Open+2.0*tickSize, previousBarMidpoint) &&
+			closeLocationValue >= 0.58 &&
+			stock.AggressorBuyRatio >= 0.56 &&
+			stock.FastAggressorEMA >= 0.55 &&
+			stock.SmoothedBuyerRatio >= 0.55 {
 			matchedPattern = PatternVWAPPullbackReclaim
-			signalBarLow = math.Min(prevBar.Low, currBar.Low)
+			signalBarLow = math.Min(previousBar.Low, currentBar.Low)
 		}
 
-		// Pattern B: 15-Minute Opening Range Breakout (ORB)
-		if matchedPattern == "" && allowPatternB && s.CurrentBarIdx >= 3 {
-			orh, orl, orbReady := s.OpeningRange15m()
-			if orbReady && (orh-orl) <= 1.8*atrSafe &&
-				s.LTP > orh+tickSize &&
-				(s.LTP-orh) <= 0.35*atrSafe &&
-				compRVOL >= 1.8 &&
-				clv >= 0.65 &&
-				s.AggressorBuyRatio >= 0.60 &&
-				s.FastAggressorEMA >= 0.58 &&
-				s.SmoothedBuyerRatio >= 0.58 {
+		// Strategy Setup 2: 15-Minute Opening Range Breakout (ORB 15M)
+		if matchedPattern == "" && isOpeningRangeBreakoutAllowed && stock.CurrentBarIdx >= 3 {
+			openingRangeHigh, openingRangeLow, isORBReady := stock.OpeningRange15m()
+			if isORBReady && (openingRangeHigh-openingRangeLow) <= 1.8*atrSafe &&
+				stock.LTP > openingRangeHigh+tickSize &&
+				(stock.LTP-openingRangeHigh) <= 0.35*atrSafe &&
+				compositeRVOL >= 1.8 &&
+				closeLocationValue >= 0.65 &&
+				stock.AggressorBuyRatio >= 0.60 &&
+				stock.FastAggressorEMA >= 0.58 &&
+				stock.SmoothedBuyerRatio >= 0.58 {
 				matchedPattern = PatternORB15MBreakout
-				signalBarLow = math.Max(currBar.Low, orh-0.85*atrSafe)
+				signalBarLow = math.Max(currentBar.Low, openingRangeHigh-0.85*atrSafe)
 			}
 		}
-		diag.PatternMatched = matchedPattern
+		candidateDiagnostic.PatternMatched = matchedPattern
 
-		if !regimeOK {
-			diag.BlockingReason = regimeLockReason
-			diagnostics = append(diagnostics, diag)
+		if !isRegimeValid {
+			candidateDiagnostic.BlockingReason = regimeLockReason
+			candidateDiagnostics = append(candidateDiagnostics, candidateDiagnostic)
 			continue
 		}
-		if !diag.ScoreOK {
-			diag.BlockingReason = fmt.Sprintf("Score %.1f < %.0f or EV %.2fR < 0.25R", s.BullishScore, minScore, s.EV)
-			diagnostics = append(diagnostics, diag)
+		if !candidateDiagnostic.IsScoreValid {
+			candidateDiagnostic.BlockingReason = fmt.Sprintf("Score %.1f < %.0f or EV %.2fR < 0.25R", stock.BullishScore, minScore, stock.EV)
+			candidateDiagnostics = append(candidateDiagnostics, candidateDiagnostic)
 			continue
 		}
-		if !diag.BookQualityOK {
+		if !candidateDiagnostic.IsBookQualityValid {
 			if hasAskWall {
-				diag.BlockingReason = "Ask1 Wall > 4x Top-2 Bid Depth"
+				candidateDiagnostic.BlockingReason = "Ask1 Wall > 4x Top-2 Bid Depth"
 			} else {
-				diag.BlockingReason = "Disqualifying Microstructure Penalty Flag"
+				candidateDiagnostic.BlockingReason = "Disqualifying Microstructure Penalty Flag"
 			}
-			diagnostics = append(diagnostics, diag)
+			candidateDiagnostics = append(candidateDiagnostics, candidateDiagnostic)
 			continue
 		}
-		if !diag.RVOLOK {
-			diag.BlockingReason = fmt.Sprintf("Composite RVOL %.2fx < %.1fx threshold", compRVOL, minRVOL)
-			diagnostics = append(diagnostics, diag)
+		if !candidateDiagnostic.IsRVOLValid {
+			candidateDiagnostic.BlockingReason = fmt.Sprintf("Composite RVOL %.2fx < %.1fx threshold", compositeRVOL, minRVOL)
+			candidateDiagnostics = append(candidateDiagnostics, candidateDiagnostic)
 			continue
 		}
 		if matchedPattern == "" {
-			diag.BlockingReason = fmt.Sprintf("Awaiting VWAP Pullback (0.05–0.55 ATR, cur %.2f) or 15m ORB", xVWAP)
-			diagnostics = append(diagnostics, diag)
+			candidateDiagnostic.BlockingReason = fmt.Sprintf("Awaiting VWAP Pullback Reclaim (0.05–0.55 ATR, cur %.2f) or 15m ORB Breakout", distanceToVWAPInATR)
+			candidateDiagnostics = append(candidateDiagnostics, candidateDiagnostic)
 			continue
 		}
 
-		sizing := ComputePositionSize(s, signalBarLow, netEquity, freeMargin, riskPct, sizeMult, drawdownMult)
-		diag.SizingApproved = sizing.Approved
-		if !sizing.Approved {
-			diag.BlockingReason = sizing.RejectReason
-			diagnostics = append(diagnostics, diag)
+		sizing := ComputePositionSize(stock, signalBarLow, netEquity, freeMargin, riskPct, sizeMult, drawdownMult)
+		candidateDiagnostic.IsSizingApproved = sizing.IsApproved
+		if !sizing.IsApproved {
+			candidateDiagnostic.BlockingReason = sizing.RejectReason
+			candidateDiagnostics = append(candidateDiagnostics, candidateDiagnostic)
 			continue
 		}
 
-		diag.OverallStatus = "READY"
-		diag.BlockingReason = fmt.Sprintf("Qualified %s • Qty %d @ ₹%.2f (1R=₹%.2f)", matchedPattern, sizing.Quantity, sizing.EntryLimitPrice, sizing.StopSpec.OneR)
-		diagnostics = append(diagnostics, diag)
+		candidateDiagnostic.OverallStatus = "READY"
+		candidateDiagnostic.BlockingReason = fmt.Sprintf("Qualified %s • Qty %d @ ₹%.2f (1R=₹%.2f)", matchedPattern, sizing.Quantity, sizing.EntryLimitPrice, sizing.StopSpec.OneR)
+		candidateDiagnostics = append(candidateDiagnostics, candidateDiagnostic)
 
 		if winningSignal == nil {
 			winningSignal = &CandidateSignal{
-				StockIdx:     idx,
-				Token:        s.InstrumentToken,
-				Symbol:       sym,
+				StockIdx:     stockIndex,
+				Token:        stock.InstrumentToken,
+				Symbol:       symbol,
 				PatternType:  matchedPattern,
 				SignalBarLow: signalBarLow,
-				BullishScore: s.BullishScore,
+				BullishScore: stock.BullishScore,
 				Sizing:       sizing,
 			}
 		}
 	}
 
-	if !regimeOK {
-		return nil, regimeLockStatus, regimeLockReason, diagnostics
+	if !isRegimeValid {
+		return nil, regimeLockStatus, regimeLockReason, candidateDiagnostics
 	}
 	if winningSignal != nil {
-		return winningSignal, "SIGNAL_MATCHED", fmt.Sprintf("Matched %s on %s (Qty %d)", winningSignal.PatternType, winningSignal.Symbol, winningSignal.Sizing.Quantity), diagnostics
+		return winningSignal, "SIGNAL_MATCHED", fmt.Sprintf("Matched %s on %s (Qty %d)", winningSignal.PatternType, winningSignal.Symbol, winningSignal.Sizing.Quantity), candidateDiagnostics
 	}
 
-	return nil, "ARMED_SCANNING", fmt.Sprintf("Scanning Top 5 Leaders (%s • Min Score %.0f)", sessionClock.Phase, minScore), diagnostics
+	return nil, "ARMED_SCANNING", fmt.Sprintf("Scanning Top 5 Leaders (%s • Min Score %.0f)", sessionClock.Phase, minScore), candidateDiagnostics
 }
 

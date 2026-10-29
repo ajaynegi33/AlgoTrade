@@ -18,60 +18,60 @@ func NewHandler(service *Service) *Handler {
 }
 
 // GetStatus returns the current Kite connection state
-func (h *Handler) GetStatus(w http.ResponseWriter, r *http.Request) {
-	status := h.service.GetStatus()
-	response.Success(w, http.StatusOK, status)
+func (handler *Handler) GetStatus(writer http.ResponseWriter, request *http.Request) {
+	status := handler.service.GetStatus()
+	response.Success(writer, http.StatusOK, status)
 }
 
 // GetProfile returns the real-time Zerodha user profile & funds ledger
-func (h *Handler) GetProfile(w http.ResponseWriter, r *http.Request) {
-	profile, err := h.service.GetProfile()
+func (handler *Handler) GetProfile(writer http.ResponseWriter, request *http.Request) {
+	profile, err := handler.service.GetProfile()
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "KITE_PROFILE_ERROR", err.Error())
+		response.Error(writer, http.StatusInternalServerError, "KITE_PROFILE_ERROR", err.Error())
 		return
 	}
-	response.Success(w, http.StatusOK, profile)
+	response.Success(writer, http.StatusOK, profile)
 }
 
 // GetLoginURL returns the Kite Connect OAuth authorization URL
-func (h *Handler) GetLoginURL(w http.ResponseWriter, r *http.Request) {
-	loginUrl, err := h.service.GetLoginURL()
+func (handler *Handler) GetLoginURL(writer http.ResponseWriter, request *http.Request) {
+	loginURL, err := handler.service.GetLoginURL()
 	if err != nil {
-		response.Error(w, http.StatusBadRequest, "KITE_NOT_CONFIGURED", err.Error())
+		response.Error(writer, http.StatusBadRequest, "KITE_NOT_CONFIGURED", err.Error())
 		return
 	}
 
-	response.Success(w, http.StatusOK, map[string]string{
-		"login_url": loginUrl,
+	response.Success(writer, http.StatusOK, map[string]string{
+		"login_url": loginURL,
 	})
 }
 
 // HandleBrowserCallback handles direct browser OAuth redirects from Zerodha Kite (GET)
 // and redirects the user back to the frontend dashboard via HTTP 302
-func (h *Handler) HandleBrowserCallback(w http.ResponseWriter, r *http.Request) {
-	dashboardURL := h.service.cfg.FrontendURL + "/dashboard"
+func (handler *Handler) HandleBrowserCallback(writer http.ResponseWriter, request *http.Request) {
+	dashboardURL := handler.service.cfg.FrontendURL + "/dashboard"
 
-	statusParam := r.URL.Query().Get("status")
-	requestToken := r.URL.Query().Get("request_token")
+	statusParam := request.URL.Query().Get("status")
+	requestToken := request.URL.Query().Get("request_token")
 
 	// 1. Verify status parameter from Zerodha
 	if statusParam != "success" || requestToken == "" {
-		errMsg := r.URL.Query().Get("message")
-		if errMsg == "" {
-			errMsg = "Zerodha authentication was declined or cancelled"
+		errorMessage := request.URL.Query().Get("message")
+		if errorMessage == "" {
+			errorMessage = "Zerodha authentication was declined or cancelled"
 		}
-		slog.Warn("Zerodha browser callback received non-success status", "status", statusParam, "error", errMsg)
-		target := fmt.Sprintf("%s?kite_status=error&message=%s", dashboardURL, url.QueryEscape(errMsg))
-		http.Redirect(w, r, target, http.StatusFound)
+		slog.Warn("Zerodha browser callback received non-success status", "status", statusParam, "error", errorMessage)
+		redirectTargetURL := fmt.Sprintf("%s?kite_status=error&message=%s", dashboardURL, url.QueryEscape(errorMessage))
+		http.Redirect(writer, request, redirectTargetURL, http.StatusFound)
 		return
 	}
 
 	// 2. Exchange request_token for active access_token
-	session, err := h.service.GenerateSession(requestToken)
+	session, err := handler.service.GenerateSession(requestToken)
 	if err != nil {
 		slog.Error("Zerodha browser callback session exchange failed", "error", err)
-		target := fmt.Sprintf("%s?kite_status=error&message=%s", dashboardURL, url.QueryEscape(err.Error()))
-		http.Redirect(w, r, target, http.StatusFound)
+		redirectTargetURL := fmt.Sprintf("%s?kite_status=error&message=%s", dashboardURL, url.QueryEscape(err.Error()))
+		http.Redirect(writer, request, redirectTargetURL, http.StatusFound)
 		return
 	}
 
@@ -81,7 +81,7 @@ func (h *Handler) HandleBrowserCallback(w http.ResponseWriter, r *http.Request) 
 	)
 
 	// 3. Clean HTTP 302 redirect back to Next.js dashboard
-	target := fmt.Sprintf("%s?kite_status=success", dashboardURL)
-	http.Redirect(w, r, target, http.StatusFound)
+	redirectTargetURL := fmt.Sprintf("%s?kite_status=success", dashboardURL)
+	http.Redirect(writer, request, redirectTargetURL, http.StatusFound)
 }
 

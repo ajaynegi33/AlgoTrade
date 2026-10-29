@@ -15,30 +15,30 @@ func NewHandler(service *Service) *Handler {
 }
 
 // GetUniverse returns the current F&O cash equity universe for today (or latest cached)
-func (h *Handler) GetUniverse(w http.ResponseWriter, r *http.Request) {
-	dateParam := r.URL.Query().Get("date")
-	universe, err := h.service.GetUniverse(dateParam)
+func (handler *Handler) GetUniverse(writer http.ResponseWriter, request *http.Request) {
+	dateParam := request.URL.Query().Get("date")
+	universe, err := handler.service.GetUniverse(dateParam)
 	if err != nil {
 		// If not yet scanned for today, attempt an automatic initial scan
-		universe, err = h.service.RunScan(false)
+		universe, err = handler.service.RunScan(false)
 		if err != nil {
-			response.Error(w, http.StatusNotFound, "UNIVERSE_NOT_FOUND", err.Error())
+			response.Error(writer, http.StatusNotFound, "UNIVERSE_NOT_FOUND", err.Error())
 			return
 		}
 	}
 
-	response.Success(w, http.StatusOK, universe)
+	response.Success(writer, http.StatusOK, universe)
 }
 
 // RunScan triggers an on-demand scan of the stock universe
-func (h *Handler) RunScan(w http.ResponseWriter, r *http.Request) {
-	universe, err := h.service.RunScan(true)
+func (handler *Handler) RunScan(writer http.ResponseWriter, request *http.Request) {
+	universe, err := handler.service.RunScan(true)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "SCANNER_ERROR", err.Error())
+		response.Error(writer, http.StatusInternalServerError, "SCANNER_ERROR", err.Error())
 		return
 	}
 
-	response.Success(w, http.StatusOK, map[string]any{
+	response.Success(writer, http.StatusOK, map[string]any{
 		"message":      "08:30 AM Universe scan completed successfully",
 		"scan_date":    universe.ScanDate,
 		"total_stocks": universe.TotalStocks,

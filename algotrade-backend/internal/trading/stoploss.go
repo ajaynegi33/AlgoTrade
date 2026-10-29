@@ -58,13 +58,13 @@ type StopAndBufferSpec struct {
 // buffer (BaseBuffer) from tight intra-day entry candles.
 //
 // Formula & Step-by-Step Logic:
-//  1. Safe ATR floor: math.Max(atr14, entryPrice * 0.0025)
+//  1. Safe ATR floor: math.Max(averageTrueRange14, entryPrice * 0.0025)
 //  2. Non-inverting DeltaMin: between 0.35% and 0.80% LTP, floor at 4 ticks.
 //  3. Adaptive DeltaMax: between 1.15x ATR and 1.50% LTP.
 //  4. Base breathing buffer: 0.75x ATR bounded within [DeltaMin, DeltaMax].
 //  5. Signal candle low: raw stop = signalBarLow - 2 ticks.
 //  6. No-Chase Rule: if raw stop distance > 1.25 * DeltaMax, the setup is rejected.
-func ComputeStopAndBufferSpec( entryPrice float64, signalBarLow float64, atr14 float64, tickSize float64 ) (StopAndBufferSpec, error) {
+func ComputeStopAndBufferSpec(entryPrice float64, signalBarLow float64, averageTrueRange14 float64, tickSize float64) (StopAndBufferSpec, error) {
 	if entryPrice <= 0 {
 		return StopAndBufferSpec{}, fmt.Errorf("invalid entry price: %.2f", entryPrice)
 	}
@@ -73,21 +73,21 @@ func ComputeStopAndBufferSpec( entryPrice float64, signalBarLow float64, atr14 f
 	}
 
 	// Floor ATR at 0.25% LTP to guard against zero or uninitialized historical bar data
-	atrSafe := math.Max(atr14, entryPrice*0.0025)
+	safeATR := math.Max(averageTrueRange14, entryPrice*0.0025)
 
 	// Step 1: Strictly non-inverting bounds:
 	// DeltaMin is capped at 0.80% LTP while DeltaMax adapts to ATR expansion
 	deltaMin := math.Max(
 		StopMinTickMultiplier*tickSize,
-		math.Max(StopMinRiskPctCap*entryPrice, math.Min(0.35*atrSafe, StopMaxRiskPctCap*entryPrice)),
+		math.Max(StopMinRiskPctCap*entryPrice, math.Min(0.35*safeATR, StopMaxRiskPctCap*entryPrice)),
 	)
 	deltaMax := math.Max(
 		deltaMin+StopMinTickMultiplier*tickSize,
-		math.Min(1.15*atrSafe, math.Max(0.0150*entryPrice, 0.85*atrSafe)),
+		math.Min(1.15*safeATR, math.Max(0.0150*entryPrice, 0.85*safeATR)),
 	)
 
 	// Step 2: Base breathing buffer calibrated across NSE price tiers:
-	rawBuffer := math.Max(0.75*atrSafe, StopBaseBufferLTPRatio*entryPrice)
+	rawBuffer := math.Max(0.75*safeATR, StopBaseBufferLTPRatio*entryPrice)
 	baseBuffer := RoundToTick(math.Max(deltaMin, math.Min(deltaMax, rawBuffer)), tickSize)
 
 	// Step 3: Structural Stop placement below the signal candle low:
@@ -95,19 +95,19 @@ func ComputeStopAndBufferSpec( entryPrice float64, signalBarLow float64, atr14 f
 	if rawStop <= 0 || rawStop >= entryPrice {
 		rawStop = entryPrice - baseBuffer
 	}
-	rawDist := entryPrice - rawStop
+	rawStopDistance := entryPrice - rawStop
 
 	// Step 4: No-Chase Rule — if entry candle is overextended, reject the setup
-	if rawDist > StopMaxChaseMultiplier*deltaMax {
+	if rawStopDistance > StopMaxChaseMultiplier*deltaMax {
 		return StopAndBufferSpec{}, fmt.Errorf(
 			"setup overextended: structural stop distance ₹%.2f exceeds %.2fx max allowed ₹%.2f",
-			rawDist, StopMaxChaseMultiplier, deltaMax,
+			rawStopDistance, StopMaxChaseMultiplier, deltaMax,
 		)
 	}
 
 	// Step 5: Clamp stop distance within [DeltaMin, DeltaMax] and round to exchange ticks
-	clampedDist := math.Max(deltaMin, math.Min(deltaMax, rawDist))
-	oneR := RoundUpToTick(clampedDist, tickSize)
+	clampedStopDistance := math.Max(deltaMin, math.Min(deltaMax, rawStopDistance))
+	oneR := RoundUpToTick(clampedStopDistance, tickSize)
 	initialStop := RoundDownToTick(entryPrice-oneR, tickSize)
 	if initialStop <= 0 || initialStop >= entryPrice-tickSize {
 		return StopAndBufferSpec{}, fmt.Errorf("invalid initial stop ₹%.2f for entry ₹%.2f", initialStop, entryPrice)
@@ -126,23 +126,23 @@ func ComputeStopAndBufferSpec( entryPrice float64, signalBarLow float64, atr14 f
 // BreakevenTriggerPrice computes the exact SL trigger price (rounded up to TickSize)
 // on remaining runner shares so that even if the runner stops out at Breakeven,
 // all round-trip statutory taxes & brokerage on the entire trade + a 2-tick/0.15% cushion are 100% covered.
-func BreakevenTriggerPrice(entryPrice float64, initialQty, runnerQty int, tickSize float64) float64 {
+func BreakevenTriggerPrice(entryPrice float64, initialQuantity, runnerQuantity int, tickSize float64) float64 {
 	if tickSize <= 0 {
 		tickSize = 0.05
 	}
-	if initialQty <= 0 {
-		initialQty = 1
+	if initialQuantity <= 0 {
+		initialQuantity = 1
 	}
-	if runnerQty <= 0 {
-		runnerQty = 1
+	if runnerQuantity <= 0 {
+		runnerQuantity = 1
 	}
 
 	// Calculate round-trip taxes on the original entry quantity
-	taxes := CalculateRoundTripCharges(entryPrice, entryPrice, initialQty)
-	perShareTax := taxes.TotalCharges / float64(runnerQty)
+	roundTripTaxes := CalculateRoundTripCharges(entryPrice, entryPrice, initialQuantity)
+	perShareTax := roundTripTaxes.TotalCharges / float64(runnerQuantity)
 
 	// Cushion = max(perShareTax + 2 ticks, 0.15% of entry price)
-	minCushion := math.Max(perShareTax + 2.0 * tickSize, 0.0015 * entryPrice)
+	minCushion := math.Max(perShareTax+2.0*tickSize, 0.0015*entryPrice)
 	return RoundUpToTick(entryPrice+minCushion, tickSize)
 }
 

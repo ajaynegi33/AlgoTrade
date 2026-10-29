@@ -125,19 +125,19 @@ var (
 // Layer 2: Built-in sector mapping for active F&O equities.
 // Layer 3: Fallback to NIFTY 50 (Token 256265).
 func ResolveSector(db *sql.DB, symbol string) (uint8, string, uint32) {
-	sym := strings.ToUpper(strings.TrimSpace(symbol))
+	normalizedSymbol := strings.ToUpper(strings.TrimSpace(symbol))
 
 	// Layer 1: SQLite sector_metadata lookup if db is available
 	if db != nil {
-		var secName string
-		var secToken int
-		err := db.QueryRow("SELECT sector_name, sector_token FROM sector_metadata WHERE tradingsymbol = ?", sym).Scan(&secName, &secToken)
-		if err == nil && secName != "" {
+		var sectorName string
+		var sectorToken int
+		err := db.QueryRow("SELECT sector_name, sector_token FROM sector_metadata WHERE tradingsymbol = ?", normalizedSymbol).Scan(&sectorName, &sectorToken)
+		if err == nil && sectorName != "" {
 			for id, info := range SectorRegistry {
-				if strings.EqualFold(info.Name, secName) {
+				if strings.EqualFold(info.Name, sectorName) {
 					token := info.Token
-					if secToken > 0 {
-						token = uint32(secToken)
+					if sectorToken > 0 {
+						token = uint32(sectorToken)
 					}
 					return id, info.Name, token
 				}
@@ -146,8 +146,8 @@ func ResolveSector(db *sql.DB, symbol string) (uint8, string, uint32) {
 	}
 
 	// Layer 2: BuiltInConstituents
-	if secID, ok := BuiltInConstituents[sym]; ok {
-		if info, found := SectorRegistry[secID]; found {
+	if sectorID, ok := BuiltInConstituents[normalizedSymbol]; ok {
+		if info, found := SectorRegistry[sectorID]; found {
 			return info.ID, info.Name, info.Token
 		}
 	}
@@ -158,8 +158,8 @@ func ResolveSector(db *sql.DB, symbol string) (uint8, string, uint32) {
 }
 
 // GetSectorName returns human-readable sector name for a given sector ID
-func GetSectorName(id uint8) string {
-	if info, ok := SectorRegistry[id]; ok {
+func GetSectorName(sectorID uint8) string {
+	if info, ok := SectorRegistry[sectorID]; ok {
 		return info.Name
 	}
 	return "NIFTY 50"

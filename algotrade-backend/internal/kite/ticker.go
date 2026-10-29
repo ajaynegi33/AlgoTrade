@@ -68,100 +68,100 @@ func NewTickerClient(service *Service) *TickerClient {
 }
 
 // Start begins the auto-reconnecting websocket loop
-func (t *TickerClient) Start() {
-	go t.connectionLoop()
+func (client *TickerClient) Start() {
+	go client.connectionLoop()
 }
 
 // Stop gracefully shuts down the ticker
-func (t *TickerClient) Stop() {
-	if t.isClosed.CompareAndSwap(false, true) {
-		t.cancel()
-		t.mu.Lock()
-		if t.conn != nil {
-			_ = t.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(writeWait))
-			_ = t.conn.Close()
+func (client *TickerClient) Stop() {
+	if client.isClosed.CompareAndSwap(false, true) {
+		client.cancel()
+		client.mu.Lock()
+		if client.conn != nil {
+			_ = client.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(writeWait))
+			_ = client.conn.Close()
 		}
-		t.mu.Unlock()
-		t.isConnected.Store(false)
+		client.mu.Unlock()
+		client.isConnected.Store(false)
 		slog.Info("Kite Ticker client stopped")
 	}
 }
 
 // SubscribeRaw returns the receive-only channel for raw binary frames
-func (t *TickerClient) SubscribeRaw() <-chan []byte {
-	return t.rawChan
+func (client *TickerClient) SubscribeRaw() <-chan []byte {
+	return client.rawChan
 }
 
 // SetOrderUpdateHandler registers a listener for JSON text frames (order postbacks) from Kite Ticker
-func (t *TickerClient) SetOrderUpdateHandler(fn func([]byte)) {
-	t.callbackMu.Lock()
-	t.onOrderUpdate = fn
-	t.callbackMu.Unlock()
+func (client *TickerClient) SetOrderUpdateHandler(orderUpdateHandler func([]byte)) {
+	client.callbackMu.Lock()
+	client.onOrderUpdate = orderUpdateHandler
+	client.callbackMu.Unlock()
 }
 
 // SetReconnectHandler registers a listener invoked whenever Kite Ticker reconnects after a drop
-func (t *TickerClient) SetReconnectHandler(fn func()) {
-	t.callbackMu.Lock()
-	t.onReconnect = fn
-	t.callbackMu.Unlock()
+func (client *TickerClient) SetReconnectHandler(reconnectHandler func()) {
+	client.callbackMu.Lock()
+	client.onReconnect = reconnectHandler
+	client.callbackMu.Unlock()
 }
 
 // IsConnected returns current connection status
-func (t *TickerClient) IsConnected() bool {
-	return t.isConnected.Load()
+func (client *TickerClient) IsConnected() bool {
+	return client.isConnected.Load()
 }
 
 // GetStats returns operational health metrics
-func (t *TickerClient) GetStats() TickerStats {
-	t.tokensMu.RLock()
-	tokenCount := len(t.subscribedTokens)
-	t.tokensMu.RUnlock()
+func (client *TickerClient) GetStats() TickerStats {
+	client.tokensMu.RLock()
+	tokenCount := len(client.subscribedTokens)
+	client.tokensMu.RUnlock()
 
-	lastEpoch := t.lastPacketEpoch.Load()
+	lastEpoch := client.lastPacketEpoch.Load()
 	var lastTime time.Time
 	if lastEpoch > 0 {
 		lastTime = time.Unix(lastEpoch, 0)
 	}
 
 	return TickerStats{
-		IsConnected:      t.isConnected.Load(),
+		IsConnected:      client.isConnected.Load(),
 		SubscribedTokens: tokenCount,
-		PacketsReceived:  t.packetsReceived.Load(),
+		PacketsReceived:  client.packetsReceived.Load(),
 		LastPacketTime:   lastTime,
-		ReconnectCount:   t.reconnectCount.Load(),
+		ReconnectCount:   client.reconnectCount.Load(),
 	}
 }
 
 // Subscribe adds instrument tokens and sends subscription command to Kite
-func (t *TickerClient) Subscribe(tokens []uint32) error {
+func (client *TickerClient) Subscribe(tokens []uint32) error {
 	if len(tokens) == 0 {
 		return nil
 	}
 
-	t.tokensMu.Lock()
-	for _, tok := range tokens {
-		t.subscribedTokens[tok] = true
+	client.tokensMu.Lock()
+	for _, token := range tokens {
+		client.subscribedTokens[token] = true
 	}
-	t.tokensMu.Unlock()
+	client.tokensMu.Unlock()
 
-	if !t.isConnected.Load() {
+	if !client.isConnected.Load() {
 		return nil // Stored in map; will be sent automatically upon connection
 	}
 
-	return t.sendSubscribeAndMode(tokens)
+	return client.sendSubscribeAndMode(tokens)
 }
 
-func (t *TickerClient) connectionLoop() {
+func (client *TickerClient) connectionLoop() {
 	backoff := 1 * time.Second
 
 	for {
 		select {
-		case <-t.ctx.Done():
+		case <-client.ctx.Done():
 			return
 		default:
 		}
 
-		session := t.service.GetSession()
+		session := client.service.GetSession()
 		if session == nil || session.AccessToken == "" {
 			// No active session yet; wait 3 seconds and retry
 			time.Sleep(3 * time.Second)
@@ -169,11 +169,11 @@ func (t *TickerClient) connectionLoop() {
 		}
 
 		slog.Info("Connecting to Zerodha Kite Ticker WebSocket...", "user_id", session.UserID)
-		err := t.connectAndListen(session)
+		err := client.connectAndListen(session)
 		if err != nil {
-			t.isConnected.Store(false)
-			if !t.isClosed.Load() {
-				t.reconnectCount.Add(1)
+			client.isConnected.Store(false)
+			if !client.isClosed.Load() {
+				client.reconnectCount.Add(1)
 				slog.Warn("Kite Ticker disconnected, retrying with backoff...", "error", err, "backoff", backoff)
 				time.Sleep(backoff)
 				backoff *= 2
@@ -187,53 +187,53 @@ func (t *TickerClient) connectionLoop() {
 	}
 }
 
-func (t *TickerClient) connectAndListen(session *SessionInfo) error {
-	u, err := url.Parse(tickerURL)
+func (client *TickerClient) connectAndListen(session *SessionInfo) error {
+	parsedURL, err := url.Parse(tickerURL)
 	if err != nil {
 		return fmt.Errorf("invalid ticker url: %w", err)
 	}
 
-	q := u.Query()
-	q.Set("api_key", session.APIKey)
-	q.Set("access_token", session.AccessToken)
-	u.RawQuery = q.Encode()
+	queryParams := parsedURL.Query()
+	queryParams.Set("api_key", session.APIKey)
+	queryParams.Set("access_token", session.AccessToken)
+	parsedURL.RawQuery = queryParams.Encode()
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 	}
 
-	conn, _, err := dialer.DialContext(t.ctx, u.String(), nil)
+	conn, _, err := dialer.DialContext(client.ctx, parsedURL.String(), nil)
 	if err != nil {
 		return fmt.Errorf("websocket dial failed: %w", err)
 	}
 
-	t.mu.Lock()
-	t.conn = conn
-	t.mu.Unlock()
+	client.mu.Lock()
+	client.conn = conn
+	client.mu.Unlock()
 
-	t.isConnected.Store(true)
+	client.isConnected.Store(true)
 	slog.Info("Connected to Zerodha Kite Ticker WebSocket successfully")
 
 	// Resubscribe to all tokens stored in map
-	t.tokensMu.RLock()
-	activeTokens := make([]uint32, 0, len(t.subscribedTokens))
-	for tok := range t.subscribedTokens {
-		activeTokens = append(activeTokens, tok)
+	client.tokensMu.RLock()
+	activeTokens := make([]uint32, 0, len(client.subscribedTokens))
+	for token := range client.subscribedTokens {
+		activeTokens = append(activeTokens, token)
 	}
-	t.tokensMu.RUnlock()
+	client.tokensMu.RUnlock()
 
 	if len(activeTokens) > 0 {
-		if err := t.sendSubscribeAndMode(activeTokens); err != nil {
+		if err := client.sendSubscribeAndMode(activeTokens); err != nil {
 			slog.Error("Failed to resubscribe tokens on reconnect", "error", err)
 		}
 	}
 
-	if t.reconnectCount.Load() > 0 {
-		t.callbackMu.RLock()
-		reconnFn := t.onReconnect
-		t.callbackMu.RUnlock()
-		if reconnFn != nil {
-			go reconnFn()
+	if client.reconnectCount.Load() > 0 {
+		client.callbackMu.RLock()
+		onReconnectCallback := client.onReconnect
+		client.callbackMu.RUnlock()
+		if onReconnectCallback != nil {
+			go onReconnectCallback()
 		}
 	}
 
@@ -247,7 +247,7 @@ func (t *TickerClient) connectAndListen(session *SessionInfo) error {
 
 	// Start ping sender in background
 	pingDone := make(chan struct{})
-	go t.pingPump(conn, pingDone)
+	go client.pingPump(conn, pingDone)
 	defer close(pingDone)
 
 	for {
@@ -259,29 +259,29 @@ func (t *TickerClient) connectAndListen(session *SessionInfo) error {
 		_ = conn.SetReadDeadline(time.Now().Add(readWait))
 
 		if msgType == websocket.BinaryMessage && len(message) > 2 {
-			t.packetsReceived.Add(1)
-			t.lastPacketEpoch.Store(time.Now().Unix())
+			client.packetsReceived.Add(1)
+			client.lastPacketEpoch.Store(time.Now().Unix())
 
 			// Non-blocking send to rawChan
 			select {
-			case t.rawChan <- message:
+			case client.rawChan <- message:
 			default:
 				// Channel buffer full: drop frame to never block the reader
 			}
 		} else if msgType == websocket.TextMessage && len(message) > 0 {
-			t.callbackMu.RLock()
-			orderFn := t.onOrderUpdate
-			t.callbackMu.RUnlock()
-			if orderFn != nil {
-				msgCopy := make([]byte, len(message))
-				copy(msgCopy, message)
-				go orderFn(msgCopy)
+			client.callbackMu.RLock()
+			onOrderUpdateCallback := client.onOrderUpdate
+			client.callbackMu.RUnlock()
+			if onOrderUpdateCallback != nil {
+				messageCopy := make([]byte, len(message))
+				copy(messageCopy, message)
+				go onOrderUpdateCallback(messageCopy)
 			}
 		}
 	}
 }
 
-func (t *TickerClient) pingPump(conn *websocket.Conn, done <-chan struct{}) {
+func (client *TickerClient) pingPump(conn *websocket.Conn, done <-chan struct{}) {
 	ticker := time.NewTicker(pingPeriod)
 	defer ticker.Stop()
 
@@ -289,12 +289,12 @@ func (t *TickerClient) pingPump(conn *websocket.Conn, done <-chan struct{}) {
 		select {
 		case <-done:
 			return
-		case <-t.ctx.Done():
+		case <-client.ctx.Done():
 			return
 		case <-ticker.C:
-			t.mu.Lock()
+			client.mu.Lock()
 			err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(writeWait))
-			t.mu.Unlock()
+			client.mu.Unlock()
 			if err != nil {
 				return
 			}
@@ -302,13 +302,13 @@ func (t *TickerClient) pingPump(conn *websocket.Conn, done <-chan struct{}) {
 	}
 }
 
-func (t *TickerClient) sendSubscribeAndMode(tokens []uint32) error {
+func (client *TickerClient) sendSubscribeAndMode(tokens []uint32) error {
 	// Step 1: Subscribe
-	subPayload := map[string]interface{}{
+	subscriptionPayload := map[string]interface{}{
 		"a": "subscribe",
 		"v": tokens,
 	}
-	if err := t.writeJSON(subPayload); err != nil {
+	if err := client.writeJSON(subscriptionPayload); err != nil {
 		return fmt.Errorf("failed to send subscribe message: %w", err)
 	}
 
@@ -317,7 +317,7 @@ func (t *TickerClient) sendSubscribeAndMode(tokens []uint32) error {
 		"a": "mode",
 		"v": []interface{}{"full", tokens},
 	}
-	if err := t.writeJSON(modePayload); err != nil {
+	if err := client.writeJSON(modePayload); err != nil {
 		return fmt.Errorf("failed to send mode message: %w", err)
 	}
 
@@ -325,19 +325,19 @@ func (t *TickerClient) sendSubscribeAndMode(tokens []uint32) error {
 	return nil
 }
 
-func (t *TickerClient) writeJSON(v interface{}) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+func (client *TickerClient) writeJSON(payload interface{}) error {
+	client.mu.Lock()
+	defer client.mu.Unlock()
 
-	if t.conn == nil {
+	if client.conn == nil {
 		return errors.New("websocket connection is not open")
 	}
 
-	data, err := json.Marshal(v)
+	data, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("json marshal error: %w", err)
 	}
 
-	_ = t.conn.SetWriteDeadline(time.Now().Add(writeWait))
-	return t.conn.WriteMessage(websocket.TextMessage, data)
+	_ = client.conn.SetWriteDeadline(time.Now().Add(writeWait))
+	return client.conn.WriteMessage(websocket.TextMessage, data)
 }

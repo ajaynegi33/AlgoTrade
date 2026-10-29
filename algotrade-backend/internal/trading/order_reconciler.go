@@ -12,18 +12,18 @@ import (
 // OrderReconciler deduplicates order updates across WebSocket, Webhook, and REST polling,
 // and coalesces concurrent FetchOrders calls so multiple PositionWorkers never trigger HTTP 429.
 type OrderReconciler struct {
-	db               *sql.DB
-	mu               sync.Mutex
-	lastFilledByOrd  map[string]int
-	orderToPos       map[string]string
-	orderLegType     map[string]string
-	pendingUntracked map[string]OrderUpdateEvent
-	onOrderDelta     func(positionID, legType string, ev OrderUpdateEvent, deltaFilled int)
+	db                          *sql.DB
+	mu                          sync.Mutex
+	lastFilledQuantityByOrderID map[string]int
+	positionIDByOrderID         map[string]string
+	legTypeByOrderID            map[string]string
+	pendingEventsByOrderID      map[string]OrderUpdateEvent
+	onOrderDelta                func(positionID, legType string, orderEvent OrderUpdateEvent, deltaFilled int)
 
 	// Coalesced singleflight-style REST fetch cache
 	fetchMu         sync.Mutex
-	fetchInFlight   bool
-	fetchWaitCh     chan struct{}
+	isFetchInFlight bool
+	fetchWaitChannel chan struct{}
 	lastFetchTime   time.Time
 	lastFetchedList []OrderUpdateEvent
 	lastFetchErr    error
@@ -31,32 +31,32 @@ type OrderReconciler struct {
 
 func NewOrderReconciler(
 	db *sql.DB,
-	onOrderDelta func(positionID, legType string, ev OrderUpdateEvent, deltaFilled int),
+	onOrderDelta func(positionID, legType string, orderEvent OrderUpdateEvent, deltaFilled int),
 ) *OrderReconciler {
 	return &OrderReconciler{
-		db:               db,
-		lastFilledByOrd:  make(map[string]int),
-		orderToPos:       make(map[string]string),
-		orderLegType:     make(map[string]string),
-		pendingUntracked: make(map[string]OrderUpdateEvent),
-		onOrderDelta:     onOrderDelta,
+		db:                          db,
+		lastFilledQuantityByOrderID: make(map[string]int),
+		positionIDByOrderID:         make(map[string]string),
+		legTypeByOrderID:            make(map[string]string),
+		pendingEventsByOrderID:      make(map[string]OrderUpdateEvent),
+		onOrderDelta:                onOrderDelta,
 	}
 }
 
-// SeedOrderFilled pre-populates lastFilledByOrd during crash-recovery rehydration so already-counted fills are never re-applied
-func (r *OrderReconciler) SeedOrderFilled(orderID string, filledQty int) {
+// SeedOrderFilled pre-populates lastFilledQuantityByOrderID during crash-recovery rehydration so already-counted fills are never re-applied
+func (reconciler *OrderReconciler) SeedOrderFilled(orderID string, filledQty int) {
 	if orderID == "" || filledQty <= 0 {
 		return
 	}
-	r.mu.Lock()
-	if filledQty > r.lastFilledByOrd[orderID] {
-		r.lastFilledByOrd[orderID] = filledQty
+	reconciler.mu.Lock()
+	if filledQty > reconciler.lastFilledQuantityByOrderID[orderID] {
+		reconciler.lastFilledQuantityByOrderID[orderID] = filledQty
 	}
-	r.mu.Unlock()
+	reconciler.mu.Unlock()
 }
 
 // RegisterOrder links a broker orderID to a positionID and legType ("ENTRY" | "SL" | "SCALE_OUT" | "EMERGENCY_EXIT")
-func (r *OrderReconciler) RegisterOrder(
+func (reconciler *OrderReconciler) RegisterOrder(
 	orderID, positionID, legType, symbol, txnType, orderType string,
 	qty int,
 	price, triggerPrice float64,
@@ -65,17 +65,17 @@ func (r *OrderReconciler) RegisterOrder(
 	if orderID == "" {
 		return
 	}
-	r.mu.Lock()
-	r.orderToPos[orderID] = positionID
-	r.orderLegType[orderID] = legType
-	pendingEv, hasPending := r.pendingUntracked[orderID]
-	if hasPending {
-		delete(r.pendingUntracked, orderID)
+	reconciler.mu.Lock()
+	reconciler.positionIDByOrderID[orderID] = positionID
+	reconciler.legTypeByOrderID[orderID] = legType
+	pendingOrderEvent, hasPendingOrderEvent := reconciler.pendingEventsByOrderID[orderID]
+	if hasPendingOrderEvent {
+		delete(reconciler.pendingEventsByOrderID, orderID)
 	}
-	r.mu.Unlock()
+	reconciler.mu.Unlock()
 
-	if r.db != nil {
-		_, err := r.db.Exec(`
+	if reconciler.db != nil {
+		_, err := reconciler.db.Exec(`
 			INSERT INTO orders (
 				order_id, position_id, leg_type, symbol, transaction_type, order_type,
 				quantity, filled_quantity, price, trigger_price, average_price, status, updated_at
@@ -96,13 +96,13 @@ func (r *OrderReconciler) RegisterOrder(
 	}
 
 	// Replay any early WebSocket/Paper fill event that arrived before RegisterOrder completed
-	if hasPending {
-		r.ProcessOrderEvent(pendingEv)
+	if hasPendingOrderEvent {
+		reconciler.ProcessOrderEvent(pendingOrderEvent)
 	}
 }
 
 // HandleWebSocketTextFrame parses Kite Ticker JSON text frames and routes order postbacks
-func (r *OrderReconciler) HandleWebSocketTextFrame(raw []byte) {
+func (reconciler *OrderReconciler) HandleWebSocketTextFrame(raw []byte) {
 	var envelope struct {
 		Type string           `json:"type"`
 		Data OrderUpdateEvent `json:"data"`
@@ -111,39 +111,39 @@ func (r *OrderReconciler) HandleWebSocketTextFrame(raw []byte) {
 		return
 	}
 	if envelope.Type == "order" && envelope.Data.OrderID != "" {
-		r.ProcessOrderEvent(envelope.Data)
+		reconciler.ProcessOrderEvent(envelope.Data)
 	}
 }
 
 // ProcessOrderEvent deduplicates an incoming order update and emits exact incremental fill deltas
-func (r *OrderReconciler) ProcessOrderEvent(ev OrderUpdateEvent) {
-	if ev.OrderID == "" {
+func (reconciler *OrderReconciler) ProcessOrderEvent(orderEvent OrderUpdateEvent) {
+	if orderEvent.OrderID == "" {
 		return
 	}
 
-	r.mu.Lock()
-	posID, tracked := r.orderToPos[ev.OrderID]
+	reconciler.mu.Lock()
+	posID, tracked := reconciler.positionIDByOrderID[orderEvent.OrderID]
 	if !tracked {
-		// Falsification Guard (Bug #10): Never mutate lastFilledByOrd before the order is registered!
+		// Falsification Guard (Bug #10): Never mutate lastFilledQuantityByOrderID before the order is registered!
 		// Buffer early-arriving WebSocket/Paper events so RegisterOrder replays them immediately.
-		prevPending, ok := r.pendingUntracked[ev.OrderID]
-		if !ok || ev.FilledQuantity >= prevPending.FilledQuantity {
-			r.pendingUntracked[ev.OrderID] = ev
+		prevPending, ok := reconciler.pendingEventsByOrderID[orderEvent.OrderID]
+		if !ok || orderEvent.FilledQuantity >= prevPending.FilledQuantity {
+			reconciler.pendingEventsByOrderID[orderEvent.OrderID] = orderEvent
 		}
-		r.mu.Unlock()
+		reconciler.mu.Unlock()
 		return
 	}
-	legType := r.orderLegType[ev.OrderID]
-	prevFilled := r.lastFilledByOrd[ev.OrderID]
+	legType := reconciler.legTypeByOrderID[orderEvent.OrderID]
+	prevFilled := reconciler.lastFilledQuantityByOrderID[orderEvent.OrderID]
 	delta := 0
-	if ev.FilledQuantity > prevFilled {
-		delta = ev.FilledQuantity - prevFilled
-		r.lastFilledByOrd[ev.OrderID] = ev.FilledQuantity
+	if orderEvent.FilledQuantity > prevFilled {
+		delta = orderEvent.FilledQuantity - prevFilled
+		reconciler.lastFilledQuantityByOrderID[orderEvent.OrderID] = orderEvent.FilledQuantity
 	}
-	r.mu.Unlock()
+	reconciler.mu.Unlock()
 
-	if r.db != nil {
-		_, _ = r.db.Exec(`
+	if reconciler.db != nil {
+		_, _ = reconciler.db.Exec(`
 			UPDATE orders SET
 				order_type = CASE WHEN ? != '' THEN ? ELSE order_type END,
 				quantity = CASE WHEN ? > 0 THEN ? ELSE quantity END,
@@ -155,60 +155,60 @@ func (r *OrderReconciler) ProcessOrderEvent(ev OrderUpdateEvent) {
 				status_message = ?,
 				updated_at = CURRENT_TIMESTAMP
 			WHERE order_id = ?;
-		`, ev.OrderType, ev.OrderType, ev.Quantity, ev.Quantity, ev.FilledQuantity,
-			ev.Price, ev.TriggerPrice, ev.AveragePrice, ev.AveragePrice,
-			ev.Status, ev.StatusMessage, ev.OrderID)
+		`, orderEvent.OrderType, orderEvent.OrderType, orderEvent.Quantity, orderEvent.Quantity, orderEvent.FilledQuantity,
+			orderEvent.Price, orderEvent.TriggerPrice, orderEvent.AveragePrice, orderEvent.AveragePrice,
+			orderEvent.Status, orderEvent.StatusMessage, orderEvent.OrderID)
 	}
 
-	if r.onOrderDelta != nil {
-		r.onOrderDelta(posID, legType, ev, delta)
+	if reconciler.onOrderDelta != nil {
+		reconciler.onOrderDelta(posID, legType, orderEvent, delta)
 	}
 }
 
 // SyncOrdersCoalesced fetches all orders from the active broker, coalescing concurrent callers within 250ms
-func (r *OrderReconciler) SyncOrdersCoalesced(ctx context.Context, broker ExecutionBroker) ([]OrderUpdateEvent, error) {
+func (reconciler *OrderReconciler) SyncOrdersCoalesced(ctx context.Context, broker ExecutionBroker) ([]OrderUpdateEvent, error) {
 	if broker == nil {
 		return nil, nil
 	}
 
-	r.fetchMu.Lock()
-	if time.Since(r.lastFetchTime) < 250*time.Millisecond && r.lastFetchErr == nil {
-		cached := r.lastFetchedList
-		r.fetchMu.Unlock()
+	reconciler.fetchMu.Lock()
+	if time.Since(reconciler.lastFetchTime) < 250*time.Millisecond && reconciler.lastFetchErr == nil {
+		cached := reconciler.lastFetchedList
+		reconciler.fetchMu.Unlock()
 		return cached, nil
 	}
-	if r.fetchInFlight {
-		waitCh := r.fetchWaitCh
-		r.fetchMu.Unlock()
+	if reconciler.isFetchInFlight {
+		waitCh := reconciler.fetchWaitChannel
+		reconciler.fetchMu.Unlock()
 		select {
 		case <-waitCh:
-			r.fetchMu.Lock()
-			res, err := r.lastFetchedList, r.lastFetchErr
-			r.fetchMu.Unlock()
+			reconciler.fetchMu.Lock()
+			res, err := reconciler.lastFetchedList, reconciler.lastFetchErr
+			reconciler.fetchMu.Unlock()
 			return res, err
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
 	}
 
-	r.fetchInFlight = true
-	r.fetchWaitCh = make(chan struct{})
-	waitCh := r.fetchWaitCh
-	r.fetchMu.Unlock()
+	reconciler.isFetchInFlight = true
+	reconciler.fetchWaitChannel = make(chan struct{})
+	waitCh := reconciler.fetchWaitChannel
+	reconciler.fetchMu.Unlock()
 
 	events, err := broker.FetchOrders(ctx)
 
-	r.fetchMu.Lock()
-	r.lastFetchTime = time.Now()
-	r.lastFetchedList = events
-	r.lastFetchErr = err
-	r.fetchInFlight = false
+	reconciler.fetchMu.Lock()
+	reconciler.lastFetchTime = time.Now()
+	reconciler.lastFetchedList = events
+	reconciler.lastFetchErr = err
+	reconciler.isFetchInFlight = false
 	close(waitCh)
-	r.fetchMu.Unlock()
+	reconciler.fetchMu.Unlock()
 
 	if err == nil {
-		for _, ev := range events {
-			r.ProcessOrderEvent(ev)
+		for _, orderEvent := range events {
+			reconciler.ProcessOrderEvent(orderEvent)
 		}
 	}
 	return events, err

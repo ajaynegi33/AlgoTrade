@@ -112,63 +112,63 @@ func NewService(cfg *config.Config, db *sql.DB) *Service {
 		Timeout:   7 * time.Second,
 	}
 
-	s := &Service{
+	service := &Service{
 		cfg:        cfg,
 		db:         db,
 		httpClient: httpClient,
 	}
 
 	if cfg.IsKiteConfigured() {
-		s.client = kiteconnect.New(cfg.KiteAPIKey)
-		s.client.SetHTTPClient(httpClient)
+		service.client = kiteconnect.New(cfg.KiteAPIKey)
+		service.client.SetHTTPClient(httpClient)
 		// Attempt session restoration in background or synchronously
-		if err := s.restoreSession(); err != nil {
+		if err := service.restoreSession(); err != nil {
 			slog.Info("Kite session not restored", "reason", err.Error())
 		}
 	} else {
 		slog.Warn("Zerodha Kite API credentials not set. Kite features will remain disabled until configured.")
 	}
 
-	return s
+	return service
 }
 
 // RegisterOnAuthenticated registers a callback invoked whenever a Kite session becomes active
-func (s *Service) RegisterOnAuthenticated(fn func()) {
-	if fn == nil {
+func (service *Service) RegisterOnAuthenticated(callbackFunction func()) {
+	if callbackFunction == nil {
 		return
 	}
-	s.mu.Lock()
-	s.onAuthenticated = append(s.onAuthenticated, fn)
-	hasActive := s.session != nil && s.session.AccessToken != "" && !isSessionExpired(s.session.CreatedAt)
-	s.mu.Unlock()
+	service.mu.Lock()
+	service.onAuthenticated = append(service.onAuthenticated, callbackFunction)
+	hasActive := service.session != nil && service.session.AccessToken != "" && !isSessionExpired(service.session.CreatedAt)
+	service.mu.Unlock()
 
 	if hasActive {
-		go fn()
+		go callbackFunction()
 	}
 }
 
-func (s *Service) notifyAuthenticatedLocked() {
-	for _, fn := range s.onAuthenticated {
-		if fn != nil {
-			go fn()
+func (service *Service) notifyAuthenticatedLocked() {
+	for _, callbackFunction := range service.onAuthenticated {
+		if callbackFunction != nil {
+			go callbackFunction()
 		}
 	}
 }
 
 // GetLoginURL returns the official Kite Connect OAuth login URL
-func (s *Service) GetLoginURL() (string, error) {
-	if !s.cfg.IsKiteConfigured() {
+func (service *Service) GetLoginURL() (string, error) {
+	if !service.cfg.IsKiteConfigured() {
 		return "", ErrKiteNotConfigured
 	}
-	return s.client.GetLoginURL(), nil
+	return service.client.GetLoginURL(), nil
 }
 
 // GenerateSession performs the OAuth token handshake with Zerodha Kite and persists the session
-func (s *Service) GenerateSession(requestToken string) (*SessionInfo, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (service *Service) GenerateSession(requestToken string) (*SessionInfo, error) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
 
-	if !s.cfg.IsKiteConfigured() {
+	if !service.cfg.IsKiteConfigured() {
 		return nil, ErrKiteNotConfigured
 	}
 
@@ -177,7 +177,7 @@ func (s *Service) GenerateSession(requestToken string) (*SessionInfo, error) {
 	}
 
 	// Handshake with Kite Connect API
-	userSession, err := s.client.GenerateSession(requestToken, s.cfg.KiteAPISecret)
+	userSession, err := service.client.GenerateSession(requestToken, service.cfg.KiteAPISecret)
 	if err != nil {
 		return nil, fmt.Errorf("kite token exchange failed: %w", err)
 	}
@@ -191,7 +191,7 @@ func (s *Service) GenerateSession(requestToken string) (*SessionInfo, error) {
 	session := &SessionInfo{
 		UserID:      userSession.UserID,
 		UserName:    userSession.UserName,
-		APIKey:      s.cfg.KiteAPIKey,
+		APIKey:      service.cfg.KiteAPIKey,
 		AccessToken: userSession.AccessToken,
 		PublicToken: userSession.PublicToken,
 		LoginTime:   loginTimeStr,
@@ -211,15 +211,15 @@ func (s *Service) GenerateSession(requestToken string) (*SessionInfo, error) {
 			login_time = excluded.login_time,
 			created_at = CURRENT_TIMESTAMP;
 	`
-	_, err = s.db.Exec(query, session.UserID, session.UserName, session.APIKey, session.AccessToken, session.PublicToken, session.LoginTime)
+	_, err = service.db.Exec(query, session.UserID, session.UserName, session.APIKey, session.AccessToken, session.PublicToken, session.LoginTime)
 	if err != nil {
 		slog.Error("Failed to persist kite session to SQLite", "error", err)
 		// We still set session in memory so current process works
 	}
 
-	s.session = session
-	s.client.SetAccessToken(session.AccessToken)
-	s.notifyAuthenticatedLocked()
+	service.session = session
+	service.client.SetAccessToken(session.AccessToken)
+	service.notifyAuthenticatedLocked()
 
 	slog.Info("Zerodha Kite session authenticated and persisted successfully",
 		"user_id", session.UserID,
@@ -230,18 +230,18 @@ func (s *Service) GenerateSession(requestToken string) (*SessionInfo, error) {
 }
 
 // GetStatus returns the current connection state and authenticated user details
-func (s *Service) GetStatus() StatusResponse {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (service *Service) GetStatus() StatusResponse {
+	service.mu.RLock()
+	defer service.mu.RUnlock()
 
-	if !s.cfg.IsKiteConfigured() {
+	if !service.cfg.IsKiteConfigured() {
 		return StatusResponse{
 			IsConfigured: false,
 			IsConnected:  false,
 		}
 	}
 
-	if s.session == nil || s.session.AccessToken == "" {
+	if service.session == nil || service.session.AccessToken == "" {
 		return StatusResponse{
 			IsConfigured: true,
 			IsConnected:  false,
@@ -249,7 +249,7 @@ func (s *Service) GetStatus() StatusResponse {
 	}
 
 	// Validate IST session expiry (06:00 AM IST boundary)
-	if isSessionExpired(s.session.CreatedAt) {
+	if isSessionExpired(service.session.CreatedAt) {
 		return StatusResponse{
 			IsConfigured: true,
 			IsConnected:  false,
@@ -259,42 +259,42 @@ func (s *Service) GetStatus() StatusResponse {
 	return StatusResponse{
 		IsConfigured: true,
 		IsConnected:  true,
-		UserID:       s.session.UserID,
-		UserName:     s.session.UserName,
-		LoginTime:    s.session.LoginTime,
+		UserID:       service.session.UserID,
+		UserName:     service.session.UserName,
+		LoginTime:    service.session.LoginTime,
 	}
 }
 
 // GetSession returns a copy of the active session info, or nil if no active session
-func (s *Service) GetSession() *SessionInfo {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.session == nil || isSessionExpired(s.session.CreatedAt) {
+func (service *Service) GetSession() *SessionInfo {
+	service.mu.RLock()
+	defer service.mu.RUnlock()
+	if service.session == nil || isSessionExpired(service.session.CreatedAt) {
 		return nil
 	}
-	cp := *s.session
-	return &cp
+	sessionCopy := *service.session
+	return &sessionCopy
 }
 
 // GetClient returns the underlying initialized KiteConnect client
-func (s *Service) GetClient() *kiteconnect.Client {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.client
+func (service *Service) GetClient() *kiteconnect.Client {
+	service.mu.RLock()
+	defer service.mu.RUnlock()
+	return service.client
 }
 
 // GetProfile fetches the real-time Zerodha user profile and account margins
-func (s *Service) GetProfile() (*UserProfileData, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (service *Service) GetProfile() (*UserProfileData, error) {
+	service.mu.RLock()
+	defer service.mu.RUnlock()
 
-	if !s.cfg.IsKiteConfigured() || s.session == nil || s.session.AccessToken == "" || isSessionExpired(s.session.CreatedAt) {
+	if !service.cfg.IsKiteConfigured() || service.session == nil || service.session.AccessToken == "" || isSessionExpired(service.session.CreatedAt) {
 		return &UserProfileData{
 			IsConnected: false,
 		}, nil
 	}
 
-	profile, err := s.client.GetUserProfile()
+	profile, err := service.client.GetUserProfile()
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch user profile from kite: %w", err)
 	}
@@ -311,11 +311,11 @@ func (s *Service) GetProfile() (*UserProfileData, error) {
 		Exchanges:     profile.Exchanges,
 		Products:      profile.Products,
 		OrderTypes:    profile.OrderTypes,
-		LoginTime:     s.session.LoginTime,
+		LoginTime:     service.session.LoginTime,
 	}
 
 	// Fetch real-time margins
-	margins, err := s.client.GetUserMargins()
+	margins, err := service.client.GetUserMargins()
 	if err == nil {
 		res.EquityMargin = &EquityMargins{
 			Net:            margins.Equity.Net,
@@ -338,12 +338,12 @@ func (s *Service) GetProfile() (*UserProfileData, error) {
 }
 
 // GetEquityMargins fetches live Zerodha equity margins directly
-func (s *Service) GetEquityMargins() (*EquityMargins, error) {
-	s.mu.RLock()
-	client := s.client
-	session := s.session
-	configured := s.cfg.IsKiteConfigured()
-	s.mu.RUnlock()
+func (service *Service) GetEquityMargins() (*EquityMargins, error) {
+	service.mu.RLock()
+	client := service.client
+	session := service.session
+	configured := service.cfg.IsKiteConfigured()
+	service.mu.RUnlock()
 
 	if !configured || client == nil || session == nil || session.AccessToken == "" || isSessionExpired(session.CreatedAt) {
 		return nil, ErrNoSession
@@ -372,13 +372,13 @@ func (s *Service) GetEquityMargins() (*EquityMargins, error) {
 // RawModifyOrderPUT executes a direct PUT /orders/{variety}/{order_id} bypassing gokiteconnect's
 // omitempty struct tags so price=0.00 and trigger_price=0.00 are explicitly sent when mutating SL to MARKET,
 // and attaches market_protection=-1 for MARKET orders as required by Zerodha OMS.
-func (s *Service) RawModifyOrderPUT(
+func (service *Service) RawModifyOrderPUT(
 	ctx context.Context,
 	variety, orderID, orderType string,
 	qty int,
 	price, triggerPrice float64,
 ) (string, error) {
-	session := s.GetSession()
+	session := service.GetSession()
 	if session == nil || session.AccessToken == "" {
 		return "", ErrNoSession
 	}
@@ -403,27 +403,27 @@ func (s *Service) RawModifyOrderPUT(
 	}
 
 	endpoint := fmt.Sprintf("https://api.kite.trade/orders/%s/%s", url.PathEscape(variety), url.PathEscape(orderID))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, strings.NewReader(form.Encode()))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", fmt.Errorf("failed to build modify request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("X-Kite-Version", "3")
-	req.Header.Set("Authorization", fmt.Sprintf("token %s:%s", session.APIKey, session.AccessToken))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("X-Kite-Version", "3")
+	request.Header.Set("Authorization", fmt.Sprintf("token %s:%s", session.APIKey, session.AccessToken))
 
-	resp, err := s.httpClient.Do(req)
+	responseObj, err := service.httpClient.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("kite modify PUT network error: %w", err)
 	}
-	defer resp.Body.Close()
+	defer responseObj.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 65536))
+	body, err := io.ReadAll(io.LimitReader(responseObj.Body, 65536))
 	if err != nil {
 		return "", fmt.Errorf("failed to read modify response body: %w", err)
 	}
 
-	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("kite PUT /orders/%s/%s failed (HTTP %d): %s", variety, orderID, resp.StatusCode, string(body))
+	if responseObj.StatusCode >= 400 {
+		return "", fmt.Errorf("kite PUT /orders/%s/%s failed (HTTP %d): %s", variety, orderID, responseObj.StatusCode, string(body))
 	}
 
 	var envelope struct {
@@ -446,29 +446,29 @@ func (s *Service) RawModifyOrderPUT(
 }
 
 // HasAPISecret returns true when a Kite API secret is configured for postback SHA-256 verification
-func (s *Service) HasAPISecret() bool {
-	return s != nil && s.cfg != nil && strings.TrimSpace(s.cfg.KiteAPISecret) != ""
+func (service *Service) HasAPISecret() bool {
+	return service != nil && service.cfg != nil && strings.TrimSpace(service.cfg.KiteAPISecret) != ""
 }
 
 // VerifyPostbackChecksum validates Zerodha's SHA-256(order_id + order_timestamp + api_secret) webhook signature
-func (s *Service) VerifyPostbackChecksum(orderID, orderTimestamp, checksum string) bool {
-	if orderID == "" || orderTimestamp == "" || checksum == "" || s.cfg == nil || s.cfg.KiteAPISecret == "" {
+func (service *Service) VerifyPostbackChecksum(orderID, orderTimestamp, checksum string) bool {
+	if orderID == "" || orderTimestamp == "" || checksum == "" || service.cfg == nil || service.cfg.KiteAPISecret == "" {
 		return false
 	}
-	raw := orderID + orderTimestamp + s.cfg.KiteAPISecret
+	raw := orderID + orderTimestamp + service.cfg.KiteAPISecret
 	sum := sha256.Sum256([]byte(raw))
 	expected := hex.EncodeToString(sum[:])
 	return strings.EqualFold(expected, strings.TrimSpace(checksum))
 }
 
 // restoreSession reads SQLite for an existing session and checks its IST validity
-func (s *Service) restoreSession() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (service *Service) restoreSession() error {
+	service.mu.Lock()
+	defer service.mu.Unlock()
 
 	var session SessionInfo
 	query := `SELECT user_id, user_name, api_key, access_token, public_token, login_time, created_at FROM kite_sessions WHERE id = 1`
-	row := s.db.QueryRow(query)
+	row := service.db.QueryRow(query)
 
 	var createdAtStr string
 	err := row.Scan(&session.UserID, &session.UserName, &session.APIKey, &session.AccessToken, &session.PublicToken, &session.LoginTime, &createdAtStr)
@@ -491,8 +491,8 @@ func (s *Service) restoreSession() error {
 		return ErrSessionExpired
 	}
 
-	s.session = &session
-	s.client.SetAccessToken(session.AccessToken)
+	service.session = &session
+	service.client.SetAccessToken(session.AccessToken)
 	slog.Info("Active Zerodha Kite session successfully restored from SQLite",
 		"user_id", session.UserID,
 		"user_name", session.UserName,

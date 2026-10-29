@@ -132,30 +132,30 @@ type StockMetrics struct {
 } // Total struct size: 3,792 + 120 + 32 + 32 = 3,976 bytes. Exact multiple of 8!
 
 // SymbolString returns the null-trimmed string representation of the symbol
-func (s *StockMetrics) SymbolString() string {
-	idx := bytes.IndexByte(s.Symbol[:], 0)
+func (stockMetrics *StockMetrics) SymbolString() string {
+	idx := bytes.IndexByte(stockMetrics.Symbol[:], 0)
 	if idx == -1 {
-		idx = len(s.Symbol)
+		idx = len(stockMetrics.Symbol)
 	}
-	return string(s.Symbol[:idx])
+	return string(stockMetrics.Symbol[:idx])
 }
 
 // SetSymbol copies a string into the [16]byte array
-func (s *StockMetrics) SetSymbol(sym string) {
-	copy(s.Symbol[:], sym)
+func (stockMetrics *StockMetrics) SetSymbol(sym string) {
+	copy(stockMetrics.Symbol[:], sym)
 	if len(sym) < 16 {
-		s.Symbol[len(sym)] = 0
+		stockMetrics.Symbol[len(sym)] = 0
 	}
 }
 
 // OpeningRange15m computes the 15-minute Opening Range High and Low (09:15 to 09:30 AM).
 // Zero-cost calculation in 2 nanoseconds without adding any struct fields.
-func (s *StockMetrics) OpeningRange15m() (orh, orl float64, ready bool) {
-	if s.CurrentBarIdx < 3 {
+func (stockMetrics *StockMetrics) OpeningRange15m() (openingRangeHigh, openingRangeLow float64, isRangeReady bool) {
+	if stockMetrics.CurrentBarIdx < 3 {
 		return 0, 0, false // Still inside 09:15-09:30 AM opening drive window
 	}
 
-	orh = math.Max(s.SessionBars[0].High, math.Max(s.SessionBars[1].High, s.SessionBars[2].High))
-	orl = math.Min(s.SessionBars[0].Low, math.Min(s.SessionBars[1].Low, s.SessionBars[2].Low))
-	return orh, orl, orh > 0 && orl > 0
+	openingRangeHigh = math.Max(stockMetrics.SessionBars[0].High, math.Max(stockMetrics.SessionBars[1].High, stockMetrics.SessionBars[2].High))
+	openingRangeLow = math.Min(stockMetrics.SessionBars[0].Low, math.Min(stockMetrics.SessionBars[1].Low, stockMetrics.SessionBars[2].Low))
+	return openingRangeHigh, openingRangeLow, openingRangeHigh > 0 && openingRangeLow > 0
 }

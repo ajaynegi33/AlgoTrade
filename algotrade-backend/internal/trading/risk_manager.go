@@ -67,40 +67,40 @@ func NewCapitalManager(db *sql.DB, kiteService *kite.Service) *CapitalManager {
 	return cm
 }
 
-func (cm *CapitalManager) loadFromDatabase() {
-	if cm.db == nil {
+func (manager *CapitalManager) loadFromDatabase() {
+	if manager.db == nil {
 		return
 	}
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
 
 	var mode string
-	var autoExec int
-	var paperCap, riskPct float64
-	var maxPos int
+	var isAutoExecuteFlag int
+	var paperCapital, riskPercentage float64
+	var maxOpenPositions int
 
-	err := cm.db.QueryRow(`
+	err := manager.db.QueryRow(`
 		SELECT mode, auto_execute, paper_capital, risk_per_trade_pct, max_open_positions
 		FROM execution_settings WHERE id = 1
-	`).Scan(&mode, &autoExec, &paperCap, &riskPct, &maxPos)
+	`).Scan(&mode, &isAutoExecuteFlag, &paperCapital, &riskPercentage, &maxOpenPositions)
 	if err == nil {
 		if mode == "LIVE" || mode == "PAPER" {
-			cm.settings.Mode = mode
+			manager.settings.Mode = mode
 		}
-		cm.settings.AutoExecute = autoExec != 0
-		if paperCap >= 500.0 {
-			cm.settings.PaperCapital = paperCap
+		manager.settings.AutoExecute = isAutoExecuteFlag != 0
+		if paperCapital >= 500.0 {
+			manager.settings.PaperCapital = paperCapital
 		}
-		if riskPct > 0 && riskPct <= 0.03 {
-			cm.settings.RiskPerTradePct = riskPct
+		if riskPercentage > 0 && riskPercentage <= 0.03 {
+			manager.settings.RiskPerTradePct = riskPercentage
 		}
-		if maxPos >= 1 && maxPos <= 15 {
-			cm.settings.MaxOpenPositions = maxPos
+		if maxOpenPositions >= 1 && maxOpenPositions <= 15 {
+			manager.settings.MaxOpenPositions = maxOpenPositions
 		}
 	}
 
-	for _, m := range []string{"PAPER", "LIVE"} {
-		cm.ReconcileWithPositionsDB(m)
+	for _, modeName := range []string{"PAPER", "LIVE"} {
+		manager.ReconcileWithPositionsDB(modeName)
 	}
 }
 
@@ -183,15 +183,15 @@ func (cm *CapitalManager) evaluateCircuitBreakersLocked(mode string, ledger *mar
 
 	// 1. Max Daily Loss Circuit Breaker (-2.0% of Capital or -3.0R)
 	if baseCap > 0 && cumNet <= -0.020*baseCap {
-		ledger.CircuitBreakerLocked = true
+		ledger.IsCircuitBreakerLocked = true
 		ledger.LockReason = fmt.Sprintf("Max Daily Loss Reached (₹%.0f / -2.0%% cap)", cumNet)
 	} else if ledger.ConsecutiveLosses >= 2 {
 		// 2. 2 Consecutive Losses Lockout (Preserves capital; stop for the day)
-		ledger.CircuitBreakerLocked = true
+		ledger.IsCircuitBreakerLocked = true
 		ledger.LockReason = "2 Consecutive Losses Circuit Breaker"
 	} else if oneR > 0 && ledger.PeakNetPnL >= 2.0*oneR && cumNet <= 0.55*ledger.PeakNetPnL {
 		// 3. Profit-Giveback Lock (Protects banked green days once PeakNetPnL >= +2.0R)
-		ledger.CircuitBreakerLocked = true
+		ledger.IsCircuitBreakerLocked = true
 		ledger.LockReason = fmt.Sprintf("Profit-Giveback Lock (Protected ₹%.0f from ₹%.0f peak)", cumNet, ledger.PeakNetPnL)
 	}
 }
@@ -201,7 +201,7 @@ func (cm *CapitalManager) persistDailyLedgerLocked(mode string, ledger *market.D
 		return
 	}
 	lockedInt := 0
-	if ledger.CircuitBreakerLocked {
+	if ledger.IsCircuitBreakerLocked {
 		lockedInt = 1
 	}
 	_, _ = cm.db.Exec(`

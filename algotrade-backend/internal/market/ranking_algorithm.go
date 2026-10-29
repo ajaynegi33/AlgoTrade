@@ -8,7 +8,7 @@ import (
 var istZone = ISTLocation
 
 // CalculateBullishScore performs institutional quantification of a long trade setup
-func CalculateBullishScore(stock *StockMetrics, breadthRatio float64) (score float64, ev float64, pWin float64, reasons ReasonFlag) {
+func CalculateBullishScore(stock *StockMetrics, breadthRatio float64) (score float64, ev float64, winProbability float64, reasons ReasonFlag) {
 	if stock.LTP <= 0 || stock.ExchangeVWAP <= 0 {
 		return 0, 0, 0.44, 0
 	}
@@ -27,31 +27,31 @@ func CalculateBullishScore(stock *StockMetrics, breadthRatio float64) (score flo
 	}
 
 	// 2. Gaussian Value Sweet Spot (vwapScore)
-	x := (stock.LTP - stock.ExchangeVWAP) / atrSafe
+	normalizedVWAPDistance := (stock.LTP - stock.ExchangeVWAP) / atrSafe
 	var vwapScore float64
 	switch {
-	case x < -0.10:
+	case normalizedVWAPDistance < -0.10:
 		vwapScore = 0.0
-	case x < 0.00:
+	case normalizedVWAPDistance < 0.00:
 		vwapScore = 45.0 // Testing VWAP support buffer
-	case x <= 0.60:
-		vwapScore = 100.0 - 150.0*(x-0.25)*(x-0.25) // Peaks at +0.25 ATR = 100.0
-	case x <= 1.50:
-		vwapScore = 80.0 - ((x-0.60)/0.90)*60.0 // Linear decay down to 20.0
+	case normalizedVWAPDistance <= 0.60:
+		vwapScore = 100.0 - 150.0*(normalizedVWAPDistance-0.25)*(normalizedVWAPDistance-0.25) // Peaks at +0.25 ATR = 100.0
+	case normalizedVWAPDistance <= 1.50:
+		vwapScore = 80.0 - ((normalizedVWAPDistance-0.60)/0.90)*60.0 // Linear decay down to 20.0
 	default:
 		vwapScore = 10.0
 		reasons |= PenaltyOverextended
 	}
 
 	// 3. Close Location Value (CLV) Upper-Wick Filter
-	currBar := stock.SessionBars[stock.CurrentBarIdx]
-	barRange := currBar.High - currBar.Low
-	var clv float64 = 1.0
+	currentBar := stock.SessionBars[stock.CurrentBarIdx]
+	barRange := currentBar.High - currentBar.Low
+	var closeLocationValue float64 = 1.0
 	if barRange > float64(stock.TickSize)*2.0 {
-		clv = (stock.LTP - currBar.Low) / barRange
+		closeLocationValue = (stock.LTP - currentBar.Low) / barRange
 	}
 
-	if clv < 0.55 || (currBar.Open > 0 && stock.LTP <= currBar.Open) {
+	if closeLocationValue < 0.55 || (currentBar.Open > 0 && stock.LTP <= currentBar.Open) {
 		if vwapScore > 40.0 {
 			vwapScore = 40.0
 		}
@@ -72,7 +72,7 @@ func CalculateBullishScore(stock *StockMetrics, breadthRatio float64) (score flo
 	}
 
 	// 5. Dual RVOL with 30s Floor & ₹5 Lakh Turnover Gate
-	elapsed := (stock.LastUpdatedUnix - currBar.Timestamp) % 300
+	elapsed := (stock.LastUpdatedUnix - currentBar.Timestamp) % 300
 	if elapsed < 0 {
 		elapsed = 0
 	}
@@ -88,7 +88,7 @@ func CalculateBullishScore(stock *StockMetrics, breadthRatio float64) (score flo
 
 	if currBarVol >= float64(stock.BaselineSlotVolume)*0.15 &&
 		currBarTurnover >= 500000.0 &&
-		(currBar.Open == 0 || stock.LTP > currBar.Open) &&
+		(currentBar.Open == 0 || stock.LTP > currentBar.Open) &&
 		stock.SmoothedBuyerRatio >= 0.55 {
 		compositeRVOL = math.Max(rvolSession, 0.85*rvolPace5m)
 	}
@@ -137,7 +137,7 @@ func CalculateBullishScore(stock *StockMetrics, breadthRatio float64) (score flo
 	}
 
 	// 9. Concrete Structural Proxies & 1.8*1R Overhead Resistance Haircut
-	stopProxy := math.Min(stock.ExchangeVWAP-0.25*atrSafe, currBar.Low-0.15*atrSafe)
+	stopProxy := math.Min(stock.ExchangeVWAP-0.25*atrSafe, currentBar.Low-0.15*atrSafe)
 	oneR := math.Max(stock.LTP-stopProxy, 0.5*atrSafe)
 	stock.StopProxy = stopProxy
 
@@ -157,23 +157,23 @@ func CalculateBullishScore(stock *StockMetrics, breadthRatio float64) (score flo
 	stock.TargetProxy = targetProxy
 
 	// 10. Calibrated Orthogonal Bayesian Confluence PWin
-	pWin = 0.44 // Empirical Base Prior for > 1.5R move
+	winProbability = 0.44 // Empirical Base Prior for > 1.5R move
 
 	// Bucket A: Market Breadth Confluence
 	if breadthRatio >= 0.55 {
-		pWin += 0.07
+		winProbability += 0.07
 	}
 	// Bucket B: Microstructure Execution
 	if stock.SmoothedBuyerRatio >= 0.58 && stock.AggressorBuyRatio >= 0.58 {
-		pWin += 0.07
+		winProbability += 0.07
 	}
 	// Bucket C: Volume Ignition
 	if compositeRVOL >= 1.8 {
-		pWin += 0.06
+		winProbability += 0.06
 	}
 	// Bucket D: Structural Timing
-	if x >= 0.0 && x <= 0.50 && clv >= 0.60 && stock.PullbackCount <= 2 {
-		pWin += 0.08
+	if normalizedVWAPDistance >= 0.0 && normalizedVWAPDistance <= 0.50 && closeLocationValue >= 0.60 && stock.PullbackCount <= 2 {
+		winProbability += 0.08
 	}
 
 	// Midday Lull Penalty (11:30 to 13:15 IST)
@@ -182,34 +182,34 @@ func CalculateBullishScore(stock *StockMetrics, breadthRatio float64) (score flo
 		hour, min := t.Hour(), t.Minute()
 		totMin := hour*60 + min
 		if totMin >= 11*60+30 && totMin <= 13*60+15 && compositeRVOL < 2.2 {
-			pWin -= 0.06
+			winProbability -= 0.06
 		}
 	}
 
 	// Penalties Deductions
 	if reasons&PenaltyBelowPrevClose != 0 {
-		pWin -= 0.08
+		winProbability -= 0.08
 	}
 	if reasons&PenaltyPullbackRedBar != 0 {
-		pWin -= 0.08
+		winProbability -= 0.08
 	}
 	if reasons&PenaltyWideSpread != 0 {
-		pWin -= 0.05
+		winProbability -= 0.05
 	}
 	if reasons&PenaltyExhaustedTrend != 0 {
-		pWin -= 0.10
+		winProbability -= 0.10
 	}
 	if reasons&PenaltyIcebergSell != 0 {
-		pWin -= 0.12
+		winProbability -= 0.12
 	}
 
-	pWin = math.Max(0.20, math.Min(0.75, pWin))
-	stock.PWin = pWin
+	winProbability = math.Max(0.20, math.Min(0.75, winProbability))
+	stock.PWin = winProbability
 
 	// 11. Pre-Trade Expected Value (EV)
 	rTarget := math.Max(0.1, (targetProxy-stock.LTP)/oneR)
 	friction := 0.05 // 0.05R fees & slippage
-	ev = (pWin * rTarget) - ((1.0 - pWin) * 1.0) - friction
+	ev = (winProbability * rTarget) - ((1.0 - winProbability) * 1.0) - friction
 	stock.EV = ev
 
 	if ev >= 0.40 {
@@ -244,14 +244,14 @@ func CalculateBullishScore(stock *StockMetrics, breadthRatio float64) (score flo
 
 	stock.BullishScore = score
 	stock.Reasons = reasons
-	return score, ev, pWin, reasons
+	return score, ev, winProbability, reasons
 }
 
 // CalculateBearishScore performs institutional quantification of a short-selling breakdown setup
 func CalculateBearishScore(
 	stock *StockMetrics,
 	breadthRatio float64,
-) (score float64, ev float64, pWin float64, reasons ReasonFlag) {
+) (score float64, ev float64, winProbability float64, reasons ReasonFlag) {
 	if stock.LTP <= 0 || stock.ExchangeVWAP <= 0 {
 		return 0, 0, 0.44, 0
 	}
@@ -259,31 +259,31 @@ func CalculateBearishScore(
 	atrSafe := math.Max(stock.ATR14, stock.LTP*0.0025)
 
 	// Inverted Value Sweet Spot: Short push-off below VWAP
-	xBear := (stock.ExchangeVWAP - stock.LTP) / atrSafe
+	normalizedVWAPDistanceBear := (stock.ExchangeVWAP - stock.LTP) / atrSafe
 	var sVWAPBear float64
 	switch {
-	case xBear < -0.10:
+	case normalizedVWAPDistanceBear < -0.10:
 		sVWAPBear = 0.0
-	case xBear < 0.00:
+	case normalizedVWAPDistanceBear < 0.00:
 		sVWAPBear = 45.0 // Testing VWAP resistance buffer
-	case xBear <= 0.60:
-		sVWAPBear = 100.0 - 150.0*(xBear-0.25)*(xBear-0.25)
-	case xBear <= 1.50:
-		sVWAPBear = 80.0 - ((xBear-0.60)/0.90)*60.0
+	case normalizedVWAPDistanceBear <= 0.60:
+		sVWAPBear = 100.0 - 150.0*(normalizedVWAPDistanceBear-0.25)*(normalizedVWAPDistanceBear-0.25)
+	case normalizedVWAPDistanceBear <= 1.50:
+		sVWAPBear = 80.0 - ((normalizedVWAPDistanceBear-0.60)/0.90)*60.0
 	default:
 		sVWAPBear = 10.0
 		reasons |= PenaltyOverextended
 	}
 
 	// Inverted CLV (Hammer / Lower Wick Rejection Filter)
-	currBar := stock.SessionBars[stock.CurrentBarIdx]
-	barRange := currBar.High - currBar.Low
-	var invertedCLV float64 = 1.0
+	currentBar := stock.SessionBars[stock.CurrentBarIdx]
+	barRange := currentBar.High - currentBar.Low
+	var invertedCloseLocationValue float64 = 1.0
 	if barRange > float64(stock.TickSize)*2.0 {
-		invertedCLV = (currBar.High - stock.LTP) / barRange
+		invertedCloseLocationValue = (currentBar.High - stock.LTP) / barRange
 	}
 
-	if invertedCLV < 0.55 || (currBar.Open > 0 && stock.LTP >= currBar.Open) {
+	if invertedCloseLocationValue < 0.55 || (currentBar.Open > 0 && stock.LTP >= currentBar.Open) {
 		if sVWAPBear > 40.0 {
 			sVWAPBear = 40.0
 		}
@@ -295,7 +295,7 @@ func CalculateBearishScore(
 	aggressorSellRatio := 1.0 - stock.AggressorBuyRatio
 
 	// Support Haircut on Day Low
-	stopProxy := math.Max(stock.ExchangeVWAP+0.25*atrSafe, currBar.High+0.15*atrSafe)
+	stopProxy := math.Max(stock.ExchangeVWAP+0.25*atrSafe, currentBar.High+0.15*atrSafe)
 	oneR := math.Max(stopProxy-stock.LTP, 0.5*atrSafe)
 
 	// Dual-Horizon RVOL (consistent with CalculateBullishScore so midday 5m breakdown surges are captured)
@@ -313,23 +313,23 @@ func CalculateBearishScore(
 		}
 	}
 
-	pWin = 0.44
+	winProbability = 0.44
 	if breadthRatio <= 0.45 {
-		pWin += 0.07
+		winProbability += 0.07
 	}
 	if aggressorSellRatio >= 0.58 && stock.SmoothedBuyerRatio <= 0.42 {
-		pWin += 0.07
+		winProbability += 0.07
 	}
 	if compositeRVOL >= 1.8 {
-		pWin += 0.06
+		winProbability += 0.06
 	}
-	if xBear >= 0.0 && xBear <= 0.50 && invertedCLV >= 0.60 {
-		pWin += 0.08
+	if normalizedVWAPDistanceBear >= 0.0 && normalizedVWAPDistanceBear <= 0.50 && invertedCloseLocationValue >= 0.60 {
+		winProbability += 0.08
 	}
 
-	pWin = math.Max(0.20, math.Min(0.75, pWin))
+	winProbability = math.Max(0.20, math.Min(0.75, winProbability))
 	rTarget := math.Max(0.1, (stock.LTP-targetProxy)/oneR)
-	ev = (pWin * rTarget) - ((1.0 - pWin) * 1.0) - 0.05
+	ev = (winProbability * rTarget) - ((1.0 - winProbability) * 1.0) - 0.05
 
 	sRVOLBear := math.Min(100.0, 105.0/(1.0+math.Exp(-1.65*(compositeRVOL-2.0))))
 	sRSBear := math.Min(100.0, math.Max(0.0, 50.0+48.4*math.Tanh(0.65*(-stock.CompositeRS))))
@@ -350,5 +350,5 @@ func CalculateBearishScore(
 
 	stock.BearishScore = score
 	stock.Reasons |= (reasons & (ReasonBearishBreakdown | ReasonSectorLagging))
-	return score, ev, pWin, reasons
+	return score, ev, winProbability, reasons
 }

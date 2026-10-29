@@ -9,171 +9,171 @@ import (
 )
 
 // TriggerEmergencyExit transitions immediately to market flatten (non-blocking from hot path)
-func (w *PositionWorker) TriggerEmergencyExit(reason string) {
-	if w.isClosed.Load() {
+func (worker *PositionWorker) TriggerEmergencyExit(reason string) {
+	if worker.isClosed.Load() {
 		return
 	}
-	if w.pendingMarketExit.CompareAndSwap(false, true) {
+	if worker.isMarketExitPending.CompareAndSwap(false, true) {
 		select {
-		case w.emergReasonCh <- reason:
+		case worker.emergReasonCh <- reason:
 		default:
 		}
-		w.wake()
+		worker.wakeWorker()
 	}
 }
 
 // ForceEmergencyExit unconditionally forces an emergency exit, even if a previous exit attempt was pending
-func (w *PositionWorker) ForceEmergencyExit(reason string) {
-	if w.isClosed.Load() {
+func (worker *PositionWorker) ForceEmergencyExit(reason string) {
+	if worker.isClosed.Load() {
 		return
 	}
-	w.pendingMarketExit.Store(true)
+	worker.isMarketExitPending.Store(true)
 	select {
-	case w.emergReasonCh <- reason:
-		w.wake()
+	case worker.emergReasonCh <- reason:
+		worker.wakeWorker()
 	default:
 		// If emergReasonCh is already full or workerLoop has terminated, execute emergency flatten directly
-		go w.executeEmergencyFlatten(reason)
+		go worker.executeEmergencyFlatten(reason)
 	}
 }
 
-func (w *PositionWorker) processPendingWork() {
-	if w.isClosed.Load() || w.pendingMarketExit.Load() {
+func (worker *PositionWorker) processPendingWork() {
+	if worker.isClosed.Load() || worker.isMarketExitPending.Load() {
 		return
 	}
 
 	// 1. Ensure initial SL is placed as soon as entry fills
-	if w.filledEntryQty.Load() > 0 {
-		w.mu.RLock()
-		hasSL := w.slOrderID != ""
-		w.mu.RUnlock()
-		if !hasSL && int(w.filledEntryQty.Load()) >= w.InitialQty {
-			w.ensureInitialSLPlaced()
-			if w.isClosed.Load() || w.pendingMarketExit.Load() {
+	if worker.filledEntryQty.Load() > 0 {
+		worker.mu.RLock()
+		hasSL := worker.slOrderID != ""
+		worker.mu.RUnlock()
+		if !hasSL && int(worker.filledEntryQty.Load()) >= worker.InitialQty {
+			worker.ensureInitialSLPlaced()
+			if worker.isClosed.Load() || worker.isMarketExitPending.Load() {
 				return
 			}
 		}
 	}
 
 	// 2. Execute +1.0R 3-Step Race-Free Scale-Out if triggered
-	if w.tranche1Pending.Load() && !w.tranche1Done.Load() {
-		w.executeThreeStepScaleOut()
-		if w.isClosed.Load() || w.pendingMarketExit.Load() {
+	if worker.isTranche1Pending.Load() && !worker.hasTranche1Completed.Load() {
+		worker.executeThreeStepScaleOut()
+		if worker.isClosed.Load() || worker.isMarketExitPending.Load() {
 			return
 		}
 	}
 
 	// 3. Apply pending Stop Ratchet if proposedStop > confirmedStop and modCount < 24
-	w.mu.RLock()
-	slOrdID := w.slOrderID
-	w.mu.RUnlock()
-	if slOrdID == "" || w.modCount.Load() >= MaxSafetyModifications {
+	worker.mu.RLock()
+	slOrdID := worker.slOrderID
+	worker.mu.RUnlock()
+	if slOrdID == "" || worker.modCount.Load() >= MaxSafetyModifications {
 		return
 	}
 
-	proposed := math.Float64frombits(w.proposedStopBits.Load())
-	confirmed := math.Float64frombits(w.confirmedStopBits.Load())
+	proposed := math.Float64frombits(worker.proposedStopBits.Load())
+	confirmed := math.Float64frombits(worker.confirmedStopBits.Load())
 	if proposed <= confirmed {
 		return
 	}
 
-	rem := w.RemainingQty()
+	rem := worker.RemainingQty()
 	if rem <= 0 {
 		return
 	}
 
-	ltp := w.LatestLTP()
-	maxLegal := RoundDownToTick(ltp-math.Max(2.0*w.TickSize, 0.001*ltp), w.TickSize)
+	ltp := worker.LatestLTP()
+	maxLegal := RoundDownToTick(ltp-math.Max(2.0*worker.TickSize, 0.001*ltp), worker.TickSize)
 	targetTrigger := math.Min(proposed, maxLegal)
 	if targetTrigger <= confirmed {
 		return
 	}
 
-	limitPx := ComputeSellSLLimitPrice(targetTrigger, w.TickSize)
-	err := w.broker.ModifySLOrder(w.ctx, slOrdID, rem, targetTrigger, limitPx, ltp, w.TickSize)
+	limitPx := ComputeSellSLLimitPrice(targetTrigger, worker.TickSize)
+	err := worker.broker.ModifySLOrder(worker.ctx, slOrdID, rem, targetTrigger, limitPx, ltp, worker.TickSize)
 	if err != nil {
-		slog.Warn("SL ratchet modification rejected by broker", "symbol", w.Symbol, "target", targetTrigger, "error", err)
+		slog.Warn("SL ratchet modification rejected by broker", "symbol", worker.Symbol, "target", targetTrigger, "error", err)
 		return
 	}
 
-	newMods := w.modCount.Add(1)
-	w.lastModUnixMs.Store(time.Now().UnixMilli())
-	w.confirmedStopBits.Store(math.Float64bits(targetTrigger))
+	newMods := worker.modCount.Add(1)
+	worker.lastModUnixMs.Store(time.Now().UnixMilli())
+	worker.confirmedStopBits.Store(math.Float64bits(targetTrigger))
 
 	if newMods >= MaxSafetyModifications {
-		w.currentGear.Store(GearShadowExit)
-		w.mu.Lock()
-		w.state = StateShadowStopActive
-		w.mu.Unlock()
+		worker.currentGear.Store(GearShadowExit)
+		worker.mu.Lock()
+		worker.state = StateShadowStopActive
+		worker.mu.Unlock()
 	} else if newMods >= 18 {
-		w.currentGear.Store(GearProfitLock)
+		worker.currentGear.Store(GearProfitLock)
 	}
-	w.persistPositionState()
+	worker.persistPositionState()
 }
 
-func (w *PositionWorker) ensureInitialSLPlaced() {
-	w.mu.RLock()
-	if w.slOrderID != "" || w.isClosed.Load() {
-		w.mu.RUnlock()
+func (worker *PositionWorker) ensureInitialSLPlaced() {
+	worker.mu.RLock()
+	if worker.slOrderID != "" || worker.isClosed.Load() {
+		worker.mu.RUnlock()
 		return
 	}
-	w.mu.RUnlock()
+	worker.mu.RUnlock()
 
-	rem := w.RemainingQty()
+	rem := worker.RemainingQty()
 	if rem <= 0 {
 		return
 	}
 
-	ltp := w.LatestLTP()
+	ltp := worker.LatestLTP()
 	// Guard: If price already crashed below InitialStop during entry fill, flatten immediately
-	if ltp > 0 && ltp <= w.InitialStop+w.TickSize {
+	if ltp > 0 && ltp <= worker.InitialStop+worker.TickSize {
 		slog.Warn("LTP already at or below InitialStop upon entry fill; executing immediate flatten",
-			"symbol", w.Symbol, "ltp", ltp, "initial_stop", w.InitialStop)
-		w.executeEmergencyFlatten("INITIAL_SL_BREACHED_ON_FILL")
+			"symbol", worker.Symbol, "ltp", ltp, "initial_stop", worker.InitialStop)
+		worker.executeEmergencyFlatten("INITIAL_SL_BREACHED_ON_FILL")
 		return
 	}
 
-	limitPx := ComputeSellSLLimitPrice(w.InitialStop, w.TickSize)
-	slID, err := w.broker.PlaceSLOrder(w.ctx, w.Symbol, w.Token, rem, w.InitialStop, limitPx, ltp, w.TickSize)
+	limitPx := ComputeSellSLLimitPrice(worker.InitialStop, worker.TickSize)
+	slID, err := worker.broker.PlaceSLOrder(worker.ctx, worker.Symbol, worker.Token, rem, worker.InitialStop, limitPx, ltp, worker.TickSize)
 	if err != nil {
 		slog.Error("Initial SL placement failed; executing immediate protective flatten",
-			"symbol", w.Symbol, "error", err)
-		w.executeEmergencyFlatten("INITIAL_SL_REJECTED_BY_OMS")
+			"symbol", worker.Symbol, "error", err)
+		worker.executeEmergencyFlatten("INITIAL_SL_REJECTED_BY_OMS")
 		return
 	}
 
-	w.mu.Lock()
-	w.slOrderID = slID
-	w.slOrderStatus = OrderStatusTrigPending
-	w.state = StateProtectedActive
-	w.mu.Unlock()
+	worker.mu.Lock()
+	worker.slOrderID = slID
+	worker.slOrderStatus = OrderStatusTrigPending
+	worker.state = StateProtectedActive
+	worker.mu.Unlock()
 
-	w.reconciler.RegisterOrder(slID, w.PositionID, "SL", w.Symbol, "SELL", "SL", rem, limitPx, w.InitialStop, OrderStatusTrigPending)
-	w.persistPositionState()
+	worker.reconciler.RegisterOrder(slID, worker.PositionID, "SL", worker.Symbol, "SELL", "SL", rem, limitPx, worker.InitialStop, OrderStatusTrigPending)
+	worker.persistPositionState()
 }
 
 // executeThreeStepScaleOut performs the Race-Free 3-Step Scale-Out at +1.0R with Compensating Rollback
-func (w *PositionWorker) executeThreeStepScaleOut() {
-	rem := w.RemainingQty()
+func (worker *PositionWorker) executeThreeStepScaleOut() {
+	rem := worker.RemainingQty()
 	if rem < 2 {
 		// Position is 1 share: cannot split; lock Breakeven stop directly
-		w.tranche1Done.Store(true)
-		w.tranche1Pending.Store(false)
-		w.currentGear.Store(GearDynamicTrail)
-		w.ProposeStopRatchet(w.BreakevenStop, w.OneR, true)
+		worker.hasTranche1Completed.Store(true)
+		worker.isTranche1Pending.Store(false)
+		worker.currentGear.Store(GearDynamicTrail)
+		worker.ProposeStopRatchet(worker.BreakevenStop, worker.OneR, true)
 		return
 	}
 
-	w.mu.Lock()
-	slOrdID := w.slOrderID
-	w.state = StateScaleOutPending
-	w.mu.Unlock()
+	worker.mu.Lock()
+	slOrdID := worker.slOrderID
+	worker.state = StateScaleOutPending
+	worker.mu.Unlock()
 
 	if slOrdID == "" {
-		w.ensureInitialSLPlaced()
-		w.mu.RLock()
-		slOrdID = w.slOrderID
-		w.mu.RUnlock()
+		worker.ensureInitialSLPlaced()
+		worker.mu.RLock()
+		slOrdID = worker.slOrderID
+		worker.mu.RUnlock()
 		if slOrdID == "" {
 			return
 		}
@@ -181,214 +181,214 @@ func (w *PositionWorker) executeThreeStepScaleOut() {
 
 	scaleOutQty := rem / 2
 	runnerQty := rem - scaleOutQty
-	curStop := math.Float64frombits(w.confirmedStopBits.Load())
-	curLimit := ComputeSellSLLimitPrice(curStop, w.TickSize)
-	ltp := w.LatestLTP()
+	curStop := math.Float64frombits(worker.confirmedStopBits.Load())
+	curLimit := ComputeSellSLLimitPrice(curStop, worker.TickSize)
+	ltp := worker.LatestLTP()
 
 	// STEP 1: Shrink resting SL quantity from rem -> runnerQty while KEEPING curStop trigger unchanged
 	// (Prevents resting SL from firing at Breakeven during the 3ms window while Step 2 is in flight!)
-	if w.modCount.Load() >= MaxSafetyModifications {
-		w.tranche1Pending.Store(false)
+	if worker.modCount.Load() >= MaxSafetyModifications {
+		worker.isTranche1Pending.Store(false)
 		return
 	}
-	if err := w.broker.ModifySLOrder(w.ctx, slOrdID, runnerQty, curStop, curLimit, ltp, w.TickSize); err != nil {
-		slog.Warn("Scale-out Step 1 (shrink SL qty) failed; keeping 100% SL intact", "symbol", w.Symbol, "error", err)
-		w.mu.Lock()
-		w.state = StateProtectedActive
-		w.mu.Unlock()
-		w.tranche1Pending.Store(false)
+	if err := worker.broker.ModifySLOrder(worker.ctx, slOrdID, runnerQty, curStop, curLimit, ltp, worker.TickSize); err != nil {
+		slog.Warn("Scale-out Step 1 (shrink SL qty) failed; keeping 100% SL intact", "symbol", worker.Symbol, "error", err)
+		worker.mu.Lock()
+		worker.state = StateProtectedActive
+		worker.mu.Unlock()
+		worker.isTranche1Pending.Store(false)
 		return
 	}
-	w.modCount.Add(1)
-	w.lastModUnixMs.Store(time.Now().UnixMilli())
+	worker.modCount.Add(1)
+	worker.lastModUnixMs.Store(time.Now().UnixMilli())
 
 	// STEP 2: Place Protected Marketable-Limit Sell for scaleOutQty (50%)
 	var stockPtr *market.StockMetrics
-	if w.getStockPtr != nil {
-		stockPtr = w.getStockPtr()
+	if worker.getStockPtr != nil {
+		stockPtr = worker.getStockPtr()
 	}
-	scaleOrdID, sellErr := w.broker.PlaceProtectedMarketSell(w.ctx, w.Symbol, w.Token, scaleOutQty, ltp, w.TickSize, stockPtr)
+	scaleOrdID, sellErr := worker.broker.PlaceProtectedMarketSell(worker.ctx, worker.Symbol, worker.Token, scaleOutQty, ltp, worker.TickSize, stockPtr)
 	if sellErr != nil {
-		slog.Error("Scale-out Step 2 sell failed; rolling back resting SL to full quantity", "symbol", w.Symbol, "error", sellErr)
+		slog.Error("Scale-out Step 2 sell failed; rolling back resting SL to full quantity", "symbol", worker.Symbol, "error", sellErr)
 		// COMPENSATING ROLLBACK: Restore resting SL quantity back to full RemainingQty()
-		fullRem := w.RemainingQty()
-		if fullRem > 0 && w.modCount.Load() < MaxSafetyModifications {
-			if rbErr := w.broker.ModifySLOrder(w.ctx, slOrdID, fullRem, curStop, curLimit, w.LatestLTP(), w.TickSize); rbErr != nil {
-				w.executeEmergencyFlatten("SCALE_OUT_ROLLBACK_FAILED")
+		fullRem := worker.RemainingQty()
+		if fullRem > 0 && worker.modCount.Load() < MaxSafetyModifications {
+			if rbErr := worker.broker.ModifySLOrder(worker.ctx, slOrdID, fullRem, curStop, curLimit, worker.LatestLTP(), worker.TickSize); rbErr != nil {
+				worker.executeEmergencyFlatten("SCALE_OUT_ROLLBACK_FAILED")
 				return
 			}
-			w.modCount.Add(1)
+			worker.modCount.Add(1)
 		}
-		w.mu.Lock()
-		w.state = StateProtectedActive
-		w.mu.Unlock()
-		w.tranche1Pending.Store(false)
+		worker.mu.Lock()
+		worker.state = StateProtectedActive
+		worker.mu.Unlock()
+		worker.isTranche1Pending.Store(false)
 		return
 	}
 
-	w.mu.Lock()
-	w.scaleOutOrderID = scaleOrdID
-	w.mu.Unlock()
-	w.reconciler.RegisterOrder(scaleOrdID, w.PositionID, "SCALE_OUT", w.Symbol, "SELL", "LIMIT", scaleOutQty, ltp, 0, OrderStatusOpen)
+	worker.mu.Lock()
+	worker.scaleOutOrderID = scaleOrdID
+	worker.mu.Unlock()
+	worker.reconciler.RegisterOrder(scaleOrdID, worker.PositionID, "SCALE_OUT", worker.Symbol, "SELL", "LIMIT", scaleOutQty, ltp, 0, OrderStatusOpen)
 
 	// Wait up to 800ms for scale-out fill confirmation
 	waitTimer := time.NewTimer(800 * time.Millisecond)
 	select {
-	case <-w.fillNotifyCh:
+	case <-worker.fillNotifyCh:
 	case <-waitTimer.C:
-		_, _ = w.reconciler.SyncOrdersCoalesced(w.ctx, w.broker)
+		_, _ = worker.reconciler.SyncOrdersCoalesced(worker.ctx, worker.broker)
 	}
 	waitTimer.Stop()
 
 	// Falsification Guard (Bug #14): If scale-out limit order did not fully fill within 800ms,
 	// cancel the unfilled remainder and reconcile before resizing the resting SL order so both cannot fill!
-	if w.RemainingQty() > runnerQty && scaleOrdID != "" {
-		_ = w.broker.CancelOrder(w.ctx, scaleOrdID)
-		_, _ = w.reconciler.SyncOrdersCoalesced(w.ctx, w.broker)
+	if worker.RemainingQty() > runnerQty && scaleOrdID != "" {
+		_ = worker.broker.CancelOrder(worker.ctx, scaleOrdID)
+		_, _ = worker.reconciler.SyncOrdersCoalesced(worker.ctx, worker.broker)
 	}
 
-	remAfter := w.RemainingQty()
-	if remAfter <= 0 || w.isClosed.Load() {
+	remAfter := worker.RemainingQty()
+	if remAfter <= 0 || worker.isClosed.Load() {
 		return
 	}
 
 	// STEP 3: Raise the remaining runner's SL trigger to Tax-Free Breakeven (Entry + Taxes + 0.15%)
-	beTrigger := BreakevenTriggerPrice(w.GetEntryPrice(), int(w.filledEntryQty.Load()), remAfter, w.TickSize)
-	w.breakevenStopBits.Store(math.Float64bits(beTrigger))
-	w.tranche1Done.Store(true)
-	w.tranche1Pending.Store(false)
-	w.currentGear.Store(GearDynamicTrail)
+	beTrigger := BreakevenTriggerPrice(worker.GetEntryPrice(), int(worker.filledEntryQty.Load()), remAfter, worker.TickSize)
+	worker.breakevenStopBits.Store(math.Float64bits(beTrigger))
+	worker.hasTranche1Completed.Store(true)
+	worker.isTranche1Pending.Store(false)
+	worker.currentGear.Store(GearDynamicTrail)
 
-	w.mu.Lock()
-	w.BreakevenStop = beTrigger
-	w.state = StateRunnerActive
-	w.mu.Unlock()
+	worker.mu.Lock()
+	worker.BreakevenStop = beTrigger
+	worker.state = StateRunnerActive
+	worker.mu.Unlock()
 
-	nowLTP := w.LatestLTP()
-	if nowLTP <= beTrigger+2.0*w.TickSize {
+	nowLTP := worker.LatestLTP()
+	if nowLTP <= beTrigger+2.0*worker.TickSize {
 		// Price whipped back down to Breakeven during scale-out -> Flatten runner to lock net profit!
-		w.executeEmergencyFlatten("RUNNER_BREAKEVEN_LOCK")
+		worker.executeEmergencyFlatten("RUNNER_BREAKEVEN_LOCK")
 		return
 	}
 
 	if beTrigger > curStop {
 		// Always record beTrigger in shadowStopBits & proposedStopBits so if ModifySLOrder is transiently
 		// rejected right now, processPendingWork() ratchets the SL to beTrigger on the next eligible tick.
-		w.shadowStopBits.Store(math.Float64bits(beTrigger))
-		w.proposedStopBits.Store(math.Float64bits(beTrigger))
-		if w.modCount.Load() < MaxSafetyModifications {
-			beLimit := ComputeSellSLLimitPrice(beTrigger, w.TickSize)
-			if err := w.broker.ModifySLOrder(w.ctx, slOrdID, remAfter, beTrigger, beLimit, nowLTP, w.TickSize); err == nil {
-				w.modCount.Add(1)
-				w.lastModUnixMs.Store(time.Now().UnixMilli())
-				w.confirmedStopBits.Store(math.Float64bits(beTrigger))
+		worker.shadowStopBits.Store(math.Float64bits(beTrigger))
+		worker.proposedStopBits.Store(math.Float64bits(beTrigger))
+		if worker.modCount.Load() < MaxSafetyModifications {
+			beLimit := ComputeSellSLLimitPrice(beTrigger, worker.TickSize)
+			if err := worker.broker.ModifySLOrder(worker.ctx, slOrdID, remAfter, beTrigger, beLimit, nowLTP, worker.TickSize); err == nil {
+				worker.modCount.Add(1)
+				worker.lastModUnixMs.Store(time.Now().UnixMilli())
+				worker.confirmedStopBits.Store(math.Float64bits(beTrigger))
 			}
 		}
 	}
-	w.persistPositionState()
+	worker.persistPositionState()
 }
 
 // executeEmergencyFlatten runs the 3-Stage Bulletproof Exit Protocol until RemainingQty() == 0
-func (w *PositionWorker) executeEmergencyFlatten(reason string) {
-	if w.isClosed.Load() {
+func (worker *PositionWorker) executeEmergencyFlatten(reason string) {
+	if worker.isClosed.Load() {
 		return
 	}
-	w.pendingMarketExit.Store(true)
+	worker.isMarketExitPending.Store(true)
 
-	w.mu.Lock()
-	if w.exitReason == "" {
-		w.exitReason = reason
+	worker.mu.Lock()
+	if worker.exitReason == "" {
+		worker.exitReason = reason
 	}
-	w.state = StateEmergencyFlatten
-	slOrdID := w.slOrderID
-	entryOrdID := w.entryOrderID
-	w.mu.Unlock()
+	worker.state = StateEmergencyFlatten
+	slOrdID := worker.slOrderID
+	entryOrdID := worker.entryOrderID
+	worker.mu.Unlock()
 
-	w.persistPositionState()
+	worker.persistPositionState()
 
 	// If entry order is still open/partially filled, cancel it first
-	if entryOrdID != "" && int(w.filledEntryQty.Load()) < w.InitialQty {
-		_ = w.broker.CancelOrder(w.ctx, entryOrdID)
+	if entryOrdID != "" && int(worker.filledEntryQty.Load()) < worker.InitialQty {
+		_ = worker.broker.CancelOrder(worker.ctx, entryOrdID)
 	}
 
-	rem := w.RemainingQty()
+	rem := worker.RemainingQty()
 	if rem <= 0 {
-		_, _ = w.reconciler.SyncOrdersCoalesced(w.ctx, w.broker)
-		rem = w.RemainingQty()
+		_, _ = worker.reconciler.SyncOrdersCoalesced(worker.ctx, worker.broker)
+		rem = worker.RemainingQty()
 		if rem <= 0 {
-			w.mu.Lock()
-			w.finalizeClosedLocked(reason)
-			w.mu.Unlock()
-			w.persistPositionState()
-			w.notifyClosed()
+			worker.mu.Lock()
+			worker.finalizeClosedLocked(reason)
+			worker.mu.Unlock()
+			worker.persistPositionState()
+			worker.notifyClosed()
 			return
 		}
 	}
 
 	var stockPtr *market.StockMetrics
-	if w.getStockPtr != nil {
-		stockPtr = w.getStockPtr()
+	if worker.getStockPtr != nil {
+		stockPtr = worker.getStockPtr()
 	}
 
 	// STAGE A: Mutate resting SL order directly into MARKET (Uses Modification #25 or remaining slot)
-	if slOrdID != "" && w.modCount.Load() < MaxExchangeOrderMods {
-		if err := w.broker.MutateSLToMarket(w.ctx, slOrdID, rem, stockPtr); err == nil {
-			w.modCount.Add(1)
+	if slOrdID != "" && worker.modCount.Load() < MaxExchangeOrderMods {
+		if err := worker.broker.MutateSLToMarket(worker.ctx, slOrdID, rem, stockPtr); err == nil {
+			worker.modCount.Add(1)
 			waitA := time.NewTimer(900 * time.Millisecond)
 			select {
-			case <-w.fillNotifyCh:
+			case <-worker.fillNotifyCh:
 			case <-waitA.C:
-				_, _ = w.reconciler.SyncOrdersCoalesced(w.ctx, w.broker)
+				_, _ = worker.reconciler.SyncOrdersCoalesced(worker.ctx, worker.broker)
 			}
 			waitA.Stop()
-			if w.RemainingQty() <= 0 || w.isClosed.Load() {
+			if worker.RemainingQty() <= 0 || worker.isClosed.Load() {
 				return
 			}
 		} else {
 			slog.Warn("Stage A MutateSLToMarket failed, escalating to Stage B Cancel+Sweep",
-				"symbol", w.Symbol, "error", err)
+				"symbol", worker.Symbol, "error", err)
 		}
 	}
 
 	// STAGE B & C: Cancel Resting SL -> Reconcile -> Escalating LPP Sweep (0.75% -> 1.50% -> 2.50% -> 3.50%/Market)
 	if slOrdID != "" {
-		_ = w.broker.CancelOrder(w.ctx, slOrdID)
+		_ = worker.broker.CancelOrder(worker.ctx, slOrdID)
 	}
-	_, _ = w.reconciler.SyncOrdersCoalesced(w.ctx, w.broker)
+	_, _ = worker.reconciler.SyncOrdersCoalesced(worker.ctx, worker.broker)
 
 	slippageSchedule := [4]float64{0.0075, 0.0150, 0.0250, 0.0350}
 	for attempt := 1; attempt <= 4; attempt++ {
-		rem = w.RemainingQty()
-		if rem <= 0 || w.isClosed.Load() {
+		rem = worker.RemainingQty()
+		if rem <= 0 || worker.isClosed.Load() {
 			return
 		}
 
-		ltp := w.LatestLTP()
+		ltp := worker.LatestLTP()
 		if stockPtr != nil && stockPtr.LTP > 0 {
 			ltp = stockPtr.LTP
 		}
 		slipPct := slippageSchedule[attempt-1]
-		emergOrdID, err := w.broker.PlaceEmergencySweepSell(w.ctx, w.Symbol, w.Token, rem, ltp, w.TickSize, slipPct, stockPtr)
+		emergOrdID, err := worker.broker.PlaceEmergencySweepSell(worker.ctx, worker.Symbol, worker.Token, rem, ltp, worker.TickSize, slipPct, stockPtr)
 		if err == nil && emergOrdID != "" {
-			w.reconciler.RegisterOrder(emergOrdID, w.PositionID, "EMERGENCY_EXIT", w.Symbol, "SELL", "LIMIT", rem, ltp, 0, OrderStatusOpen)
+			worker.reconciler.RegisterOrder(emergOrdID, worker.PositionID, "EMERGENCY_EXIT", worker.Symbol, "SELL", "LIMIT", rem, ltp, 0, OrderStatusOpen)
 		}
 
 		waitB := time.NewTimer(900 * time.Millisecond)
 		select {
-		case <-w.fillNotifyCh:
+		case <-worker.fillNotifyCh:
 		case <-waitB.C:
-			_, _ = w.reconciler.SyncOrdersCoalesced(w.ctx, w.broker)
+			_, _ = worker.reconciler.SyncOrdersCoalesced(worker.ctx, worker.broker)
 		}
 		waitB.Stop()
 
-		if w.RemainingQty() <= 0 || w.isClosed.Load() {
+		if worker.RemainingQty() <= 0 || worker.isClosed.Load() {
 			return
 		}
 		// Falsification Guard (Bug #15): Cancel any unfilled portion of emergOrdID and reconcile
 		// before placing the next retry attempt so two emergency sell orders are never open simultaneously!
 		if emergOrdID != "" {
-			_ = w.broker.CancelOrder(w.ctx, emergOrdID)
-			_, _ = w.reconciler.SyncOrdersCoalesced(w.ctx, w.broker)
+			_ = worker.broker.CancelOrder(worker.ctx, emergOrdID)
+			_, _ = worker.reconciler.SyncOrdersCoalesced(worker.ctx, worker.broker)
 		}
 	}
 
@@ -396,49 +396,49 @@ func (w *PositionWorker) executeEmergencyFlatten(reason string) {
 	// If all 4 rapid attempts failed (e.g., temporary air-pocket, lower circuit freeze, or transient API error),
 	// NEVER return and abandon a live position with no resting SL order! Keep retrying every 2s until RemainingQty == 0.
 	slog.Warn("[CRITICAL OMS RECOVERY] Position still open after 4 emergency sweep attempts; entering persistent 2s recovery loop",
-		"position_id", w.PositionID, "symbol", w.Symbol, "remaining_qty", w.RemainingQty())
+		"position_id", worker.PositionID, "symbol", worker.Symbol, "remaining_qty", worker.RemainingQty())
 
 	recoveryTicker := time.NewTicker(2 * time.Second)
 	defer recoveryTicker.Stop()
 
 	for {
-		if w.RemainingQty() <= 0 || w.isClosed.Load() {
+		if worker.RemainingQty() <= 0 || worker.isClosed.Load() {
 			return
 		}
 		select {
-		case <-w.ctx.Done():
+		case <-worker.ctx.Done():
 			return
-		case <-w.fillNotifyCh:
-			if w.RemainingQty() <= 0 || w.isClosed.Load() {
+		case <-worker.fillNotifyCh:
+			if worker.RemainingQty() <= 0 || worker.isClosed.Load() {
 				return
 			}
 		case <-recoveryTicker.C:
-			_, _ = w.reconciler.SyncOrdersCoalesced(w.ctx, w.broker)
-			rem = w.RemainingQty()
-			if rem <= 0 || w.isClosed.Load() {
+			_, _ = worker.reconciler.SyncOrdersCoalesced(worker.ctx, worker.broker)
+			rem = worker.RemainingQty()
+			if rem <= 0 || worker.isClosed.Load() {
 				return
 			}
-			ltp := w.LatestLTP()
+			ltp := worker.LatestLTP()
 			if stockPtr != nil && stockPtr.LTP > 0 {
 				ltp = stockPtr.LTP
 			}
-			recOrdID, err := w.broker.PlaceEmergencySweepSell(w.ctx, w.Symbol, w.Token, rem, ltp, w.TickSize, 0.0350, stockPtr)
+			recOrdID, err := worker.broker.PlaceEmergencySweepSell(worker.ctx, worker.Symbol, worker.Token, rem, ltp, worker.TickSize, 0.0350, stockPtr)
 			if err == nil && recOrdID != "" {
-				w.reconciler.RegisterOrder(recOrdID, w.PositionID, "EMERGENCY_EXIT", w.Symbol, "SELL", "LIMIT", rem, ltp, 0, OrderStatusOpen)
+				worker.reconciler.RegisterOrder(recOrdID, worker.PositionID, "EMERGENCY_EXIT", worker.Symbol, "SELL", "LIMIT", rem, ltp, 0, OrderStatusOpen)
 			}
 			waitRec := time.NewTimer(900 * time.Millisecond)
 			select {
-			case <-w.fillNotifyCh:
+			case <-worker.fillNotifyCh:
 			case <-waitRec.C:
-				_, _ = w.reconciler.SyncOrdersCoalesced(w.ctx, w.broker)
+				_, _ = worker.reconciler.SyncOrdersCoalesced(worker.ctx, worker.broker)
 			}
 			waitRec.Stop()
-			if w.RemainingQty() <= 0 || w.isClosed.Load() {
+			if worker.RemainingQty() <= 0 || worker.isClosed.Load() {
 				return
 			}
 			if recOrdID != "" {
-				_ = w.broker.CancelOrder(w.ctx, recOrdID)
-				_, _ = w.reconciler.SyncOrdersCoalesced(w.ctx, w.broker)
+				_ = worker.broker.CancelOrder(worker.ctx, recOrdID)
+				_, _ = worker.reconciler.SyncOrdersCoalesced(worker.ctx, worker.broker)
 			}
 		}
 	}

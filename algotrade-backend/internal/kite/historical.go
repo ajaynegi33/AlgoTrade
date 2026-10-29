@@ -73,50 +73,50 @@ func NewHistoricalService(db *sql.DB, kiteService *Service) *HistoricalService {
 }
 
 // ClearNoSessionError resets the "No active Kite session" warning state immediately when a session authenticates
-func (h *HistoricalService) ClearNoSessionError() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if !h.isHealthy && h.lastError == "No active Kite session" {
-		h.isHealthy = true
-		h.lastError = ""
+func (service *HistoricalService) ClearNoSessionError() {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if !service.isHealthy && service.lastError == "No active Kite session" {
+		service.isHealthy = true
+		service.lastError = ""
 	}
 }
 
 // IsHealthy returns whether the historical API is accessible
-func (h *HistoricalService) IsHealthy() (bool, string) {
-	h.mu.RLock()
-	healthy := h.isHealthy
-	lastErr := h.lastError
-	h.mu.RUnlock()
+func (service *HistoricalService) IsHealthy() (bool, string) {
+	service.mu.RLock()
+	isHealthy := service.isHealthy
+	lastError := service.lastError
+	service.mu.RUnlock()
 
-	if !healthy && lastErr == "No active Kite session" && h.kiteService != nil {
-		if sess := h.kiteService.GetSession(); sess != nil && sess.AccessToken != "" {
-			h.ClearNoSessionError()
+	if !isHealthy && lastError == "No active Kite session" && service.kiteService != nil {
+		if session := service.kiteService.GetSession(); session != nil && session.AccessToken != "" {
+			service.ClearNoSessionError()
 			return true, ""
 		}
 	}
-	return healthy, lastErr
+	return isHealthy, lastError
 }
 
 // SeedStockBaselines loads 75-slot baselines and today's completed 5m bars for a stock.
 // 1. Checks SQLite historical_tod_baselines + historical_5m_bars first (0ms latency).
 // 2. If missing or stale, fetches 30-day 5m candles from Kite Historical API with 2.5 req/s rate limiter.
 // 3. Fallback: If 403 or API unavailable, uses cached baseline or estimates ATR from LTP (1.5%).
-func (h *HistoricalService) SeedStockBaselines(token uint32, lastPrice float64) (*StockBaselineProfile, error) {
+func (service *HistoricalService) SeedStockBaselines(token uint32, lastPrice float64) (*StockBaselineProfile, error) {
 	var client *kiteconnect.Client
 	var session *SessionInfo
-	if h.kiteService != nil {
-		client = h.kiteService.GetClient()
-		session = h.kiteService.GetSession()
+	if service.kiteService != nil {
+		client = service.kiteService.GetClient()
+		session = service.kiteService.GetSession()
 	}
 	hasSession := client != nil && session != nil && session.AccessToken != ""
 
 	// Step 1: Check SQLite cache
-	cached, updatedToday, err := h.loadFromDatabase(token)
+	cached, updatedToday, err := service.loadFromDatabase(token)
 	if err == nil && cached != nil {
-		cached.TodayBars = h.loadTodayBarsFromDatabase(token)
+		cached.TodayBars = service.loadTodayBarsFromDatabase(token)
 		if !hasSession {
-			h.setHealthy(false, "No active Kite session")
+			service.setHealthy(false, "No active Kite session")
 			return cached, nil
 		}
 
@@ -126,23 +126,23 @@ func (h *HistoricalService) SeedStockBaselines(token uint32, lastPrice float64) 
 		needsTodayBars := isWeekday && minsSince0915 >= 5 && len(cached.TodayBars) == 0
 
 		if updatedToday && !needsTodayBars {
-			h.setHealthy(true, "")
+			service.setHealthy(true, "")
 			return cached, nil
 		}
 	}
 
 	// Step 2: Fetch from Kite API
 	if !hasSession {
-		h.setHealthy(false, "No active Kite session")
+		service.setHealthy(false, "No active Kite session")
 		if cached != nil {
 			return cached, nil
 		}
-		return h.generateFallbackProfile(token, lastPrice), nil
+		return service.generateFallbackProfile(token, lastPrice), nil
 	}
 
 	// Wait for rate limiter (2.5 req/s)
-	if h.rateTicker != nil {
-		<-h.rateTicker.C
+	if service.rateTicker != nil {
+		<-service.rateTicker.C
 	}
 
 	// Fetch 30 calendar days of 5-minute candles (guarantees >= 20 trading days + today's intraday bars)
@@ -153,32 +153,32 @@ func (h *HistoricalService) SeedStockBaselines(token uint32, lastPrice float64) 
 	if err != nil {
 		errStr := err.Error()
 		if strings.Contains(errStr, "403") || strings.Contains(strings.ToLower(errStr), "permission") {
-			h.setHealthy(false, "Kite Historical API returned 403 Permission Denied — verify Historical API toggle in Kite Developer Console")
+			service.setHealthy(false, "Kite Historical API returned 403 Permission Denied — verify Historical API toggle in Kite Developer Console")
 		} else {
-			h.setHealthy(false, fmt.Sprintf("Kite Historical error: %v", err))
+			service.setHealthy(false, fmt.Sprintf("Kite Historical error: %v", err))
 		}
 		slog.Warn("Failed to fetch historical data from Kite, using fallback/cached baseline", "token", token, "error", err)
 		if cached != nil {
 			return cached, nil
 		}
-		return h.generateFallbackProfile(token, lastPrice), nil
+		return service.generateFallbackProfile(token, lastPrice), nil
 	}
 
-	h.setHealthy(true, "")
+	service.setHealthy(true, "")
 
 	// Step 3: Compute 75 TOD slots, ATR14, and extract today's 5m intraday bars
 	profile := &StockBaselineProfile{Token: token}
-	h.computeBaselines(candles, profile, lastPrice)
+	service.computeBaselines(candles, profile, lastPrice)
 
 	// Step 4: Persist to SQLite
-	go h.persistToDatabase(profile)
+	go service.persistToDatabase(profile)
 
 	return profile, nil
 }
 
-func (h *HistoricalService) computeBaselines(candles []kiteconnect.HistoricalData, profile *StockBaselineProfile, lastPrice float64) {
+func (service *HistoricalService) computeBaselines(candles []kiteconnect.HistoricalData, profile *StockBaselineProfile, lastPrice float64) {
 	if len(candles) < 20 {
-		fallback := h.generateFallbackProfile(profile.Token, lastPrice)
+		fallback := service.generateFallbackProfile(profile.Token, lastPrice)
 		*profile = *fallback
 		return
 	}
@@ -191,55 +191,55 @@ func (h *HistoricalService) computeBaselines(candles []kiteconnect.HistoricalDat
 	var trueRanges []float64
 	var todayBars []TodaySlotBar
 
-	for i, c := range candles {
+	for candleIndex, candle := range candles {
 		// Parse candle time in IST
-		istTime := c.Date.Time.In(ist)
+		istTime := candle.Date.Time.In(ist)
 		hour, min := istTime.Hour(), istTime.Minute()
 
 		slot := ((hour*60 + min) - (9*60 + 15)) / 5
 		if slot >= 0 && slot < 75 {
-			slotVolumes[slot] = append(slotVolumes[slot], uint64(c.Volume))
+			slotVolumes[slot] = append(slotVolumes[slot], uint64(candle.Volume))
 
-			cy, cm, cd := istTime.Date()
-			if cy == todayYear && cm == todayMonth && cd == todayDay {
+			candleYear, candleMonth, candleDay := istTime.Date()
+			if candleYear == todayYear && candleMonth == todayMonth && candleDay == todayDay {
 				todayBars = append(todayBars, TodaySlotBar{
 					SlotIdx:   slot,
 					Timestamp: istTime.Unix(),
-					Open:      c.Open,
-					High:      c.High,
-					Low:       c.Low,
-					Close:     c.Close,
-					Volume:    uint64(c.Volume),
+					Open:      candle.Open,
+					High:      candle.High,
+					Low:       candle.Low,
+					Close:     candle.Close,
+					Volume:    uint64(candle.Volume),
 				})
 			}
 		}
 
 		// Calculate True Range for 5-minute intraday ATR14.
 		// Falsification Guard (Bug #8): On slot 0 (09:15 AM opening bar) or across calendar days,
-		// candles[i-1].Close is yesterday's 15:25 PM close. Including |High - prevClose| or |Low - prevClose|
+		// candles[candleIndex-1].Close is yesterday's 15:25 PM close. Including |High - prevClose| or |Low - prevClose|
 		// would inject the entire overnight gap into 5-minute bar volatility, inflating ATR14 by 2x-4x all morning.
-		tr := c.High - c.Low
-		if i > 0 && slot > 0 {
-			prevIST := candles[i-1].Date.Time.In(ist)
+		trueRange := candle.High - candle.Low
+		if candleIndex > 0 && slot > 0 {
+			prevIST := candles[candleIndex-1].Date.Time.In(ist)
 			if istTime.YearDay() == prevIST.YearDay() && istTime.Year() == prevIST.Year() {
-				prevClose := candles[i-1].Close
-				tr2 := math.Abs(c.High - prevClose)
-				tr3 := math.Abs(c.Low - prevClose)
-				tr = math.Max(tr, math.Max(tr2, tr3))
+				prevClose := candles[candleIndex-1].Close
+				trueRangeHighClose := math.Abs(candle.High - prevClose)
+				trueRangeLowClose := math.Abs(candle.Low - prevClose)
+				trueRange = math.Max(trueRange, math.Max(trueRangeHighClose, trueRangeLowClose))
 			}
 		}
-		if tr >= 0 {
-			trueRanges = append(trueRanges, tr)
+		if trueRange >= 0 {
+			trueRanges = append(trueRanges, trueRange)
 		}
 	}
 
 	// Compute ATR14 (last 14 periods)
 	if len(trueRanges) >= 14 {
-		sumTR := 0.0
+		sumTrueRange := 0.0
 		for _, tr := range trueRanges[len(trueRanges)-14:] {
-			sumTR += tr
+			sumTrueRange += tr
 		}
-		profile.ATR14 = sumTR / 14.0
+		profile.ATR14 = sumTrueRange / 14.0
 	} else if lastPrice > 0 {
 		profile.ATR14 = lastPrice * 0.015
 	}
@@ -247,11 +247,11 @@ func (h *HistoricalService) computeBaselines(candles []kiteconnect.HistoricalDat
 	// Compute median volume per slot and running cumulative volume
 	var runningCumVol uint64
 	for slot := 0; slot < 75; slot++ {
-		vols := slotVolumes[slot]
+		slotVolumeList := slotVolumes[slot]
 		var medianVol uint64 = 1000 // Default floor
-		if len(vols) > 0 {
-			sort.Slice(vols, func(i, j int) bool { return vols[i] < vols[j] })
-			medianVol = vols[len(vols)/2]
+		if len(slotVolumeList) > 0 {
+			sort.Slice(slotVolumeList, func(i, j int) bool { return slotVolumeList[i] < slotVolumeList[j] })
+			medianVol = slotVolumeList[len(slotVolumeList)/2]
 			if medianVol < 500 {
 				medianVol = 500
 			}
@@ -268,7 +268,7 @@ func (h *HistoricalService) computeBaselines(candles []kiteconnect.HistoricalDat
 	profile.TodayBars = todayBars
 }
 
-func (h *HistoricalService) generateFallbackProfile(token uint32, lastPrice float64) *StockBaselineProfile {
+func (service *HistoricalService) generateFallbackProfile(token uint32, lastPrice float64) *StockBaselineProfile {
 	profile := &StockBaselineProfile{
 		Token:      token,
 		IsFallback: true,
@@ -293,13 +293,13 @@ func (h *HistoricalService) generateFallbackProfile(token uint32, lastPrice floa
 	return profile
 }
 
-func (h *HistoricalService) loadFromDatabase(token uint32) (*StockBaselineProfile, bool, error) {
-	if h.db == nil {
+func (service *HistoricalService) loadFromDatabase(token uint32) (*StockBaselineProfile, bool, error) {
+	if service.db == nil {
 		return nil, false, fmt.Errorf("no database connection")
 	}
 
 	query := `SELECT slot_idx, median_volume, atr14, COALESCE(updated_at, '') FROM historical_tod_baselines WHERE instrument_token = ? ORDER BY slot_idx ASC`
-	rows, err := h.db.Query(query, token)
+	rows, err := service.db.Query(query, token)
 	if err != nil {
 		return nil, false, err
 	}
@@ -315,18 +315,18 @@ func (h *HistoricalService) loadFromDatabase(token uint32) (*StockBaselineProfil
 
 	for rows.Next() {
 		var slot int
-		var vol uint64
-		var atr float64
+		var volume uint64
+		var averageTrueRange float64
 		var updatedStr string
-		if err := rows.Scan(&slot, &vol, &atr, &updatedStr); err == nil && slot >= 0 && slot < 75 {
-			runningCum += vol
+		if err := rows.Scan(&slot, &volume, &averageTrueRange, &updatedStr); err == nil && slot >= 0 && slot < 75 {
+			runningCum += volume
 			profile.Slots[slot] = SlotBaseline{
 				SlotIdx:      slot,
-				MedianVolume: vol,
+				MedianVolume: volume,
 				MedianCumVol: runningCum,
-				ATR14:        atr,
+				ATR14:        averageTrueRange,
 			}
-			profile.ATR14 = atr
+			profile.ATR14 = averageTrueRange
 			if updatedStr != "" {
 				latestUpdatedStr = updatedStr
 			}
@@ -345,13 +345,13 @@ func (h *HistoricalService) loadFromDatabase(token uint32) (*StockBaselineProfil
 	return nil, false, fmt.Errorf("incomplete baseline in database: %d/75 slots", count)
 }
 
-func (h *HistoricalService) loadTodayBarsFromDatabase(token uint32) []TodaySlotBar {
-	if h.db == nil {
+func (service *HistoricalService) loadTodayBarsFromDatabase(token uint32) []TodaySlotBar {
+	if service.db == nil {
 		return nil
 	}
 	todayPrefix := time.Now().In(ist).Format("2006-01-02") + "%"
 
-	rows, err := h.db.Query(`
+	rows, err := service.db.Query(`
 		SELECT bar_time, open, high, low, close, volume
 		FROM historical_5m_bars
 		WHERE instrument_token = ? AND bar_time LIKE ?
@@ -365,29 +365,29 @@ func (h *HistoricalService) loadTodayBarsFromDatabase(token uint32) []TodaySlotB
 	var bars []TodaySlotBar
 	for rows.Next() {
 		var barTimeStr string
-		var openPx, highPx, lowPx, closePx float64
-		var vol uint64
-		if err := rows.Scan(&barTimeStr, &openPx, &highPx, &lowPx, &closePx, &vol); err != nil {
+		var openPrice, highPrice, lowPrice, closePrice float64
+		var volume uint64
+		if err := rows.Scan(&barTimeStr, &openPrice, &highPrice, &lowPrice, &closePrice, &volume); err != nil {
 			continue
 		}
-		t, parseErr := time.ParseInLocation("2006-01-02 15:04:05", barTimeStr, ist)
+		parsedTime, parseErr := time.ParseInLocation("2006-01-02 15:04:05", barTimeStr, ist)
 		if parseErr != nil {
-			t, parseErr = time.Parse(time.RFC3339, barTimeStr)
+			parsedTime, parseErr = time.Parse(time.RFC3339, barTimeStr)
 			if parseErr == nil {
-				t = t.In(ist)
+				parsedTime = parsedTime.In(ist)
 			}
 		}
 		if parseErr == nil {
-			slot := ((t.Hour()*60 + t.Minute()) - (9*60 + 15)) / 5
+			slot := ((parsedTime.Hour()*60 + parsedTime.Minute()) - (9*60 + 15)) / 5
 			if slot >= 0 && slot < 75 {
 				bars = append(bars, TodaySlotBar{
 					SlotIdx:   slot,
-					Timestamp: t.Unix(),
-					Open:      openPx,
-					High:      highPx,
-					Low:       lowPx,
-					Close:     closePx,
-					Volume:    vol,
+					Timestamp: parsedTime.Unix(),
+					Open:      openPrice,
+					High:      highPrice,
+					Low:       lowPrice,
+					Close:     closePrice,
+					Volume:    volume,
 				})
 			}
 		}
@@ -398,12 +398,12 @@ func (h *HistoricalService) loadTodayBarsFromDatabase(token uint32) []TodaySlotB
 	return bars
 }
 
-func (h *HistoricalService) persistToDatabase(profile *StockBaselineProfile) {
-	if h.db == nil || profile == nil || profile.IsFallback {
+func (service *HistoricalService) persistToDatabase(profile *StockBaselineProfile) {
+	if service.db == nil || profile == nil || profile.IsFallback {
 		return
 	}
 
-	tx, err := h.db.Begin()
+	tx, err := service.db.Begin()
 	if err != nil {
 		return
 	}
@@ -423,12 +423,12 @@ func (h *HistoricalService) persistToDatabase(profile *StockBaselineProfile) {
 	defer stmt.Close()
 
 	for slot := 0; slot < 75; slot++ {
-		s := profile.Slots[slot]
-		_, _ = stmt.Exec(profile.Token, s.SlotIdx, s.MedianVolume, profile.ATR14)
+		slotBaseline := profile.Slots[slot]
+		_, _ = stmt.Exec(profile.Token, slotBaseline.SlotIdx, slotBaseline.MedianVolume, profile.ATR14)
 	}
 
 	if len(profile.TodayBars) > 0 {
-		barStmt, bErr := tx.Prepare(`
+		barStmt, barStmtErr := tx.Prepare(`
 			INSERT INTO historical_5m_bars (instrument_token, bar_time, open, high, low, close, volume)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(instrument_token, bar_time) DO UPDATE SET
@@ -437,11 +437,11 @@ func (h *HistoricalService) persistToDatabase(profile *StockBaselineProfile) {
 				close = excluded.close,
 				volume = max(volume, excluded.volume)
 		`)
-		if bErr == nil {
+		if barStmtErr == nil {
 			defer barStmt.Close()
-			for _, tb := range profile.TodayBars {
-				barTimeStr := time.Unix(tb.Timestamp, 0).In(ist).Format("2006-01-02 15:04:05")
-				_, _ = barStmt.Exec(profile.Token, barTimeStr, tb.Open, tb.High, tb.Low, tb.Close, tb.Volume)
+			for _, todayBar := range profile.TodayBars {
+				barTimeStr := time.Unix(todayBar.Timestamp, 0).In(ist).Format("2006-01-02 15:04:05")
+				_, _ = barStmt.Exec(profile.Token, barTimeStr, todayBar.Open, todayBar.High, todayBar.Low, todayBar.Close, todayBar.Volume)
 			}
 		}
 	}
@@ -449,9 +449,9 @@ func (h *HistoricalService) persistToDatabase(profile *StockBaselineProfile) {
 	_ = tx.Commit()
 }
 
-func (h *HistoricalService) setHealthy(healthy bool, errMsg string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.isHealthy = healthy
-	h.lastError = errMsg
+func (service *HistoricalService) setHealthy(isHealthy bool, errorMessage string) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	service.isHealthy = isHealthy
+	service.lastError = errorMessage
 }

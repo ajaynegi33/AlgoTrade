@@ -18,23 +18,23 @@ func NewHandler(store Store) *Handler {
 }
 
 // GetProfile returns the authenticated operator's real identity
-func (h *Handler) GetProfile(w http.ResponseWriter, r *http.Request) {
-	claims, ok := auth.GetUserFromContext(r.Context())
+func (handler *Handler) GetProfile(writer http.ResponseWriter, request *http.Request) {
+	claims, ok := auth.GetUserFromContext(request.Context())
 	if !ok {
-		response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "User claims not found in context")
+		response.Error(writer, http.StatusUnauthorized, "UNAUTHORIZED", "User claims not found in context")
 		return
 	}
 
 	userName := claims.Email
 	userRole := claims.Role
-	if h.store != nil {
-		if u, err := h.store.GetByID(claims.UserID); err == nil {
-			userName = u.Name
-			userRole = u.Role
+	if handler.store != nil {
+		if foundUser, err := handler.store.GetByID(claims.UserID); err == nil {
+			userName = foundUser.Name
+			userRole = foundUser.Role
 		}
 	}
 
-	response.Success(w, http.StatusOK, Profile{
+	response.Success(writer, http.StatusOK, Profile{
 		ID:    claims.UserID,
 		Name:  userName,
 		Email: claims.Email,

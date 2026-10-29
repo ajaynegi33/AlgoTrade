@@ -29,9 +29,9 @@ type Store interface {
 }
 
 type MemoryStore struct {
-	mu      sync.RWMutex
-	byEmail map[string]*User
-	byID    map[string]*User
+	mu           sync.RWMutex
+	usersByEmail map[string]*User
+	usersByID    map[string]*User
 }
 
 func NewMemoryStore(cfg *config.Config) (*MemoryStore, error) {
@@ -40,7 +40,7 @@ func NewMemoryStore(cfg *config.Config) (*MemoryStore, error) {
 		return nil, err
 	}
 
-	u := &User{
+	userRecord := &User{
 		ID:           cfg.AuthUserID,
 		Email:        strings.ToLower(strings.TrimSpace(cfg.AuthUserEmail)),
 		PasswordHash: string(hash),
@@ -49,44 +49,44 @@ func NewMemoryStore(cfg *config.Config) (*MemoryStore, error) {
 	}
 
 	store := &MemoryStore{
-		byEmail: make(map[string]*User),
-		byID:    make(map[string]*User),
+		usersByEmail: make(map[string]*User),
+		usersByID:    make(map[string]*User),
 	}
-	store.byEmail[u.Email] = u
-	store.byID[u.ID] = u
+	store.usersByEmail[userRecord.Email] = userRecord
+	store.usersByID[userRecord.ID] = userRecord
 
 	return store, nil
 }
 
-func (s *MemoryStore) Authenticate(email, password string) (*auth.User, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (store *MemoryStore) Authenticate(email, password string) (*auth.User, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
 
 	normalizedEmail := strings.ToLower(strings.TrimSpace(email))
-	u, exists := s.byEmail[normalizedEmail]
+	userRecord, exists := store.usersByEmail[normalizedEmail]
 	if !exists {
 		return nil, ErrInvalidCredentials
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(userRecord.PasswordHash), []byte(password)); err != nil {
 		return nil, ErrInvalidCredentials
 	}
 
 	return &auth.User{
-		ID:    u.ID,
-		Email: u.Email,
-		Name:  u.Name,
-		Role:  u.Role,
+		ID:    userRecord.ID,
+		Email: userRecord.Email,
+		Name:  userRecord.Name,
+		Role:  userRecord.Role,
 	}, nil
 }
 
-func (s *MemoryStore) GetByID(id string) (*User, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (store *MemoryStore) GetByID(id string) (*User, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
 
-	u, exists := s.byID[id]
+	userRecord, exists := store.usersByID[id]
 	if !exists {
 		return nil, ErrUserNotFound
 	}
-	return u, nil
+	return userRecord, nil
 }

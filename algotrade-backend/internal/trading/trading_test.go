@@ -60,13 +60,13 @@ func TestStockMetricsAlignmentAndPhase2Math(t *testing.T) {
 
 	// ₹1,00,000 account
 	s100k := ComputePositionSize(&stock, 775.00, 100000.0, 100000.0, 0.005, 1.0, 1.0)
-	if !s100k.Approved || s100k.Quantity <= 0 {
+	if !s100k.IsApproved || s100k.Quantity <= 0 {
 		t.Fatalf("expected ₹1L sizing to be approved, got: %+v", s100k)
 	}
 
 	// ₹10 Crore account (must be capped by 20% top-3 ask liquidity = 30,000 shares)
 	s10Cr := ComputePositionSize(&stock, 775.00, 100000000.0, 100000000.0, 0.005, 1.0, 1.0)
-	if !s10Cr.Approved || s10Cr.Quantity != 30000 {
+	if !s10Cr.IsApproved || s10Cr.Quantity != 30000 {
 		t.Fatalf("expected ₹10Cr sizing to be liquidity-capped at 30000 shares, got qty=%d", s10Cr.Quantity)
 	}
 }
@@ -96,7 +96,7 @@ func TestPositionWorkerThreeStepScaleOutAndShadowStopMod25(t *testing.T) {
 	}
 
 	sizing := ComputePositionSize(&stock, 218.40, 200000.0, 200000.0, 0.005, 1.0, 1.0)
-	if !sizing.Approved {
+	if !sizing.IsApproved {
 		t.Fatalf("sizing rejected: %s", sizing.RejectReason)
 	}
 
@@ -150,8 +150,8 @@ func TestPositionWorkerThreeStepScaleOutAndShadowStopMod25(t *testing.T) {
 	worker.OnTickHotPath(&stock, false)
 
 	time.Sleep(120 * time.Millisecond)
-	if !worker.tranche1Done.Load() {
-		t.Fatalf("expected tranche1Done == true after +1.15R")
+	if !worker.hasTranche1Completed.Load() {
+		t.Fatalf("expected hasTranche1Completed == true after +1.15R")
 	}
 	expectedRunner := sizing.Quantity - (sizing.Quantity / 2)
 	if worker.RemainingQty() != expectedRunner {
@@ -270,7 +270,7 @@ func TestPhase26FalsificationSuite_BugsB1ToB5(t *testing.T) {
 	}
 
 	s10k := ComputePositionSize(&bel, 218.40, 10000.0, 10000.0, 0.005, 0.65, 1.0)
-	if !s10k.Approved || s10k.Quantity < 25 {
+	if !s10k.IsApproved || s10k.Quantity < 25 {
 		t.Fatalf("Bug B5 Falsified: expected ₹10k capital w/ 5x MIS to approve meaningful quantity even in midday compression, got: %+v", s10k)
 	}
 
@@ -405,9 +405,9 @@ func TestPhase27_TradeHistoryAndTaxBreakdown(t *testing.T) {
 		RemainingQty:     0,
 		ModCount:         12,
 		MaxMods:          25,
-		CurrentGear:      3,
-		Tranche1Done:     true,
-		RealisedGrossPnL: 1000.00,
+		CurrentGear:          3,
+		HasTranche1Completed: true,
+		RealisedGrossPnL:     1000.00,
 		EstimatedCharges: CalculatePositionTaxBreakdown(800.00, 810.00, 100, true).TotalCharges,
 		ExitReason:       "SL_HIT (Trail)",
 		OpenedAt:         "2026-10-25 09:45:00",
@@ -576,7 +576,7 @@ func TestSLGapThroughBreachAndFlatten(t *testing.T) {
 	}
 
 	sizing := SizingDecision{
-		Approved:        true,
+		IsApproved:      true,
 		Quantity:        132,
 		DustFloorQty:    1,
 		EntryLimitPrice: 59.44,
@@ -710,7 +710,7 @@ func TestRehydratedEmergencyFlattenForceExit(t *testing.T) {
 	})
 
 	sizing := SizingDecision{
-		Approved:        true,
+		IsApproved:      true,
 		Quantity:        132,
 		DustFloorQty:    1,
 		EntryLimitPrice: 59.44,
@@ -788,7 +788,7 @@ func TestPositionWorker_EarlyHarvestAt065RAnd5mClose(t *testing.T) {
 	stock.SessionBars[2] = market.OHLCVBar{High: 804.0, Low: 799.0, Open: 800.0, Close: 803.0}
 
 	sizing := SizingDecision{
-		Approved:        true,
+		IsApproved:      true,
 		Quantity:        50,
 		DustFloorQty:    1,
 		EntryLimitPrice: 800.00,
@@ -830,8 +830,8 @@ func TestPositionWorker_EarlyHarvestAt065RAnd5mClose(t *testing.T) {
 	// 2. Tick at 803.30 (+0.66R): verify Tranche 1 50% scale-out is triggered
 	stock.LTP = 803.30
 	worker.OnTickHotPath(stock, false)
-	if !worker.tranche1Pending.Load() {
-		t.Fatalf("expected tranche1Pending to be TRUE at +0.66R for early profit harvest, got false")
+	if !worker.isTranche1Pending.Load() {
+		t.Fatalf("expected isTranche1Pending to be TRUE at +0.66R for early profit harvest, got false")
 	}
 
 	// 3. Intra-candle dip does NOT panic-dump if 5m bar hasn't closed below InitialStop
@@ -846,8 +846,8 @@ func TestPositionWorker_EarlyHarvestAt065RAnd5mClose(t *testing.T) {
 	stock.SessionBars[2] = market.OHLCVBar{High: 798.0, Low: 793.0, Open: 797.0, Close: 794.0} // Closed below 795.00!
 	stock.LTP = 794.00
 	worker.OnTickHotPath(stock, false)
-	if !worker.pendingMarketExit.Load() {
-		t.Fatalf("expected pendingMarketExit to be TRUE after completed 5m candle closed below InitialStop (794.00 < 795.00)")
+	if !worker.isMarketExitPending.Load() {
+		t.Fatalf("expected isMarketExitPending to be TRUE after completed 5m candle closed below InitialStop (794.00 < 795.00)")
 	}
 }
 
@@ -927,7 +927,7 @@ type partialFillMockBroker struct {
 	cancelCalled atomic.Bool
 }
 
-func (m *partialFillMockBroker) PlaceLimitBuy(
+func (mockBroker *partialFillMockBroker) PlaceLimitBuy(
 	_ context.Context,
 	_ string,
 	_ uint32,
@@ -939,9 +939,9 @@ func (m *partialFillMockBroker) PlaceLimitBuy(
 	return "TEST-ORD-RESTING", nil
 }
 
-func (m *partialFillMockBroker) CancelOrder(ctx context.Context, orderID string) error {
-	m.cancelCalled.Store(true)
-	return m.PaperBroker.CancelOrder(ctx, orderID)
+func (mockBroker *partialFillMockBroker) CancelOrder(ctx context.Context, orderID string) error {
+	mockBroker.cancelCalled.Store(true)
+	return mockBroker.PaperBroker.CancelOrder(ctx, orderID)
 }
 
 func TestPartialFillTimeoutAndMarginAdjustment(t *testing.T) {
@@ -968,7 +968,7 @@ func TestPartialFillTimeoutAndMarginAdjustment(t *testing.T) {
 	}
 
 	sizing := SizingDecision{
-		Approved:        true,
+		IsApproved:      true,
 		Quantity:        100,
 		DustFloorQty:    5,
 		EntryLimitPrice: 1500.0,

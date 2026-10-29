@@ -60,15 +60,15 @@ type PositionWorker struct {
 	shadowBreachTicks    atomic.Uint32
 	lastModUnixMs        atomic.Int64
 
-	filledEntryQty    atomic.Int64
-	filledExitQty     atomic.Int64
-	modCount          atomic.Int32
-	currentGear       atomic.Int32
-	tranche1Done      atomic.Bool
-	tranche1Pending   atomic.Bool
-	pendingMarketExit atomic.Bool
-	isClosed          atomic.Bool
-	closedNotified    atomic.Bool
+	filledEntryQty        atomic.Int64
+	filledExitQty         atomic.Int64
+	modCount              atomic.Int32
+	currentGear           atomic.Int32
+	hasTranche1Completed  atomic.Bool
+	isTranche1Pending     atomic.Bool
+	isMarketExitPending   atomic.Bool
+	isClosed              atomic.Bool
+	hasClosedNotified     atomic.Bool
 
 	mu               sync.RWMutex
 	state            string
@@ -137,7 +137,7 @@ func NewPositionWorker(parentCtx context.Context, cfg WorkerConfig) *PositionWor
 		timeoutDur = 5 * time.Minute
 	}
 
-	w := &PositionWorker{
+	worker := &PositionWorker{
 		PositionID:           cfg.PositionID,
 		TradingDate:          cfg.TradingDate,
 		Mode:                 cfg.Mode,
@@ -173,197 +173,217 @@ func NewPositionWorker(parentCtx context.Context, cfg WorkerConfig) *PositionWor
 		cancel:               cancel,
 	}
 
-	w.entryPriceBits.Store(math.Float64bits(cfg.Sizing.EntryLimitPrice))
-	w.breakevenStopBits.Store(math.Float64bits(cfg.Sizing.BreakevenStop))
-	w.latestLTPBits.Store(math.Float64bits(cfg.Sizing.EntryLimitPrice))
-	w.highWaterMarkBits.Store(math.Float64bits(cfg.Sizing.EntryLimitPrice))
-	w.confirmedStopBits.Store(math.Float64bits(cfg.Sizing.StopSpec.InitialStop))
-	w.shadowStopBits.Store(math.Float64bits(cfg.Sizing.StopSpec.InitialStop))
-	w.proposedStopBits.Store(math.Float64bits(cfg.Sizing.StopSpec.InitialStop))
-	w.currentGear.Store(1)
+	worker.entryPriceBits.Store(math.Float64bits(cfg.Sizing.EntryLimitPrice))
+	worker.breakevenStopBits.Store(math.Float64bits(cfg.Sizing.BreakevenStop))
+	worker.latestLTPBits.Store(math.Float64bits(cfg.Sizing.EntryLimitPrice))
+	worker.highWaterMarkBits.Store(math.Float64bits(cfg.Sizing.EntryLimitPrice))
+	worker.confirmedStopBits.Store(math.Float64bits(cfg.Sizing.StopSpec.InitialStop))
+	worker.shadowStopBits.Store(math.Float64bits(cfg.Sizing.StopSpec.InitialStop))
+	worker.proposedStopBits.Store(math.Float64bits(cfg.Sizing.StopSpec.InitialStop))
+	worker.currentGear.Store(1)
 
-	return w
+	return worker
 }
 
-func (w *PositionWorker) GetEntryPrice() float64 {
-	return math.Float64frombits(w.entryPriceBits.Load())
+func (worker *PositionWorker) GetEntryPrice() float64 {
+	return math.Float64frombits(worker.entryPriceBits.Load())
 }
 
-func (w *PositionWorker) GetBreakevenStop() float64 {
-	return math.Float64frombits(w.breakevenStopBits.Load())
+func (worker *PositionWorker) GetBreakevenStop() float64 {
+	return math.Float64frombits(worker.breakevenStopBits.Load())
 }
 
-func (w *PositionWorker) GetInitialQty() int {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.InitialQty
+func (worker *PositionWorker) GetInitialQty() int {
+	worker.mu.RLock()
+	defer worker.mu.RUnlock()
+	return worker.InitialQty
 }
 
-func (w *PositionWorker) GetSLOrderID() string {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.slOrderID
+func (worker *PositionWorker) GetSLOrderID() string {
+	worker.mu.RLock()
+	defer worker.mu.RUnlock()
+	return worker.slOrderID
 }
 
-// RemainingQty returns the exact net open share count (FilledEntryQty - FilledExitQty)
-func (w *PositionWorker) RemainingQty() int {
-	rem := int(w.filledEntryQty.Load() - w.filledExitQty.Load())
-	if rem < 0 {
+// GetRemainingQty returns the exact net open share count (FilledEntryQty - FilledExitQty)
+func (worker *PositionWorker) GetRemainingQty() int {
+	remainingShares := int(worker.filledEntryQty.Load() - worker.filledExitQty.Load())
+	if remainingShares < 0 {
 		return 0
 	}
-	return rem
+	return remainingShares
 }
 
-// LatestLTP returns the most recent tick LTP seen by this worker
-func (w *PositionWorker) LatestLTP() float64 {
-	return math.Float64frombits(w.latestLTPBits.Load())
+// RemainingQty is a backward-compatible alias for GetRemainingQty
+func (worker *PositionWorker) RemainingQty() int {
+	return worker.GetRemainingQty()
+}
+
+// GetLatestLTP returns the most recent tick LTP seen by this worker
+func (worker *PositionWorker) GetLatestLTP() float64 {
+	return math.Float64frombits(worker.latestLTPBits.Load())
+}
+
+// LatestLTP is a backward-compatible alias for GetLatestLTP
+func (worker *PositionWorker) LatestLTP() float64 {
+	return worker.GetLatestLTP()
 }
 
 // Start places the entry limit order and launches the dedicated worker goroutine
-func (w *PositionWorker) Start() error {
-	w.persistPositionState()
+func (worker *PositionWorker) Start() error {
+	worker.persistPositionState()
 
 	var stockPtr *market.StockMetrics
-	if w.getStockPtr != nil {
-		stockPtr = w.getStockPtr()
+	if worker.getStockPtr != nil {
+		stockPtr = worker.getStockPtr()
 	}
 
-	orderID, err := w.broker.PlaceLimitBuy(w.ctx, w.Symbol, w.Token, w.InitialQty, w.EntryPrice, stockPtr)
+	orderID, err := worker.broker.PlaceLimitBuy(worker.ctx, worker.Symbol, worker.Token, worker.InitialQty, worker.EntryPrice, stockPtr)
 	if err != nil {
-		w.mu.Lock()
-		w.state = StateClosed
-		w.exitReason = fmt.Sprintf("ENTRY_ORDER_FAILED: %v", err)
-		w.closedAt = time.Now()
-		w.mu.Unlock()
-		w.isClosed.Store(true)
-		w.persistPositionState()
-		w.notifyClosed()
+		worker.mu.Lock()
+		worker.state = StateClosed
+		worker.exitReason = fmt.Sprintf("ENTRY_ORDER_FAILED: %v", err)
+		worker.closedAt = time.Now()
+		worker.mu.Unlock()
+		worker.isClosed.Store(true)
+		worker.persistPositionState()
+		worker.notifyClosed()
 		return err
 	}
 
-	w.mu.Lock()
-	w.entryOrderID = orderID
-	w.mu.Unlock()
+	worker.mu.Lock()
+	worker.entryOrderID = orderID
+	worker.mu.Unlock()
 
-	w.reconciler.RegisterOrder(orderID, w.PositionID, "ENTRY", w.Symbol, "BUY", "LIMIT", w.InitialQty, w.EntryPrice, 0, OrderStatusOpen)
-	w.persistPositionState()
+	worker.reconciler.RegisterOrder(orderID, worker.PositionID, "ENTRY", worker.Symbol, "BUY", "LIMIT", worker.InitialQty, worker.EntryPrice, 0, OrderStatusOpen)
+	worker.persistPositionState()
 
-	go w.workerLoop()
+	go worker.workerLoop()
 	return nil
 }
 
-func (w *PositionWorker) wake() {
+func (worker *PositionWorker) wakeWorker() {
 	select {
-	case w.wakeCh <- struct{}{}:
+	case worker.wakeCh <- struct{}{}:
 	default:
 	}
 }
 
-// notifyClosed triggers the onClosed callback with strict idempotency (guaranteed exactly once)
-func (w *PositionWorker) notifyClosed() {
-	if w.onClosed != nil && w.closedNotified.CompareAndSwap(false, true) {
-		w.onClosed(w)
+// wake is a backward-compatible alias for wakeWorker
+func (worker *PositionWorker) wake() {
+	worker.wakeWorker()
+}
+
+// notifyWorkerClosed triggers the onClosed callback with strict idempotency (guaranteed exactly once)
+func (worker *PositionWorker) notifyWorkerClosed() {
+	if worker.onClosed != nil && worker.hasClosedNotified.CompareAndSwap(false, true) {
+		worker.onClosed(worker)
 	}
 }
 
-func (w *PositionWorker) OnOrderDelta(legType string, ev OrderUpdateEvent, deltaFilled int) {
-	w.mu.Lock()
+// notifyClosed is a backward-compatible alias for notifyWorkerClosed
+func (worker *PositionWorker) notifyClosed() {
+	worker.notifyWorkerClosed()
+}
+
+func (worker *PositionWorker) OnOrderDelta(legType string, orderEvent OrderUpdateEvent, deltaFilled int) {
+	worker.mu.Lock()
 	switch legType {
 	case "ENTRY":
 		if deltaFilled > 0 {
-			prevEntry := w.filledEntryQty.Load()
+			prevEntry := worker.filledEntryQty.Load()
 			newEntry := prevEntry + int64(deltaFilled)
-			w.filledEntryQty.Store(newEntry)
-			if ev.AveragePrice > 0 {
-				w.entryCostRupees += float64(deltaFilled) * ev.AveragePrice
-				w.EntryPrice = w.entryCostRupees / float64(newEntry)
-				w.entryPriceBits.Store(math.Float64bits(w.EntryPrice))
+			worker.filledEntryQty.Store(newEntry)
+			if orderEvent.AveragePrice > 0 {
+				worker.entryCostRupees += float64(deltaFilled) * orderEvent.AveragePrice
+				worker.EntryPrice = worker.entryCostRupees / float64(newEntry)
+				worker.entryPriceBits.Store(math.Float64bits(worker.EntryPrice))
 			} else {
-				w.entryCostRupees += float64(deltaFilled) * w.EntryPrice
+				worker.entryCostRupees += float64(deltaFilled) * worker.EntryPrice
 			}
 		}
-		if (ev.Status == OrderStatusRejected || ev.Status == OrderStatusCancelled) && w.filledEntryQty.Load() == 0 {
-			w.state = StateClosed
-			w.exitReason = fmt.Sprintf("ENTRY_%s: %s", ev.Status, ev.StatusMessage)
-			w.closedAt = time.Now()
-			w.isClosed.Store(true)
-			w.mu.Unlock()
-			w.persistPositionState()
-			w.notifyClosed()
+		if (orderEvent.Status == OrderStatusRejected || orderEvent.Status == OrderStatusCancelled) && worker.filledEntryQty.Load() == 0 {
+			worker.state = StateClosed
+			worker.exitReason = fmt.Sprintf("ENTRY_%s: %s", orderEvent.Status, orderEvent.StatusMessage)
+			worker.closedAt = time.Now()
+			worker.isClosed.Store(true)
+			worker.mu.Unlock()
+			worker.persistPositionState()
+			worker.notifyClosed()
 			return
 		}
 
 	case "SL", "SCALE_OUT", "EMERGENCY_EXIT":
 		if legType == "SL" {
-			w.slOrderStatus = ev.Status
-			if ev.Status == OrderStatusOpen && w.slOpenSinceMs == 0 {
-				w.slOpenSinceMs = time.Now().UnixMilli()
-			} else if ev.Status != OrderStatusOpen {
-				w.slOpenSinceMs = 0
+			worker.slOrderStatus = orderEvent.Status
+			if orderEvent.Status == OrderStatusOpen && worker.slOpenSinceMs == 0 {
+				worker.slOpenSinceMs = time.Now().UnixMilli()
+			} else if orderEvent.Status != OrderStatusOpen {
+				worker.slOpenSinceMs = 0
 			}
 		}
 		if deltaFilled > 0 {
-			newExit := w.filledExitQty.Add(int64(deltaFilled))
-			fillPx := ev.AveragePrice
+			newExit := worker.filledExitQty.Add(int64(deltaFilled))
+			fillPx := orderEvent.AveragePrice
 			if fillPx <= 0 {
-				fillPx = w.LatestLTP()
+				fillPx = worker.LatestLTP()
 			}
-			w.exitProceeds += float64(deltaFilled) * fillPx
+			worker.exitProceeds += float64(deltaFilled) * fillPx
 
 			// Check if entire position is now flat
-			totEntry := w.filledEntryQty.Load()
+			totEntry := worker.filledEntryQty.Load()
 			if totEntry > 0 && newExit >= totEntry {
-				w.finalizeClosedLocked(legType + "_" + ev.Status)
-				w.mu.Unlock()
-				w.persistPositionState()
-				w.notifyClosed()
+				worker.finalizeClosedLocked(legType + "_" + orderEvent.Status)
+				worker.mu.Unlock()
+				worker.persistPositionState()
+				worker.notifyClosed()
 				return
 			}
 		}
 	}
-	w.mu.Unlock()
+	worker.mu.Unlock()
 
 	select {
-	case w.fillNotifyCh <- struct{}{}:
+	case worker.fillNotifyCh <- struct{}{}:
 	default:
 	}
-	w.wake()
+	worker.wake()
 }
 
-func (w *PositionWorker) finalizeClosedLocked(reason string) {
-	if w.isClosed.Load() {
+func (worker *PositionWorker) finalizeClosedLocked(reason string) {
+	if worker.isClosed.Load() {
 		return
 	}
-	totQty := int(w.filledEntryQty.Load())
+	totQty := int(worker.filledEntryQty.Load())
 	if totQty <= 0 {
-		totQty = w.InitialQty
+		totQty = worker.InitialQty
 	}
-	avgBuy := w.EntryPrice
-	if totQty > 0 && w.entryCostRupees > 0 {
-		avgBuy = w.entryCostRupees / float64(totQty)
+	avgBuy := worker.EntryPrice
+	if totQty > 0 && worker.entryCostRupees > 0 {
+		avgBuy = worker.entryCostRupees / float64(totQty)
 	}
 	avgSell := avgBuy
-	if totQty > 0 && w.exitProceeds > 0 {
-		avgSell = w.exitProceeds / float64(totQty)
+	if totQty > 0 && worker.exitProceeds > 0 {
+		avgSell = worker.exitProceeds / float64(totQty)
 	}
 
 	taxes := CalculateRoundTripCharges(avgBuy, avgSell, totQty)
-	gross := w.exitProceeds - w.entryCostRupees
+	gross := worker.exitProceeds - worker.entryCostRupees
 	net := gross - taxes.TotalCharges
 
-	w.realisedGrossPnL = gross
-	w.totalCharges = taxes.TotalCharges
-	w.realisedNetPnL = net
-	w.state = StateClosed
-	if w.exitReason == "" {
-		w.exitReason = reason
+	worker.realisedGrossPnL = gross
+	worker.totalCharges = taxes.TotalCharges
+	worker.realisedNetPnL = net
+	worker.state = StateClosed
+	if worker.exitReason == "" {
+		worker.exitReason = reason
 	}
-	w.closedAt = time.Now()
-	w.isClosed.Store(true)
+	worker.closedAt = time.Now()
+	worker.isClosed.Store(true)
 }
 
-func (w *PositionWorker) workerLoop() {
-	entryTimeout := time.NewTimer(w.entryTimeoutDuration)
+func (worker *PositionWorker) workerLoop() {
+	entryTimeout := time.NewTimer(worker.entryTimeoutDuration)
 	defer entryTimeout.Stop()
 
 	watchdogTicker := time.NewTicker(500 * time.Millisecond)
@@ -371,130 +391,135 @@ func (w *PositionWorker) workerLoop() {
 
 	for {
 		select {
-		case <-w.ctx.Done():
+		case <-worker.ctx.Done():
 			return
 
-		case reason := <-w.emergReasonCh:
-			w.executeEmergencyFlatten(reason)
+		case reason := <-worker.emergReasonCh:
+			worker.executeEmergencyFlatten(reason)
 			return
 
 		case <-entryTimeout.C:
-			w.handleEntryTimeout()
-			if w.isClosed.Load() {
+			worker.handleEntryTimeout()
+			if worker.isClosed.Load() {
 				return
 			}
 
 		case <-watchdogTicker.C:
-			if w.isClosed.Load() {
+			if worker.isClosed.Load() {
 				return
 			}
 			// Check if SL order has been stranded in OPEN status for >= 500ms (gapped through limit)
-			w.mu.RLock()
-			openSince := w.slOpenSinceMs
-			slStat := w.slOrderStatus
-			w.mu.RUnlock()
+			worker.mu.RLock()
+			openSince := worker.slOpenSinceMs
+			slStat := worker.slOrderStatus
+			worker.mu.RUnlock()
 			if slStat == OrderStatusOpen && openSince > 0 && (time.Now().UnixMilli()-openSince) >= 500 {
-				w.executeEmergencyFlatten("SL_STRANDED_OPEN_500MS")
+				worker.executeEmergencyFlatten("SL_STRANDED_OPEN_500MS")
 				return
 			}
-			w.processPendingWork()
+			worker.processPendingWork()
 
-		case <-w.wakeCh:
-			if w.isClosed.Load() {
+		case <-worker.wakeCh:
+			if worker.isClosed.Load() {
 				return
 			}
 			select {
-			case reason := <-w.emergReasonCh:
-				w.executeEmergencyFlatten(reason)
+			case reason := <-worker.emergReasonCh:
+				worker.executeEmergencyFlatten(reason)
 				return
 			default:
 			}
-			w.processPendingWork()
+			worker.processPendingWork()
 		}
 	}
 }
 
-func (w *PositionWorker) handleEntryTimeout() {
-	if w.isClosed.Load() {
+func (worker *PositionWorker) handleEntryTimeout() {
+	if worker.isClosed.Load() {
 		return
 	}
-	filled := int(w.filledEntryQty.Load())
+	filled := int(worker.filledEntryQty.Load())
 
-	w.mu.RLock()
-	initQty := w.InitialQty
-	entryOrdID := w.entryOrderID
-	w.mu.RUnlock()
+	worker.mu.RLock()
+	initQty := worker.InitialQty
+	entryOrdID := worker.entryOrderID
+	worker.mu.RUnlock()
 
 	if filled >= initQty {
-		w.ensureInitialSLPlaced()
+		worker.ensureInitialSLPlaced()
 		return
 	}
 
 	// Cancel remaining unfilled portion of entry order
 	if entryOrdID != "" {
-		_ = w.broker.CancelOrder(w.ctx, entryOrdID)
-		_, _ = w.reconciler.SyncOrdersCoalesced(w.ctx, w.broker)
+		_ = worker.broker.CancelOrder(worker.ctx, entryOrdID)
+		_, _ = worker.reconciler.SyncOrdersCoalesced(worker.ctx, worker.broker)
 	}
 
-	filled = int(w.filledEntryQty.Load())
+	filled = int(worker.filledEntryQty.Load())
 	if filled <= 0 {
-		w.mu.Lock()
-		w.state = StateClosed
-		w.exitReason = "ENTRY_TIMEOUT_UNFILLED"
-		w.closedAt = time.Now()
-		w.isClosed.Store(true)
-		w.mu.Unlock()
-		w.persistPositionState()
-		w.notifyClosed()
+		worker.mu.Lock()
+		worker.state = StateClosed
+		worker.exitReason = "ENTRY_TIMEOUT_UNFILLED"
+		worker.closedAt = time.Now()
+		worker.isClosed.Store(true)
+		worker.mu.Unlock()
+		worker.persistPositionState()
+		worker.notifyClosed()
 		return
 	}
 
 	// Partial Fill Dust Guard: If filled shares < DustFloorQty, flatten immediately
-	if filled < w.DustFloorQty {
+	if filled < worker.DustFloorQty {
 		slog.Warn("Partial fill below viable dust floor, flattening immediately",
-			"symbol", w.Symbol, "filled", filled, "dust_floor", w.DustFloorQty)
-		w.executeEmergencyFlatten("PARTIAL_FILL_DUST_GUARD")
+			"symbol", worker.Symbol, "filled", filled, "dust_floor", worker.DustFloorQty)
+		worker.executeEmergencyFlatten("PARTIAL_FILL_DUST_GUARD")
 		return
 	}
 
 	runnerQty := max(1, filled-(filled/2))
-	beStop := BreakevenTriggerPrice(w.GetEntryPrice(), filled, runnerQty, w.TickSize)
-	w.mu.Lock()
-	w.InitialQty = filled
-	w.BreakevenStop = beStop
-	w.mu.Unlock()
-	w.breakevenStopBits.Store(math.Float64bits(beStop))
-	w.ensureInitialSLPlaced()
-	w.persistPositionState()
+	beStop := BreakevenTriggerPrice(worker.GetEntryPrice(), filled, runnerQty, worker.TickSize)
+	worker.mu.Lock()
+	worker.InitialQty = filled
+	worker.BreakevenStop = beStop
+	worker.mu.Unlock()
+	worker.breakevenStopBits.Store(math.Float64bits(beStop))
+	worker.ensureInitialSLPlaced()
+	worker.persistPositionState()
 }
 
-func (w *PositionWorker) ToDTO() market.ActivePositionDTO {
-	w.mu.RLock()
-	state := w.state
-	exitReason := w.exitReason
-	gross := w.realisedGrossPnL
-	charges := w.totalCharges
-	net := w.realisedNetPnL
-	closedAt := w.closedAt
-	entryPx := w.EntryPrice
-	beStop := w.BreakevenStop
-	initQty := w.InitialQty
-	exitProceeds := w.exitProceeds
-	w.mu.RUnlock()
+// BuildPositionDTO builds an ActivePositionDTO telemetry snapshot for frontend broadcasts and persistence
+func (worker *PositionWorker) BuildPositionDTO() market.ActivePositionDTO {
+	return worker.ToDTO()
+}
 
-	ltp := w.LatestLTP()
-	hwm := math.Float64frombits(w.highWaterMarkBits.Load())
-	curStop := math.Float64frombits(w.confirmedStopBits.Load())
-	shadowStop := math.Float64frombits(w.shadowStopBits.Load())
-	remQty := w.RemainingQty()
-	mods := int(w.modCount.Load())
-	gear := int(w.currentGear.Load())
-	t1Done := w.tranche1Done.Load()
+func (worker *PositionWorker) ToDTO() market.ActivePositionDTO {
+	worker.mu.RLock()
+	state := worker.state
+	exitReason := worker.exitReason
+	gross := worker.realisedGrossPnL
+	charges := worker.totalCharges
+	net := worker.realisedNetPnL
+	closedAt := worker.closedAt
+	entryPx := worker.EntryPrice
+	beStop := worker.BreakevenStop
+	initQty := worker.InitialQty
+	exitProceeds := worker.exitProceeds
+	worker.mu.RUnlock()
+
+	ltp := worker.LatestLTP()
+	hwm := math.Float64frombits(worker.highWaterMarkBits.Load())
+	curStop := math.Float64frombits(worker.confirmedStopBits.Load())
+	shadowStop := math.Float64frombits(worker.shadowStopBits.Load())
+	remQty := worker.RemainingQty()
+	mods := int(worker.modCount.Load())
+	gear := int(worker.currentGear.Load())
+	hasTranche1Completed := worker.hasTranche1Completed.Load()
 
 	var rMult, mfeR float64
-	if w.OneR > 0 {
-		rMult = (ltp - entryPx) / w.OneR
-		mfeR = (hwm - entryPx) / w.OneR
+	if worker.OneR > 0 {
+		rMult = (ltp - entryPx) / worker.OneR
+		mfeR = (hwm - entryPx) / worker.OneR
 	}
 
 	var unrealised float64
@@ -503,7 +528,7 @@ func (w *PositionWorker) ToDTO() market.ActivePositionDTO {
 		estCharges = charges
 		netTotal = net
 	} else {
-		filledEntry := int(w.filledEntryQty.Load())
+		filledEntry := int(worker.filledEntryQty.Load())
 		if filledEntry > 0 {
 			unrealised = float64(remQty) * (ltp - entryPx)
 			banked := exitProceeds - (float64(filledEntry-remQty) * entryPx)
@@ -529,7 +554,7 @@ func (w *PositionWorker) ToDTO() market.ActivePositionDTO {
 	}
 
 	var exitPx float64
-	if filledExit := w.filledExitQty.Load(); filledExit > 0 && exitProceeds > 0 {
+	if filledExit := worker.filledExitQty.Load(); filledExit > 0 && exitProceeds > 0 {
 		exitPx = exitProceeds / float64(filledExit)
 	} else if state == StateClosed && initQty > 0 {
 		exitPx = entryPx + (gross / float64(initQty))
@@ -538,22 +563,22 @@ func (w *PositionWorker) ToDTO() market.ActivePositionDTO {
 	}
 
 	return market.ActivePositionDTO{
-		PositionID:       w.PositionID,
-		Mode:             w.Mode,
-		Symbol:           w.Symbol,
-		InstrumentToken:  w.Token,
+		PositionID:       worker.PositionID,
+		Mode:             worker.Mode,
+		Symbol:           worker.Symbol,
+		InstrumentToken:  worker.Token,
 		State:            state,
-		PatternType:      w.PatternType,
+		PatternType:      worker.PatternType,
 		EntryPrice:       math.Round(entryPx*100.0) / 100.0,
 		ExitPrice:        math.Round(exitPx*100.0) / 100.0,
 		LTP:              math.Round(ltp*100.0) / 100.0,
-		InitialStop:      math.Round(w.InitialStop*100.0) / 100.0,
+		InitialStop:      math.Round(worker.InitialStop*100.0) / 100.0,
 		CurrentStop:      math.Round(curStop*100.0) / 100.0,
 		ShadowStop:       math.Round(shadowStop*100.0) / 100.0,
 		BreakevenStop:    math.Round(beStop*100.0) / 100.0,
-		BaseBuffer:       math.Round(w.BaseBuffer*100.0) / 100.0,
+		BaseBuffer:       math.Round(worker.BaseBuffer*100.0) / 100.0,
 		HighWaterMark:    math.Round(hwm*100.0) / 100.0,
-		OneR:             math.Round(w.OneR*100.0) / 100.0,
+		OneR:             math.Round(worker.OneR*100.0) / 100.0,
 		RMultiple:        math.Round(rMult*100.0) / 100.0,
 		MFERMultiple:     math.Round(mfeR*100.0) / 100.0,
 		InitialQty:       initQty,
@@ -562,32 +587,32 @@ func (w *PositionWorker) ToDTO() market.ActivePositionDTO {
 		MaxMods:          MaxExchangeOrderMods,
 		CurrentGear:      gear,
 		GearLabel:        gearLabel,
-		Tranche1Done:     t1Done,
+		HasTranche1Completed: hasTranche1Completed,
 		UnrealisedPnL:    math.Round(unrealised*100.0) / 100.0,
 		RealisedGrossPnL: math.Round(gross*100.0) / 100.0,
 		EstimatedCharges: math.Round(estCharges*100.0) / 100.0,
 		NetTotalPnL:      math.Round(netTotal*100.0) / 100.0,
 		ExitReason:       exitReason,
-		OpenedAt:         w.OpenedAt.Format("15:04:05"),
-		OpenedAtUnix:     w.OpenedAtUnix,
+		OpenedAt:         worker.OpenedAt.Format("15:04:05"),
+		OpenedAtUnix:     worker.OpenedAtUnix,
 		ClosedAt:         closedStr,
 	}
 }
 
-func (w *PositionWorker) persistPositionState() {
-	if w.db == nil {
+func (worker *PositionWorker) persistPositionState() {
+	if worker.db == nil {
 		return
 	}
-	dto := w.ToDTO()
-	w.mu.RLock()
-	entryOrd := w.entryOrderID
-	slOrd := w.slOrderID
-	scaleOrd := w.scaleOutOrderID
-	closedAt := w.closedAt
-	w.mu.RUnlock()
+	dto := worker.ToDTO()
+	worker.mu.RLock()
+	entryOrd := worker.entryOrderID
+	slOrd := worker.slOrderID
+	scaleOrd := worker.scaleOutOrderID
+	closedAt := worker.closedAt
+	worker.mu.RUnlock()
 
 	t1Int := 0
-	if dto.Tranche1Done {
+	if dto.HasTranche1Completed {
 		t1Int = 1
 	}
 	var closedVal interface{}
@@ -595,7 +620,7 @@ func (w *PositionWorker) persistPositionState() {
 		closedVal = closedAt.UTC().Format(time.RFC3339)
 	}
 
-	_, _ = w.db.Exec(`
+	_, _ = worker.db.Exec(`
 		INSERT INTO positions (
 			position_id, trading_date, mode, symbol, instrument_token, state, pattern_type,
 			entry_order_id, sl_order_id, scale_out_order_id,
@@ -627,12 +652,12 @@ func (w *PositionWorker) persistPositionState() {
 			exit_reason = excluded.exit_reason,
 			closed_at = excluded.closed_at;
 	`,
-		w.PositionID, w.TradingDate, w.Mode, w.Symbol, w.Token, dto.State, w.PatternType,
+		worker.PositionID, worker.TradingDate, worker.Mode, worker.Symbol, worker.Token, dto.State, worker.PatternType,
 		entryOrd, slOrd, scaleOrd,
 		dto.EntryPrice, dto.ExitPrice, dto.InitialStop, dto.CurrentStop, dto.ShadowStop, dto.BreakevenStop, dto.BaseBuffer,
-		dto.HighWaterMark, dto.OneR, dto.InitialQty, w.filledEntryQty.Load(), w.filledExitQty.Load(),
+		dto.HighWaterMark, dto.OneR, dto.InitialQty, worker.filledEntryQty.Load(), worker.filledExitQty.Load(),
 		dto.ModCount, dto.CurrentGear, t1Int,
 		dto.RealisedGrossPnL, dto.EstimatedCharges, dto.NetTotalPnL, dto.ExitReason,
-		w.OpenedAt.UTC().Format(time.RFC3339), closedVal,
+		worker.OpenedAt.UTC().Format(time.RFC3339), closedVal,
 	)
 }

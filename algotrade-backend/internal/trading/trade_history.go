@@ -12,24 +12,28 @@ import (
 	"github.com/ajaynegi33/AlgoTrade/internal/market"
 )
 
-func round2(v float64) float64 {
-	return math.Round(v*100.0) / 100.0
+func round2(value float64) float64 {
+	return math.Round(value*100.0) / 100.0
 }
 
-func formatHoldDuration(sec int64) string {
-	if sec <= 0 {
+func RoundToTwoDecimals(value float64) float64 {
+	return round2(value)
+}
+
+func formatHoldDuration(durationSeconds int64) string {
+	if durationSeconds <= 0 {
 		return "0s"
 	}
-	h := sec / 3600
-	m := (sec % 3600) / 60
-	s := sec % 60
-	if h > 0 {
-		return fmt.Sprintf("%dh %02dm %02ds", h, m, s)
+	hours := durationSeconds / 3600
+	minutes := (durationSeconds % 3600) / 60
+	seconds := durationSeconds % 60
+	if hours > 0 {
+		return fmt.Sprintf("%dh %02dm %02ds", hours, minutes, seconds)
 	}
-	if m > 0 {
-		return fmt.Sprintf("%dm %02ds", m, s)
+	if minutes > 0 {
+		return fmt.Sprintf("%dm %02ds", minutes, seconds)
 	}
-	return fmt.Sprintf("%ds", s)
+	return fmt.Sprintf("%ds", seconds)
 }
 
 func parseDBTimeIST(raw string, ist *time.Location) (time.Time, string) {
@@ -57,17 +61,17 @@ func parseDBTimeIST(raw string, ist *time.Location) (time.Time, string) {
 
 // GetTradeHistory returns the complete historical trade ledger, itemized 6-part Indian statutory taxes,
 // child order legs, and strategy/gear attribution analytics.
-func (m *Manager) GetTradeHistory(modeFilter, fromDate, toDate string, limit int) *market.TradeHistoryResponseDTO {
+func (manager *Manager) GetTradeHistory(modeFilter, fromDate, toDate string, limit int) *market.TradeHistoryResponseDTO {
 	if limit <= 0 || limit > 1000 {
 		limit = 500
 	}
 	ist := market.ISTLocation
 	modeFilter = strings.ToUpper(strings.TrimSpace(modeFilter))
 
-	items := make([]market.TradeHistoryItemDTO, 0, 64)
+	tradeHistoryItems := make([]market.TradeHistoryItemDTO, 0, 64)
 	seenPosIDs := make(map[string]bool)
 
-	if m.db != nil {
+	if manager.db != nil {
 		var whereClauses []string
 		var args []interface{}
 
@@ -130,80 +134,80 @@ func (m *Manager) GetTradeHistory(modeFilter, fromDate, toDate string, limit int
 			LIMIT ?
 		`, whereSQL)
 
-		type rawDBPos struct {
+		type rawPositionRecord struct {
 			posID, trDate, mode, sym, compName, secName, state, pattern, exitReason, openedRaw, closedRaw string
 			token                                                                                          uint32
 			misLev, entryPx, exitPx, initStop, curStop, shStop, beStop, hwm, oneR, gross, charges, net     float64
 			initQty, filledEntry, filledExit, modCnt, gear, t1Int                                          int
 		}
-		var rawList []rawDBPos
+		var rawPositions []rawPositionRecord
 
-		rows, err := m.db.Query(query, args...)
+		rows, err := manager.db.Query(query, args...)
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
-				var r rawDBPos
+				var positionRecord rawPositionRecord
 				if scanErr := rows.Scan(
-					&r.posID, &r.trDate, &r.mode, &r.sym, &r.compName, &r.secName, &r.misLev,
-					&r.token, &r.state, &r.pattern,
-					&r.entryPx, &r.exitPx, &r.initStop, &r.curStop, &r.shStop, &r.beStop, &r.hwm, &r.oneR,
-					&r.initQty, &r.filledEntry, &r.filledExit, &r.modCnt, &r.gear, &r.t1Int,
-					&r.gross, &r.charges, &r.net, &r.exitReason, &r.openedRaw, &r.closedRaw,
+					&positionRecord.posID, &positionRecord.trDate, &positionRecord.mode, &positionRecord.sym, &positionRecord.compName, &positionRecord.secName, &positionRecord.misLev,
+					&positionRecord.token, &positionRecord.state, &positionRecord.pattern,
+					&positionRecord.entryPx, &positionRecord.exitPx, &positionRecord.initStop, &positionRecord.curStop, &positionRecord.shStop, &positionRecord.beStop, &positionRecord.hwm, &positionRecord.oneR,
+					&positionRecord.initQty, &positionRecord.filledEntry, &positionRecord.filledExit, &positionRecord.modCnt, &positionRecord.gear, &positionRecord.t1Int,
+					&positionRecord.gross, &positionRecord.charges, &positionRecord.net, &positionRecord.exitReason, &positionRecord.openedRaw, &positionRecord.closedRaw,
 				); scanErr == nil {
-					rawList = append(rawList, r)
+					rawPositions = append(rawPositions, positionRecord)
 				}
 			}
 			if rErr := rows.Err(); rErr != nil {
 				slog.Error("Failed iterating trade history rows from DB", "error", rErr)
 			}
 
-			for _, r := range rawList {
+			for _, positionRecord := range rawPositions {
 				act := market.ActivePositionDTO{
-					PositionID:       r.posID,
-					Mode:             r.mode,
-					Symbol:           r.sym,
-					InstrumentToken:  r.token,
-					State:            r.state,
-					PatternType:      r.pattern,
-					EntryPrice:       r.entryPx,
-					ExitPrice:        r.exitPx,
-					InitialStop:      r.initStop,
-					CurrentStop:      r.curStop,
-					ShadowStop:       r.shStop,
-					BreakevenStop:    r.beStop,
-					HighWaterMark:    r.hwm,
-					OneR:             r.oneR,
-					InitialQty:       r.initQty,
-					RemainingQty:     r.initQty - r.filledExit,
-					ModCount:         r.modCnt,
-					CurrentGear:      r.gear,
-					Tranche1Done:     r.t1Int != 0,
-					RealisedGrossPnL: r.gross,
-					EstimatedCharges: r.charges,
-					NetTotalPnL:      r.net,
-					ExitReason:       r.exitReason,
-					OpenedAt:         r.openedRaw,
-					ClosedAt:         r.closedRaw,
+					PositionID:       positionRecord.posID,
+					Mode:             positionRecord.mode,
+					Symbol:           positionRecord.sym,
+					InstrumentToken:  positionRecord.token,
+					State:            positionRecord.state,
+					PatternType:      positionRecord.pattern,
+					EntryPrice:       positionRecord.entryPx,
+					ExitPrice:        positionRecord.exitPx,
+					InitialStop:      positionRecord.initStop,
+					CurrentStop:      positionRecord.curStop,
+					ShadowStop:       positionRecord.shStop,
+					BreakevenStop:    positionRecord.beStop,
+					HighWaterMark:    positionRecord.hwm,
+					OneR:             positionRecord.oneR,
+					InitialQty:       positionRecord.initQty,
+					RemainingQty:     positionRecord.initQty - positionRecord.filledExit,
+					ModCount:             positionRecord.modCnt,
+					CurrentGear:          positionRecord.gear,
+					HasTranche1Completed: positionRecord.t1Int != 0,
+					RealisedGrossPnL:     positionRecord.gross,
+					EstimatedCharges: positionRecord.charges,
+					NetTotalPnL:      positionRecord.net,
+					ExitReason:       positionRecord.exitReason,
+					OpenedAt:         positionRecord.openedRaw,
+					ClosedAt:         positionRecord.closedRaw,
 				}
-				if r.filledEntry > 0 {
-					act.InitialQty = r.filledEntry
+				if positionRecord.filledEntry > 0 {
+					act.InitialQty = positionRecord.filledEntry
 				}
-				item := buildTradeHistoryFromDTO(m.db, ist, act, r.trDate, r.compName, r.secName, r.misLev)
-				items = append(items, item)
-				seenPosIDs[r.posID] = true
+				item := buildTradeHistoryFromDTO(manager.db, ist, act, positionRecord.trDate, positionRecord.compName, positionRecord.secName, positionRecord.misLev)
+				tradeHistoryItems = append(tradeHistoryItems, item)
+				seenPosIDs[positionRecord.posID] = true
 			}
 		}
 	}
 
 	// Merge any currently active positions in memory not yet in SQLite or still in market
-	m.mu.RLock()
-	activeSnapshots := make([]market.ActivePositionDTO, 0, len(m.activeWorkers))
-	for _, w := range m.activeWorkers {
-		activeSnapshots = append(activeSnapshots, w.ToDTO())
+	manager.mu.RLock()
+	activeSnapshots := make([]market.ActivePositionDTO, 0, len(manager.activeWorkers))
+	for _, worker := range manager.activeWorkers {
+		activeSnapshots = append(activeSnapshots, worker.ToDTO())
 	}
-	memClosed := make([]market.ActivePositionDTO, len(m.closedPositions))
-	copy(memClosed, m.closedPositions)
-	m.mu.RUnlock()
+	memClosed := make([]market.ActivePositionDTO, len(manager.closedPositions))
+	copy(memClosed, manager.closedPositions)
+	manager.mu.RUnlock()
 
 	todayStr := market.TodayDateIST()
 	appendActivePosition := func(pos market.ActivePositionDTO) {
@@ -213,8 +217,8 @@ func (m *Manager) GetTradeHistory(modeFilter, fromDate, toDate string, limit int
 		if (modeFilter == "PAPER" || modeFilter == "LIVE") && pos.Mode != modeFilter {
 			return
 		}
-		item := buildTradeHistoryFromDTO(m.db, ist, pos, todayStr, pos.Symbol, "NSE Cash Equity", 5.0)
-		items = append(items, item)
+		item := buildTradeHistoryFromDTO(manager.db, ist, pos, todayStr, pos.Symbol, "NSE Cash Equity", 5.0)
+		tradeHistoryItems = append(tradeHistoryItems, item)
 		seenPosIDs[pos.PositionID] = true
 	}
 
@@ -226,10 +230,10 @@ func (m *Manager) GetTradeHistory(modeFilter, fromDate, toDate string, limit int
 		appendActivePosition(cp)
 	}
 
-	summary := computeTradeAnalyticsSummary(items)
+	summary := computeTradeAnalyticsSummary(tradeHistoryItems)
 	return &market.TradeHistoryResponseDTO{
 		Summary: summary,
-		Trades:  items,
+		Trades:  tradeHistoryItems,
 	}
 }
 
@@ -273,7 +277,7 @@ func buildTradeHistoryFromDTO(
 		gross = totalSellValue - totalInvested
 	}
 
-	tb := CalculatePositionTaxBreakdown(buyPrice, sellPrice, qty, act.Tranche1Done)
+	tb := CalculatePositionTaxBreakdown(buyPrice, sellPrice, qty, act.HasTranche1Completed)
 	taxDTO := market.TaxBreakdownDTO{
 		BuyBrokerage:  tb.BuyBrokerage,
 		SellBrokerage: tb.SellBrokerage,
@@ -394,7 +398,7 @@ func buildTradeHistoryFromDTO(
 		RCaptureEfficiencyPct: round2(rCapturePct),
 		ModCount:              act.ModCount,
 		FinalGear:             act.CurrentGear,
-		Tranche1Done:          act.Tranche1Done,
+		HasTranche1Completed:  act.HasTranche1Completed,
 		ExitReason:            exitReason,
 		Orders:                orderLegs,
 	}
@@ -468,7 +472,7 @@ func computeTradeAnalyticsSummary(trades []market.TradeHistoryItemDTO) market.Tr
 
 		totalR += t.RealisedRMultiple
 		totalHoldSec += t.HoldDurationSec
-		if t.Tranche1Done {
+		if t.HasTranche1Completed {
 			t1Count++
 		}
 		if t.RCaptureEfficiencyPct > 0 {

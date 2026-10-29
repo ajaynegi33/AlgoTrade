@@ -38,7 +38,7 @@ export const CandidateGateInspector = memo(function CandidateGateInspector({
             Top 5 Candidate Execution Gate Inspector
           </h3>
           <p className="text-[11px] text-slate-500 mt-0.5">
-            Live 6-Stage Autonomous Gate Evaluation (Stage 0 Regime • Score • RVOL • Depth • Pattern A/B • 5x MIS &amp; 1.5x Tax Edge)
+            Live 6-Stage Autonomous Gate Evaluation (Stage 0 Regime • Score • RVOL • Depth • Setup (VWAP/ORB) • 5x MIS &amp; 1.5x Tax Edge)
           </p>
         </div>
         <span className="text-[10px] font-bold px-2.5 py-1 rounded-full bg-slate-100 text-slate-700 border border-slate-200 shrink-0">
@@ -101,7 +101,13 @@ export const CandidateGateInspector = memo(function CandidateGateInspector({
                 <GateCheckPill label="3. Book/OBI" ok={c.book_quality_ok} />
                 <GateCheckPill label="4. RVOL" ok={c.rvol_ok} />
                 <GateCheckPill
-                  label={c.pattern_matched ? `5. ${c.pattern_matched}` : "5. Pattern A/B"}
+                  label={
+                    c.pattern_matched === "VWAP_PULLBACK_RECLAIM"
+                      ? "5. VWAP Pullback"
+                      : c.pattern_matched === "ORB_15M_BREAKOUT"
+                      ? "5. 15m ORB"
+                      : "5. Setup (VWAP/ORB)"
+                  }
                   ok={Boolean(c.pattern_matched)}
                 />
                 <GateCheckPill label="6. Size & Tax Edge" ok={c.sizing_approved} />

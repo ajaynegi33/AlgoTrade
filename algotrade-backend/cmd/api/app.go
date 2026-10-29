@@ -80,29 +80,29 @@ func NewApp(cfg *config.Config) (*App, error) {
 }
 
 // Start launches the ticker, market hub, initial scan, and HTTP server
-func (a *App) Start() error {
-	a.tickerClient.Start()
+func (app *App) Start() error {
+	app.tickerClient.Start()
 
-	if err := a.marketHub.Start(); err != nil {
+	if err := app.marketHub.Start(); err != nil {
 		return err
 	}
 
 	// Deferred non-blocking initial scan check on startup
 	go func() {
 		time.Sleep(1 * time.Second)
-		if _, err := a.screenerService.RunScan(false); err != nil {
+		if _, err := app.screenerService.RunScan(false); err != nil {
 			slog.Info("Initial universe scan deferred (no network or already scanned)", "info", err.Error())
 		}
 	}()
 
 	go func() {
 		slog.Info("AlgoTrade Backend started",
-			"port", a.cfg.Port,
-			"env", a.cfg.Env,
+			"port", app.cfg.Port,
+			"env", app.cfg.Env,
 			"auth", "AccessToken=5m, RefreshToken=24h (RTR enabled)",
-			"allowed_origin", a.cfg.FrontendURL,
+			"allowed_origin", app.cfg.FrontendURL,
 		)
-		if err := a.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := app.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("Server encountered fatal error", "error", err)
 			os.Exit(1)
 		}
@@ -112,16 +112,16 @@ func (a *App) Start() error {
 }
 
 // Stop shuts down the HTTP server and all background engines cleanly
-func (a *App) Stop(ctx context.Context) {
+func (app *App) Stop(ctx context.Context) {
 	slog.Info("Shutdown signal received, shutting down gracefully...")
 
-	if err := a.server.Shutdown(ctx); err != nil {
+	if err := app.server.Shutdown(ctx); err != nil {
 		slog.Error("Graceful shutdown error", "error", err)
 	}
 
-	a.tradeManager.Stop()
-	a.marketHub.Stop()
-	a.tickerClient.Stop()
+	app.tradeManager.Stop()
+	app.marketHub.Stop()
+	app.tickerClient.Stop()
 
 	if err := database.Close(); err != nil {
 		slog.Error("Error closing database connection", "error", err)

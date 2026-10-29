@@ -6,25 +6,25 @@ import (
 )
 
 // processTick executes the zero-allocation hot-path tick update on the actor mailbox goroutine.
-func (a *Actor) processTick(tick *ParsedTick) {
-	idx, exists := a.tokenMap[tick.Token]
+func (actor *Actor) processTick(tick *ParsedTick) {
+	stockIndex, exists := actor.stockIndexByToken[tick.Token]
 	if !exists {
 		return
 	}
 
-	a.ticksProcessed.Add(1)
-	stock := &a.stocks[idx]
+	actor.ticksProcessed.Add(1)
+	stock := &actor.stocks[stockIndex]
 
 	// Ensure today0915Epoch rolls over cleanly if server stays up across calendar days
-	if tick.ExchangeTime > a.today0915Epoch+64800 {
+	if tick.ExchangeTime > actor.today0915Epoch+64800 {
 		tIST := time.Unix(tick.ExchangeTime, 0).In(istZone)
 		y, m, d := tIST.Date()
 		newEpoch := time.Date(y, m, d, 9, 15, 0, 0, istZone).Unix()
-		if newEpoch > a.today0915Epoch {
-			a.today0915Epoch = newEpoch
+		if newEpoch > actor.today0915Epoch {
+			actor.today0915Epoch = newEpoch
 			// Reset all tracked stocks' intraday session state for the new trading day
-			for _, sIdx := range a.activeIndices {
-				st := &a.stocks[sIdx]
+			for _, sIdx := range actor.activeStockIndices {
+				st := &actor.stocks[sIdx]
 				st.LastUpdatedUnix = 0
 				st.CurrentBarIdx = 0
 				st.PullbackCount = 0
@@ -58,7 +58,7 @@ func (a *Actor) processTick(tick *ParsedTick) {
 		}
 		stock.LastUpdatedUnix = tick.ExchangeTime
 
-		barIdx := (tick.ExchangeTime - a.today0915Epoch) / 300
+		barIdx := (tick.ExchangeTime - actor.today0915Epoch) / 300
 		if barIdx < 0 {
 			barIdx = 0
 		} else if barIdx >= 75 {
@@ -71,14 +71,14 @@ func (a *Actor) processTick(tick *ParsedTick) {
 			Low:       tick.LTP,
 			Close:     tick.LTP,
 			Volume:    0,
-			Timestamp: a.today0915Epoch + barIdx*300,
+			Timestamp: actor.today0915Epoch + barIdx*300,
 		}
 		if stock.IsWarm {
-			stock.BaselineSlotVolume = a.slotBaselines[idx][barIdx].MedianVolume
-			stock.BaselineCumVolume = a.slotBaselines[idx][barIdx].MedianCumVol
+			stock.BaselineSlotVolume = actor.slotBaselines[stockIndex][barIdx].MedianVolume
+			stock.BaselineCumVolume = actor.slotBaselines[stockIndex][barIdx].MedianCumVol
 		}
-		if w := a.workers[idx]; w != nil {
-			w.OnTickHotPath(stock, false)
+		if listener := actor.positionTickListeners[stockIndex]; listener != nil {
+			listener.OnTickHotPath(stock, false)
 		}
 		return
 	}
@@ -102,7 +102,7 @@ func (a *Actor) processTick(tick *ParsedTick) {
 	}
 
 	// Check 5-minute bar rollover (exchTime / 300)
-	barIdx := (tick.ExchangeTime - a.today0915Epoch) / 300
+	barIdx := (tick.ExchangeTime - actor.today0915Epoch) / 300
 	if barIdx > int64(stock.CurrentBarIdx) && barIdx < 75 {
 		// Finalize old bar
 		oldIdx := stock.CurrentBarIdx
@@ -113,22 +113,22 @@ func (a *Actor) processTick(tick *ParsedTick) {
 
 		// Queue old bar for background SQLite flush
 		select {
-		case a.barFlushChan <- BarFlushItem{Token: stock.InstrumentToken, Bar: stock.SessionBars[oldIdx]}:
+		case actor.barFlushChan <- BarFlushItem{Token: stock.InstrumentToken, Bar: stock.SessionBars[oldIdx]}:
 		default:
 		}
 
 		// Advance to new bar & update time-of-day slot baselines
 		stock.CurrentBarIdx = uint8(barIdx)
 		if stock.IsWarm {
-			stock.BaselineSlotVolume = a.slotBaselines[idx][barIdx].MedianVolume
-			stock.BaselineCumVolume = a.slotBaselines[idx][barIdx].MedianCumVol
+			stock.BaselineSlotVolume = actor.slotBaselines[stockIndex][barIdx].MedianVolume
+			stock.BaselineCumVolume = actor.slotBaselines[stockIndex][barIdx].MedianCumVol
 		}
 		stock.SessionBars[barIdx] = OHLCVBar{
 			Open:      tick.LTP,
 			High:      tick.LTP,
 			Low:       tick.LTP,
 			Close:     tick.LTP,
-			Timestamp: a.today0915Epoch + barIdx*300,
+			Timestamp: actor.today0915Epoch + barIdx*300,
 		}
 
 		// Carry over 25% flow memory via bit shift (prevents 0.50 reset drop)
@@ -228,8 +228,8 @@ func (a *Actor) processTick(tick *ParsedTick) {
 	}
 
 	// O(1) lock-free hot-path dispatch to active PositionWorker if bound
-	if w := a.workers[idx]; w != nil {
-		w.OnTickHotPath(stock, false)
+	if listener := actor.positionTickListeners[stockIndex]; listener != nil {
+		listener.OnTickHotPath(stock, false)
 	}
 }
 

@@ -85,8 +85,8 @@ func GenerateTokens(userID, email, role string, secret []byte, accessTTL, refres
 }
 
 func ValidateToken(tokenString string, secret []byte, expectedType string) (*CustomClaims, error) {
-	token, err := jwt.ParseWithClaims(tokenString, &CustomClaims{}, func(t *jwt.Token) (interface{}, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+	token, err := jwt.ParseWithClaims(tokenString, &CustomClaims{}, func(tokenObj *jwt.Token) (interface{}, error) {
+		if _, ok := tokenObj.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, ErrInvalidToken
 		}
 		return secret, nil

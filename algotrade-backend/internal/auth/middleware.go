@@ -20,16 +20,16 @@ func GetUserFromContext(ctx context.Context) (*CustomClaims, bool) {
 
 func AuthMiddleware(secret []byte) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			authHeader := r.Header.Get("Authorization")
+		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			authHeader := request.Header.Get("Authorization")
 			if authHeader == "" {
-				response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Authorization header is required")
+				response.Error(writer, http.StatusUnauthorized, "UNAUTHORIZED", "Authorization header is required")
 				return
 			}
 
 			parts := strings.SplitN(authHeader, " ", 2)
 			if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-				response.Error(w, http.StatusUnauthorized, "INVALID_TOKEN_FORMAT", "Authorization header must be Bearer <token>")
+				response.Error(writer, http.StatusUnauthorized, "INVALID_TOKEN_FORMAT", "Authorization header must be Bearer <token>")
 				return
 			}
 
@@ -37,61 +37,61 @@ func AuthMiddleware(secret []byte) func(http.Handler) http.Handler {
 			claims, err := ValidateToken(tokenString, secret, TokenTypeAccess)
 			if err != nil {
 				if errors.Is(err, ErrExpiredToken) {
-					response.Error(w, http.StatusUnauthorized, "TOKEN_EXPIRED", "Access token has expired")
+					response.Error(writer, http.StatusUnauthorized, "TOKEN_EXPIRED", "Access token has expired")
 					return
 				}
-				response.Error(w, http.StatusUnauthorized, "TOKEN_INVALID", "Invalid or malformed access token")
+				response.Error(writer, http.StatusUnauthorized, "TOKEN_INVALID", "Invalid or malformed access token")
 				return
 			}
 
-			ctx := context.WithValue(r.Context(), userCtxKey{}, claims)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			ctx := context.WithValue(request.Context(), userCtxKey{}, claims)
+			next.ServeHTTP(writer, request.WithContext(ctx))
 		})
 	}
 }
 
 func CORSMiddleware(frontendURL string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 			// Avoid caching issues across different client origins
-			w.Header().Add("Vary", "Origin")
+			writer.Header().Add("Vary", "Origin")
 
-			origin := r.Header.Get("Origin")
+			origin := request.Header.Get("Origin")
 			if origin == frontendURL || frontendURL == "*" {
-				w.Header().Set("Access-Control-Allow-Origin", origin)
+				writer.Header().Set("Access-Control-Allow-Origin", origin)
 			} else if origin != "" {
 				// Allow localhost dynamically if testing with different ports
 				if strings.HasPrefix(origin, "http://localhost:") || strings.HasPrefix(origin, "http://127.0.0.1:") {
-					w.Header().Set("Access-Control-Allow-Origin", origin)
+					writer.Header().Set("Access-Control-Allow-Origin", origin)
 				}
 			}
 
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, Cookie")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			writer.Header().Set("Access-Control-Allow-Credentials", "true")
+			writer.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, Cookie")
+			writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 
-			if r.Method == http.MethodOptions {
-				w.WriteHeader(http.StatusNoContent)
+			if request.Method == http.MethodOptions {
+				writer.WriteHeader(http.StatusNoContent)
 				return
 			}
 
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(writer, request)
 		})
 	}
 }
 
 func RecoveryMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
 				slog.Error("Unhandled panic in HTTP request",
 					"error", rec,
-					"path", r.URL.Path,
-					"method", r.Method,
+					"path", request.URL.Path,
+					"method", request.Method,
 				)
-				response.Error(w, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "An unexpected error occurred")
+				response.Error(writer, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "An unexpected error occurred")
 			}
 		}()
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(writer, request)
 	})
 }

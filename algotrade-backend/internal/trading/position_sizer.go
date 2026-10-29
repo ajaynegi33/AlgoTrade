@@ -48,7 +48,7 @@ const (
 
 // SizingDecision holds the output of the 4-Constraint Position Sizer and Net-Profitability Gate
 type SizingDecision struct {
-	Approved            bool              `json:"approved"`
+	IsApproved          bool              `json:"approved"`
 	RejectReason        string            `json:"reject_reason,omitempty"`
 	Quantity            int               `json:"quantity"`
 	DustFloorQty        int               `json:"dust_floor_qty"`
@@ -98,24 +98,32 @@ func EffectiveRiskPerTradePct(netEquity, configuredRiskPct float64) float64 {
 
 // ComputePositionSize evaluates the 4 institutional sizing constraints (Risk, Margin, Concentration, Liquidity)
 // from ₹500 to ₹10Cr+ accounts and enforces the Mandatory Net-Profitability Gate at +1.0R.
-func ComputePositionSize( s *market.StockMetrics, signalBarLow float64, netEquity float64, freeMargin float64, riskPerTradePct float64, sessionSizeMult float64, drawdownMult float64 ) SizingDecision {
-	tickSize := float64(s.TickSize)
+func ComputePositionSize(
+	stockMetrics *market.StockMetrics,
+	signalBarLow float64,
+	netEquity float64,
+	freeMargin float64,
+	riskPerTradePct float64,
+	sessionSizeMult float64,
+	drawdownMult float64,
+) SizingDecision {
+	tickSize := float64(stockMetrics.TickSize)
 	if tickSize <= 0 {
 		tickSize = 0.05
 	}
 
 	// 1. Marketable limit entry price: BestAsk + 1 tick (or LTP + 1 tick if Ask1 is 0)
-	refAsk := float64(s.Ask1Price)
-	if refAsk <= 0 || refAsk < s.LTP {
-		refAsk = s.LTP
+	refAsk := float64(stockMetrics.Ask1Price)
+	if refAsk <= 0 || refAsk < stockMetrics.LTP {
+		refAsk = stockMetrics.LTP
 	}
 	entryLimitPrice := RoundUpToTick(refAsk+tickSize, tickSize)
 
 	// 2. Delegate Stop Loss & 1R calculation to stoploss.go
-	stopSpec, err := ComputeStopAndBufferSpec(entryLimitPrice, signalBarLow, s.ATR14, tickSize)
+	stopSpec, err := ComputeStopAndBufferSpec(entryLimitPrice, signalBarLow, stockMetrics.ATR14, tickSize)
 	if err != nil {
 		return SizingDecision{
-			Approved:     false,
+			IsApproved:   false,
 			RejectReason: err.Error(),
 		}
 	}
@@ -123,12 +131,12 @@ func ComputePositionSize( s *market.StockMetrics, signalBarLow float64, netEquit
 	// 3. Minimum Capital Guard
 	if netEquity < 500.0 || freeMargin <= 0 {
 		return SizingDecision{
-			Approved:     false,
+			IsApproved:   false,
 			RejectReason: fmt.Sprintf("insufficient capital (NetEquity=₹%.2f, FreeMargin=₹%.2f)", netEquity, freeMargin),
 		}
 	}
 
-	effRiskPct := EffectiveRiskPerTradePct(netEquity, riskPerTradePct)
+	effectiveRiskPct := EffectiveRiskPerTradePct(netEquity, riskPerTradePct)
 	if sessionSizeMult <= 0 {
 		sessionSizeMult = 1.0
 	}
@@ -137,60 +145,60 @@ func ComputePositionSize( s *market.StockMetrics, signalBarLow float64, netEquit
 	}
 
 	// 4. Compute Risk Budget in Rupees
-	riskBudget := netEquity * effRiskPct * sessionSizeMult * drawdownMult
+	riskBudget := netEquity * effectiveRiskPct * sessionSizeMult * drawdownMult
 	// Small-Account Floor (₹500 to ₹25,000): prevent session/drawdown multipliers from starving 5x MIS sizing
 	if netEquity <= 25000.0 {
 		riskBudget = math.Max(riskBudget, netEquity*0.0075)
 	}
 
-	leverage := float64(s.MISLeverage)
+	leverage := float64(stockMetrics.MISLeverage)
 	if leverage < 1.0 || leverage > 5.0 {
 		leverage = 5.0
 	}
 
 	// Estimate per-share tax + slippage friction at tentative quantity
 	tentativeQty := max(1, int(math.Floor(riskBudget/stopSpec.OneR)))
-	estTax := CalculateRoundTripCharges(entryLimitPrice, stopSpec.InitialStop, tentativeQty)
-	perShareFriction := (estTax.TotalCharges / float64(tentativeQty)) + 1.5*tickSize
+	estimatedCharges := CalculateRoundTripCharges(entryLimitPrice, stopSpec.InitialStop, tentativeQty)
+	perShareFriction := (estimatedCharges.TotalCharges / float64(tentativeQty)) + 1.5*tickSize
 
 	// =========================================================================
 	// THE 4 INSTITUTIONAL SIZING CONSTRAINTS
 	// =========================================================================
 
 	// Constraint 1: Risk-Capped Quantity
-	qRisk := int(math.Floor(riskBudget / (stopSpec.OneR + perShareFriction)))
+	riskCappedQuantity := int(math.Floor(riskBudget / (stopSpec.OneR + perShareFriction)))
 
 	// Constraint 2: Margin-Capped Quantity (with 5% RMS safety buffer)
-	qMargin := int(math.Floor((0.95 * freeMargin * leverage) / entryLimitPrice))
+	marginCappedQuantity := int(math.Floor((0.95 * freeMargin * leverage) / entryLimitPrice))
 
 	// Constraint 3: Single-Stock Concentration Cap
-	concFactor := StandardConcentrationRatio
+	concentrationFactor := StandardConcentrationRatio
 	if netEquity < 25000.0 {
-		concFactor = MicroConcentrationRatio
+		concentrationFactor = MicroConcentrationRatio
 	}
-	qConc := int(math.Floor((concFactor * netEquity * leverage) / entryLimitPrice))
+	concentrationCappedQuantity := int(math.Floor((concentrationFactor * netEquity * leverage) / entryLimitPrice))
 
 	// Constraint 4: Order-Book Top-3 Ask Liquidity Cap (never sweep more than 20% of visible depth)
 	var askTop3Qty uint64
 	for i := 0; i < 3; i++ {
-		askTop3Qty += uint64(s.AskLevels[i].Qty)
+		askTop3Qty += uint64(stockMetrics.AskLevels[i].Qty)
 	}
-	qLiq := max(1, int(math.Floor(MaxTop3AskLiquidityRatio*float64(askTop3Qty))))
+	liquidityCappedQuantity := max(1, int(math.Floor(MaxTop3AskLiquidityRatio*float64(askTop3Qty))))
 
 	// Micro-Capital Allowance (₹500 to ₹25,000 accounts):
-	// If qRisk == 0 because 0.5% of ₹1,000 is ₹5, allow 1 share if margin covers it and max loss <= 2.0% of NetEquity
-	if qRisk == 0 && netEquity < 25000.0 && qMargin >= 1 {
+	// If riskCappedQuantity == 0 because 0.5% of ₹1,000 is ₹5, allow 1 share if margin covers it and max loss <= 2.0% of NetEquity
+	if riskCappedQuantity == 0 && netEquity < 25000.0 && marginCappedQuantity >= 1 {
 		if (stopSpec.OneR + perShareFriction) <= 0.02*netEquity {
-			qRisk = 1
+			riskCappedQuantity = 1
 		}
 	}
 
 	// Final Allocated Quantity = Min across all 4 constraints
-	finalQty := min(qRisk, min(qMargin, min(qConc, qLiq)))
-	if finalQty <= 0 {
+	allocatedQuantity := min(riskCappedQuantity, min(marginCappedQuantity, min(concentrationCappedQuantity, liquidityCappedQuantity)))
+	if allocatedQuantity <= 0 {
 		return SizingDecision{
-			Approved:     false,
-			RejectReason: fmt.Sprintf("quantity constrained to 0 (qRisk=%d, qMargin=%d, qConc=%d, qLiq=%d)", qRisk, qMargin, qConc, qLiq),
+			IsApproved:   false,
+			RejectReason: fmt.Sprintf("quantity constrained to 0 (qRisk=%d, qMargin=%d, qConc=%d, qLiq=%d)", riskCappedQuantity, marginCappedQuantity, concentrationCappedQuantity, liquidityCappedQuantity),
 		}
 	}
 
@@ -199,30 +207,30 @@ func ComputePositionSize( s *market.StockMetrics, signalBarLow float64, netEquit
 	// =========================================================================
 	// Net profit at +1.0R must be at least 1.5x round-trip statutory & brokerage charges
 	target1RPrice := entryLimitPrice + stopSpec.OneR
-	chargesAt1R := CalculateRoundTripCharges(entryLimitPrice, target1RPrice, finalQty).TotalCharges
-	grossProfit1R := float64(finalQty) * stopSpec.OneR
+	chargesAt1R := CalculateRoundTripCharges(entryLimitPrice, target1RPrice, allocatedQuantity).TotalCharges
+	grossProfit1R := float64(allocatedQuantity) * stopSpec.OneR
 	netProfit1R := grossProfit1R - chargesAt1R
 
 	if netProfit1R <= 0 || netProfit1R < NetProfitGateThresholdMult*chargesAt1R {
 		return SizingDecision{
-			Approved: false,
+			IsApproved: false,
 			RejectReason: fmt.Sprintf(
 				"net profit at +1R (₹%.2f) insufficient vs round-trip taxes (₹%.2f) for qty=%d",
-				netProfit1R, chargesAt1R, finalQty,
+				netProfit1R, chargesAt1R, allocatedQuantity,
 			),
 		}
 	}
 
 	// Minimum viable partial-fill dust floor (at least 1 share and enough to cover 2x taxes at +1R)
 	minViableQty := max(1, int(math.Ceil((2.5*chargesAt1R)/math.Max(0.05, stopSpec.OneR))))
-	if minViableQty > finalQty {
-		minViableQty = finalQty
+	if minViableQty > allocatedQuantity {
+		minViableQty = allocatedQuantity
 	}
 
 	// Calculate Breakeven Stop on runner tranche using stoploss.go
-	runnerQty := max(1, finalQty-(finalQty/2))
-	beStop := BreakevenTriggerPrice(entryLimitPrice, finalQty, runnerQty, tickSize)
-	reqMargin := (float64(finalQty) * entryLimitPrice) / leverage
+	runnerQty := max(1, allocatedQuantity-(allocatedQuantity/2))
+	beStop := BreakevenTriggerPrice(entryLimitPrice, allocatedQuantity, runnerQty, tickSize)
+	reqMargin := (float64(allocatedQuantity) * entryLimitPrice) / leverage
 
 	// Target Projections: R1 target at +0.65R (scale-out), R2 target at +1.65R (runner expansion)
 	targetR1 := RoundUpToTick(entryLimitPrice+0.65*stopSpec.OneR, tickSize)
@@ -231,8 +239,8 @@ func ComputePositionSize( s *market.StockMetrics, signalBarLow float64, netEquit
 	beWinRate := math.Round((stopSpec.OneR/(stopSpec.OneR+(targetR2-entryLimitPrice)))*1000.0) / 10.0
 
 	return SizingDecision{
-		Approved:            true,
-		Quantity:            finalQty,
+		IsApproved:          true,
+		Quantity:            allocatedQuantity,
 		DustFloorQty:        minViableQty,
 		EntryLimitPrice:     entryLimitPrice,
 		StopSpec:            stopSpec,
