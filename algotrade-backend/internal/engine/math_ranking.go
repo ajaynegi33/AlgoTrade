@@ -8,13 +8,7 @@ import (
 var istZone = time.FixedZone("IST", 5*3600+1800)
 
 // CalculateBullishScore performs institutional quantification of a long trade setup
-func CalculateBullishScore(
-	stock *StockMetrics,
-	nifty *StockMetrics,
-	sector *StockMetrics,
-	isLeaderSector bool,
-	breadthRatio float64,
-) (score float64, ev float64, pWin float64, reasons ReasonFlag) {
+func CalculateBullishScore( stock *StockMetrics, nifty *StockMetrics, sector *StockMetrics, isLeaderSector bool, breadthRatio float64 ) (score float64, ev float64, pWin float64, reasons ReasonFlag) {
 	if stock.LTP <= 0 || stock.ExchangeVWAP <= 0 {
 		return 0, 0, 0.44, 0
 	}

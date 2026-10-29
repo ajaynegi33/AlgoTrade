@@ -109,13 +109,7 @@ type Actor struct {
 }
 
 // NewActor creates a new Single-Writer Actor instance
-func NewActor(
-	db *sql.DB,
-	tickerClient *kite.TickerClient,
-	histClient *kite.HistoricalService,
-	wsHub *ws.ClientHub,
-	scannerService *scanner.Service,
-) *Actor {
+func NewActor( db *sql.DB, tickerClient *kite.TickerClient, histClient *kite.HistoricalService, wsHub *ws.ClientHub, scannerService *scanner.Service ) *Actor {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Actor{
 		db:                db,
