@@ -79,19 +79,6 @@ func (w *PositionWorker) OnTickHotPath(s *market.StockMetrics, inMacroShock bool
 	if s.FastAggressorEMA < effectiveAggBuy {
 		effectiveAggBuy = s.FastAggressorEMA
 	}
-	// 4. GUARD C: Macro Flash Shock Protection (Nifty 50 Liquidity Vacuum)
-	if inMacroShock && ltp < s.ExchangeVWAP && effectiveAggBuy < 0.35 {
-		if !w.tranche1Done.Load() {
-			w.TriggerEmergencyExit(ExitReasonEmergencyTape)
-			return
-		}
-		// Runner in profit during shock -> Clamp stop to max(Breakeven, LTP - 0.35*BaseBuffer)
-		tightStop := math.Max(beStop, RoundDownToTick(ltp-0.35*w.BaseBuffer, w.TickSize))
-		if tightStop > confirmedStop {
-			w.ProposeStopRatchet(tightStop, atrSafe, true)
-		}
-		return
-	}
 
 	// 5. GUARD D: +0.65R High-Frequency Minimum Profit Scale-Out Trigger (Early Harvest at R1)
 	if !w.tranche1Done.Load() && !w.tranche1Pending.Load() && rCur >= 0.65 {
@@ -108,7 +95,7 @@ func (w *PositionWorker) OnTickHotPath(s *market.StockMetrics, inMacroShock bool
 	}
 	flowScore := 0.50*float64(effectiveAggBuy) + 0.35*float64(s.SmoothedBuyerRatio) + 0.15*clv
 
-	structureIntact := ltp >= s.ExchangeVWAP && ltp > w.SignalBarLow && !inMacroShock
+	structureIntact := ltp >= s.ExchangeVWAP && ltp > w.SignalBarLow
 	var mFlow float64
 	if flowScore >= 0.56 && structureIntact {
 		mFlow = math.Min(1.10, 0.85+(flowScore-0.56)*1.25)

@@ -19,7 +19,6 @@ type ParsedTick struct {
 	Ask1Price     float32
 	RawBuyerRatio float32
 	ExchangeTime  int64
-	IsIndex       bool
 	BidLevels     [5]DepthLevel
 	AskLevels     [5]DepthLevel
 }
@@ -51,13 +50,7 @@ func ParseBinaryFrame(data []byte) []ParsedTick {
 		pkt := data[offset : offset+pktLen]
 		offset += pktLen
 
-		switch pktLen {
-		case 28, 32:
-			// Index Packet (NIFTY 50, NIFTY BANK, Sector Indices)
-			tick := parseIndexPacket(pkt)
-			ticks = append(ticks, tick)
-
-		case 184:
+		if pktLen == 184 {
 			// Full Equity Packet (NSE Cash Equities)
 			tick := parseEquityPacket(pkt)
 			ticks = append(ticks, tick)
@@ -65,28 +58,6 @@ func ParseBinaryFrame(data []byte) []ParsedTick {
 	}
 
 	return ticks
-}
-
-func parseIndexPacket(pkt []byte) ParsedTick {
-	token := binary.BigEndian.Uint32(pkt[0:4])
-	ltp := float64(int32(binary.BigEndian.Uint32(pkt[4:8]))) / 100.0
-	high := float64(int32(binary.BigEndian.Uint32(pkt[8:12]))) / 100.0
-	low := float64(int32(binary.BigEndian.Uint32(pkt[12:16]))) / 100.0
-	open := float64(int32(binary.BigEndian.Uint32(pkt[16:20]))) / 100.0
-	closePrice := float64(int32(binary.BigEndian.Uint32(pkt[20:24]))) / 100.0
-
-	return ParsedTick{
-		Token:        token,
-		LTP:          ltp,
-		VWAP:         ltp, // Indices do not transmit official VWAP; use LTP
-		Volume:       0,   // Indices do not have traded volume
-		Open:         open,
-		High:         high,
-		Low:          low,
-		PrevClose:    closePrice,
-		ExchangeTime: time.Now().Unix(),
-		IsIndex:      true,
-	}
 }
 
 // ComputeAntiSpoofRatio calculates the weighted anti-spoof depth ratio (60% Top 2, 40% Rest 3)
@@ -162,7 +133,6 @@ func parseEquityPacket(pkt []byte) ParsedTick {
 		Ask1Price:     ask1Price,
 		RawBuyerRatio: rawRatio,
 		ExchangeTime:  exchTime,
-		IsIndex:       false,
 		BidLevels:     bidLevels,
 		AskLevels:     askLevels,
 	}

@@ -24,8 +24,7 @@ type CandidateSignal struct {
 func PickBestLongCandidate(
 	stocks *[512]market.StockMetrics,
 	bullishSorted []uint16,
-	leaderMap map[uint8]bool,
-	regime string,
+	sectorHealthMap map[uint8]market.SectorHealth,
 	sessionClock market.GlobalSessionClockDTO,
 	netEquity, freeMargin, riskPct, drawdownMult float64,
 	isSymbolUnavailable func(symbol string, token uint32) bool,
@@ -33,23 +32,7 @@ func PickBestLongCandidate(
 	regimeOK := true
 	var regimeLockStatus, regimeLockReason string
 
-	// Stage 0: Macro Regime Gate
-	switch regime {
-	case "FLASH_SHOCK":
-		regimeOK = false
-		regimeLockStatus = "LOCKED_MACRO_SHOCK"
-		regimeLockReason = "Nifty 50 Flash Shock active: New entries frozen & pending buys cancelled"
-	case "BEARISH_EXPANSION":
-		regimeOK = false
-		regimeLockStatus = "LOCKED_BEAR_REGIME"
-		regimeLockReason = "Stage 0 Lockout: Market in Bearish Expansion (Breadth ≤ 42%)"
-	case "INTRADAY_DISTRIBUTION":
-		regimeOK = false
-		regimeLockStatus = "LOCKED_DISTRIBUTION"
-		regimeLockReason = "Stage 0 Lockout: Intraday Distribution / Gap-Up Rollover detected"
-	}
-
-	if regimeOK && !sessionClock.AllowNewEntries {
+	if !sessionClock.AllowNewEntries {
 		regimeOK = false
 		regimeLockStatus = "LOCKED_SESSION_WINDOW"
 		regimeLockReason = sessionClock.PlaybookNote
@@ -60,14 +43,6 @@ func PickBestLongCandidate(
 	sizeMult := sessionClock.SizeMultiplier
 	allowPatternB := true
 
-	if regime == "SIDEWAYS_CHOP" {
-		minScore = math.Max(minScore, 82.0)
-		sizeMult = math.Min(sizeMult, 0.75)
-		allowPatternB = false // Only allow Pattern A (VWAP Pullback) in Leading Sectors during chop
-	} else if regime == "V_RECOVERY_BULLISH" {
-		minScore = math.Max(minScore, 78.0)
-		sizeMult = math.Min(sizeMult, 0.85)
-	}
 	if sessionClock.Phase == "MIDDAY_COMPRESSION" && !sessionClock.TapeOverrideActive {
 		allowPatternB = false
 	}
@@ -107,11 +82,11 @@ func PickBestLongCandidate(
 			continue
 		}
 
-		// Sector Leadership Check for Chop or V-Recovery
-		isLeader := leaderMap[s.SectorID]
-		if (regime == "SIDEWAYS_CHOP" || regime == "V_RECOVERY_BULLISH") && !isLeader {
+		// Sector-Level Circuit Breaker: If this specific sector is restricted, block this stock ONLY!
+		if secHealth, ok := sectorHealthMap[s.SectorID]; ok && secHealth.IsRestricted {
 			diag.RegimeOK = false
-			diag.BlockingReason = fmt.Sprintf("Sector (%s) not in Top-2 Leaders during %s", diag.Sector, regime)
+			diag.OverallStatus = "BLOCKED"
+			diag.BlockingReason = fmt.Sprintf("Sector (%s) is RESTRICTED: %s", diag.Sector, secHealth.RestrictionReason)
 			diagnostics = append(diagnostics, diag)
 			continue
 		}
@@ -241,6 +216,6 @@ func PickBestLongCandidate(
 		return winningSignal, "SIGNAL_MATCHED", fmt.Sprintf("Matched %s on %s (Qty %d)", winningSignal.PatternType, winningSignal.Symbol, winningSignal.Sizing.Quantity), diagnostics
 	}
 
-	return nil, "ARMED_SCANNING", fmt.Sprintf("Scanning Top 5 Leaders (%s • Min Score %.0f)", regime, minScore), diagnostics
+	return nil, "ARMED_SCANNING", fmt.Sprintf("Scanning Top 5 Leaders (%s • Min Score %.0f)", sessionClock.Phase, minScore), diagnostics
 }
 

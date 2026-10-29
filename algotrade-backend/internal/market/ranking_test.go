@@ -26,14 +26,14 @@ func TestCalculateBearishScoreCompositeRVOLAndReasonsBitmask(t *testing.T) {
 		Close: 778.00,
 	}
 
-	score, ev, pWin, reasons := CalculateBearishScore(&stock, nil, nil, true, 0.38)
+	score, ev, pWin, reasons := CalculateBearishScore(&stock, 0.38)
 	if score <= 0 || pWin <= 0.44 {
 		t.Fatalf("expected positive bearish score and elevated pWin from 5m RVOL surge, got score=%.2f pWin=%.2f ev=%.2f", score, pWin, ev)
 	}
-	if reasons&ReasonBearishBreakdown == 0 || reasons&ReasonSectorLagging == 0 {
-		t.Fatalf("expected ReasonBearishBreakdown and ReasonSectorLagging in returned reasons, got %d", reasons)
+	if reasons&ReasonBearishBreakdown == 0 {
+		t.Fatalf("expected ReasonBearishBreakdown in returned reasons, got %d", reasons)
 	}
-	if stock.Reasons&ReasonBearishBreakdown == 0 || stock.Reasons&ReasonSectorLagging == 0 {
+	if stock.Reasons&ReasonBearishBreakdown == 0 {
 		t.Fatalf("expected bearish reasons bitmask to be merged into stock.Reasons, got %d", stock.Reasons)
 	}
 }

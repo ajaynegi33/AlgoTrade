@@ -14,9 +14,7 @@ import (
 )
 
 const (
-	maxTrackedStocks   = 512
-	nifty50Token       = 256265
-	bankNiftyToken     = 260105
+	maxTrackedStocks = 512
 )
 
 // BarFlushItem holds a finalized 5m candle for background SQLite persistence
@@ -36,9 +34,8 @@ type ExecutionHook interface {
 		stocks *[maxTrackedStocks]StockMetrics,
 		activeIndices []uint16,
 		bullishSorted []uint16,
-		leaderMap map[uint8]bool,
+		sectorHealthMap map[uint8]SectorHealth,
 		pulse MarketPulseDTO,
-		inMacroShock bool,
 	) *ExecutionStateDTO
 }
 
@@ -78,17 +75,8 @@ type Actor struct {
 	workers        [maxTrackedStocks]PositionTickListener
 	tokenMap       map[uint32]uint16
 	symbolMap      map[string]uint16
-	activeIndices  []uint16
-	sectorIndices  map[uint8]uint16
-	niftyIdx       uint16
-	bankNiftyIdx   uint16
-	hasNifty       bool
-	hasBankNifty   bool
-
-	breadthHist    [6]float64 // Rolling 5-second breadth ring for shock velocity
-	breadthHistIdx uint8
-	macroShockExp  int64 // Unix epoch when FLASH_SHOCK cooldown expires
-	inMacroShock   atomic.Bool
+	activeIndices   []uint16
+	sectorHealthMap map[uint8]SectorHealth
 
 	execHook          ExecutionHook
 	detailReqChan     chan detailReq
@@ -118,7 +106,7 @@ func NewActor( db *sql.DB, tickerClient *kite.TickerClient, histClient *kite.His
 		tokenMap:          make(map[uint32]uint16, maxTrackedStocks),
 		symbolMap:         make(map[string]uint16, maxTrackedStocks),
 		activeIndices:     make([]uint16, 0, maxTrackedStocks),
-		sectorIndices:     make(map[uint8]uint16, 16),
+		sectorHealthMap:   make(map[uint8]SectorHealth, 16),
 		detailReqChan:     make(chan detailReq, 64),
 		workerReqChan:     make(chan registerWorkerReq, 64),
 		barFlushChan:      make(chan BarFlushItem, 4096),
@@ -255,25 +243,7 @@ func (a *Actor) initTodayEpoch() {
 }
 
 func (a *Actor) seedUniverse() error {
-	// 1. Add Index Tokens: Nifty 50 and Bank Nifty
-	a.addStock(nifty50Token, "NIFTY 50", screener.SectorNifty50, 0.05)
-	a.niftyIdx = a.tokenMap[nifty50Token]
-	a.hasNifty = true
-
-	a.addStock(bankNiftyToken, "NIFTY BANK", screener.SectorBank, 0.05)
-	a.bankNiftyIdx = a.tokenMap[bankNiftyToken]
-	a.hasBankNifty = true
-	a.sectorIndices[screener.SectorBank] = a.bankNiftyIdx
-
-	// 2. Add Sector Tokens
-	for _, info := range screener.SectorRegistry {
-		if info.Token != nifty50Token && info.Token != bankNiftyToken {
-			a.addStock(info.Token, info.Name, info.ID, 0.05)
-			a.sectorIndices[info.ID] = a.tokenMap[info.Token]
-		}
-	}
-
-	// 3. Load Scanned F&O Cash Universe from scanner
+	// Load Scanned F&O Cash Universe from scanner
 	if a.scannerService != nil {
 		todayStr := TodayDateIST()
 		universe, err := a.scannerService.GetUniverse(todayStr)
@@ -339,10 +309,7 @@ func (a *Actor) addStock(token uint32, symbol string, sectorID uint8, tickSize f
 	// Initialize bar 0
 	s.SessionBars[0] = OHLCVBar{Timestamp: a.today0915Epoch}
 
-	// Only add tradeable equities to activeIndices for ranking (skip pure index tokens)
-	if token != nifty50Token && token != bankNiftyToken && !strings.HasPrefix(symbol, "NIFTY ") {
-		a.activeIndices = append(a.activeIndices, nextIdx)
-	}
+	a.activeIndices = append(a.activeIndices, nextIdx)
 
 	return nextIdx
 }

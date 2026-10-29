@@ -23,12 +23,24 @@ type MarketPulseDTO struct {
 
 // SectorRankDTO represents a sector's real-time performance on Dalal Street
 type SectorRankDTO struct {
-	SectorID         uint8   `json:"sector_id"`
-	SectorName       string  `json:"sector_name"`
-	ChangePercent    float64 `json:"change_percent"`
-	BreadthAboveVWAP float64 `json:"breadth_above_vwap"`
-	IsLeader         bool    `json:"is_leader"`
-	IsLagging        bool    `json:"is_lagging"`
+	SectorID          uint8   `json:"sector_id"`
+	SectorName        string  `json:"sector_name"`
+	ChangePercent     float64 `json:"change_percent"`
+	BreadthAboveVWAP  float64 `json:"breadth_above_vwap"`
+	IsLeader          bool    `json:"is_leader"`
+	IsLagging         bool    `json:"is_lagging"`
+	IsRestricted      bool    `json:"is_restricted"`
+	RestrictionReason string  `json:"restriction_reason,omitempty"`
+}
+
+// SectorHealth represents the live operational status and trading restrictions of a sector
+type SectorHealth struct {
+	SectorID          uint8   `json:"sector_id"`
+	SectorName        string  `json:"sector_name"`
+	AverageChange     float64 `json:"average_change"`
+	BreadthAboveVWAP  float64 `json:"breadth_above_vwap"`
+	IsRestricted      bool    `json:"is_restricted"`
+	RestrictionReason string  `json:"restriction_reason,omitempty"`
 }
 
 // StockRankDTO represents a fully calculated stock record for 1.0s UI consumption

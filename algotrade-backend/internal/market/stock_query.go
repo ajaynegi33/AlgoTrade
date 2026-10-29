@@ -72,16 +72,6 @@ func (a *Actor) getStockDetailInternal(symbol string) (*StockDetailDTO, bool) {
 	upperSym := strings.ToUpper(strings.TrimSpace(symbol))
 
 	targetIdx, found := a.symbolMap[upperSym]
-	if !found {
-		// Also check index tokens (Nifty 50 / Bank Nifty)
-		if a.hasNifty && a.stocks[a.niftyIdx].SymbolString() == upperSym {
-			targetIdx = a.niftyIdx
-			found = true
-		} else if a.hasBankNifty && a.stocks[a.bankNiftyIdx].SymbolString() == upperSym {
-			targetIdx = a.bankNiftyIdx
-			found = true
-		}
-	}
 
 	// Dynamic fallback: check SQLite scanned_stocks table in case stock was added dynamically
 	if !found && a.db != nil {

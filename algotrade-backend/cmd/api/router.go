@@ -11,7 +11,6 @@ import (
 	"github.com/ajaynegi33/AlgoTrade/internal/market"
 	"github.com/ajaynegi33/AlgoTrade/internal/response"
 	"github.com/ajaynegi33/AlgoTrade/internal/screener"
-	"github.com/ajaynegi33/AlgoTrade/internal/structure"
 	"github.com/ajaynegi33/AlgoTrade/internal/trading"
 	"github.com/ajaynegi33/AlgoTrade/internal/user"
 	"github.com/ajaynegi33/AlgoTrade/internal/ws"
@@ -37,7 +36,6 @@ func buildRouter(
 	screenerHandler := screener.NewHandler(screenerService)
 	marketHandler := market.NewHandler(marketHub, wsHub)
 	tradeHandler := trading.NewHandler(tradeManager)
-	structureHandler := structure.NewHandler(marketHub)
 
 	// Auth Middleware
 	requireAuth := auth.AuthMiddleware(cfg.JWTSecret)
@@ -91,9 +89,13 @@ func buildRouter(
 	mux.Handle("POST /api/execution/flatten", requireAuth(http.HandlerFunc(tradeHandler.Flatten)))
 	mux.HandleFunc("POST /api/kite/postback", tradeHandler.HandleKitePostback)
 
-	// Market Structure & Order Block Routes (with legacy prediction aliases)
-	mux.HandleFunc("GET /api/structure/orderblock-tree", structureHandler.GetOrderBlockTree)
-	mux.HandleFunc("GET /api/prediction/orderblock-tree", structureHandler.GetOrderBlockTree)
+	// Market Structure & Order Block Routes (legacy compatibility - returns empty list)
+	mux.HandleFunc("GET /api/structure/orderblock-tree", func(w http.ResponseWriter, r *http.Request) {
+		response.Success(w, http.StatusOK, []any{})
+	})
+	mux.HandleFunc("GET /api/prediction/orderblock-tree", func(w http.ResponseWriter, r *http.Request) {
+		response.Success(w, http.StatusOK, []any{})
+	})
 
 	// Wrap Global Middlewares: Recovery -> CORS -> Router
 	var rootHandler http.Handler = mux

@@ -1,6 +1,7 @@
 package market
 
 import (
+	"fmt"
 	"math"
 	"slices"
 	"time"
@@ -29,90 +30,23 @@ func (a *Actor) computeAndBroadcastSnapshot() {
 		breadthRatio = float64(aboveVWAPCount) / float64(activeQuotedCount)
 	}
 
-	prevBreadth5s := a.breadthHist[a.breadthHistIdx]
-	if prevBreadth5s == 0 {
-		prevBreadth5s = breadthRatio
-	}
-	a.breadthHist[a.breadthHistIdx] = breadthRatio
-	a.breadthHistIdx = (a.breadthHistIdx + 1) % 6
-	breadthDrop5s := breadthRatio - prevBreadth5s
-
-	// 2. Market Pulse & Multi-Horizon Dynamic Regime Context
-	var niftyLTP, niftyChg, bankLTP, bankChg float64
-	var niftyIntradayRet, niftyDayCLV, niftyVel15m, niftyShockDrop float64
-	niftyDayCLV = 0.50
-	var niftyStock *StockMetrics
-	if a.hasNifty {
-		niftyStock = &a.stocks[a.niftyIdx]
-		niftyLTP = niftyStock.LTP
-		if niftyStock.PrevClose > 0 && niftyLTP > 0 {
-			niftyChg = ((niftyLTP - niftyStock.PrevClose) / niftyStock.PrevClose) * 100.0
-		}
-		if niftyStock.Open > 0 && niftyLTP > 0 {
-			niftyIntradayRet = ((niftyLTP - niftyStock.Open) / niftyStock.Open) * 100.0
-		}
-		if niftyStock.High > niftyStock.Low && niftyLTP > 0 {
-			niftyDayCLV = (niftyLTP - niftyStock.Low) / (niftyStock.High - niftyStock.Low)
-		}
-		lookback3 := 0
-		if niftyStock.CurrentBarIdx >= 3 {
-			lookback3 = int(niftyStock.CurrentBarIdx) - 3
-		}
-		ref15m := niftyStock.SessionBars[lookback3].Close
-		if ref15m <= 0 {
-			ref15m = niftyStock.Open
-		}
-		if ref15m > 0 && niftyLTP > 0 {
-			niftyVel15m = ((niftyLTP - ref15m) / ref15m) * 100.0
-		}
-		if niftyStock.RollingPeak > 0 && niftyLTP > 0 {
-			niftyShockDrop = ((niftyLTP - niftyStock.RollingPeak) / niftyStock.RollingPeak) * 100.0
-		}
-	}
-	if a.hasBankNifty {
-		b := &a.stocks[a.bankNiftyIdx]
-		bankLTP = b.LTP
-		if b.PrevClose > 0 && bankLTP > 0 {
-			bankChg = ((bankLTP - b.PrevClose) / b.PrevClose) * 100.0
-		}
-	}
-
-	// Update FLASH_SHOCK state
-	if niftyShockDrop <= -0.18 || (breadthDrop5s <= -0.12 && niftyVel15m <= -0.20) {
-		a.macroShockExp = nowUnix + 180
-		a.inMacroShock.Store(true)
-	} else if a.inMacroShock.Load() {
-		if nowUnix >= a.macroShockExp || (niftyVel15m >= 0.05 && breadthRatio >= 0.52) {
-			a.inMacroShock.Store(false)
-		}
-	}
-
-	// 6-State Dynamic Intraday Regime Classification
+	// 2. Market Regime Context (Derived purely from universe breadth)
 	regime := "SIDEWAYS_CHOP"
 	switch {
-	case a.inMacroShock.Load():
-		regime = "FLASH_SHOCK"
-	case niftyDayCLV < 0.35 && niftyVel15m <= -0.18 && breadthRatio < 0.48:
-		// Gap-up rollover / afternoon institutional distribution
-		regime = "INTRADAY_DISTRIBUTION"
-	case breadthRatio <= 0.42 && (niftyIntradayRet < -0.20 || niftyChg < -0.35) && niftyDayCLV < 0.40:
-		regime = "BEARISH_EXPANSION"
-	case niftyChg < 0 && niftyIntradayRet >= 0.25 && niftyDayCLV >= 0.65 && breadthRatio >= 0.58 && niftyVel15m >= 0.10:
-		// Gap-down followed by strong intraday DII/FII V-recovery
-		regime = "V_RECOVERY_BULLISH"
-	case breadthRatio >= 0.58 && (niftyIntradayRet >= 0.15 || niftyChg >= 0.25) && niftyDayCLV >= 0.55:
+	case breadthRatio >= 0.58:
 		regime = "BULLISH_EXPANSION"
+	case breadthRatio <= 0.40:
+		regime = "BEARISH_EXPANSION"
 	}
 
-	// 3. Compute Sector Performance & Identify Leaders
+	// 3. Compute Sector Performance & Sector Restrictions (Granular bottom-up from tradeable stocks)
 	type secPerf struct {
 		id       uint8
-		chg      float64
-		breadth  float64
+		sumChg   float64
 		totCount int
 		abvCount int
 	}
-	secStats := make(map[uint8]*secPerf)
+	secStats := make(map[uint8]*secPerf, 16)
 	for id := range screener.SectorRegistry {
 		secStats[id] = &secPerf{id: id}
 	}
@@ -124,40 +58,61 @@ func (a *Actor) computeAndBroadcastSnapshot() {
 			if s.LTP > s.ExchangeVWAP && s.ExchangeVWAP > 0 {
 				p.abvCount++
 			}
+			if s.PrevClose > 0 && s.LTP > 0 {
+				p.sumChg += ((s.LTP - s.PrevClose) / s.PrevClose) * 100.0
+			}
 		}
 	}
 
 	// Build deterministic list of sectors (SectorAuto=2 through SectorInfra=12)
 	sectorDTOs := make([]SectorRankDTO, 0, 11)
+	newSectorHealthMap := make(map[uint8]SectorHealth, 16)
+
 	for id := uint8(2); id <= 12; id++ {
 		p := secStats[id]
 		if p == nil {
 			continue
 		}
+		var breadth, avgChg float64
 		if p.totCount > 0 {
-			p.breadth = (float64(p.abvCount) / float64(p.totCount)) * 100.0
+			breadth = (float64(p.abvCount) / float64(p.totCount)) * 100.0
+			avgChg = p.sumChg / float64(p.totCount)
 		}
-		var secChg float64
-		if sIdx, ok := a.sectorIndices[id]; ok {
-			st := &a.stocks[sIdx]
-			if st.PrevClose > 0 && st.LTP > 0 {
-				secChg = ((st.LTP - st.PrevClose) / st.PrevClose) * 100.0
-			}
-		} else if id == screener.SectorBank && a.hasBankNifty {
-			b := &a.stocks[a.bankNiftyIdx]
-			if b.PrevClose > 0 && b.LTP > 0 {
-				secChg = ((b.LTP - b.PrevClose) / b.PrevClose) * 100.0
+		secName := screener.GetSectorName(id)
+
+		// Granular Sector Circuit Breaker:
+		// If more than 60% of stocks in sector are below VWAP (breadth < 40%) OR average change < -0.5%
+		isRestricted := false
+		var restrictionReason string
+		if p.totCount >= 2 {
+			if breadth < 40.0 {
+				isRestricted = true
+				restrictionReason = fmt.Sprintf("Weak Breadth (%.0f%% > VWAP)", breadth)
+			} else if avgChg < -0.50 {
+				isRestricted = true
+				restrictionReason = fmt.Sprintf("Heavy Selling Pressure (Avg %.2f%%)", avgChg)
 			}
 		}
-		p.chg = secChg
 
 		sectorDTOs = append(sectorDTOs, SectorRankDTO{
-			SectorID:         id,
-			SectorName:       screener.GetSectorName(id),
-			ChangePercent:    secChg,
-			BreadthAboveVWAP: p.breadth,
+			SectorID:          id,
+			SectorName:        secName,
+			ChangePercent:     avgChg,
+			BreadthAboveVWAP:  breadth,
+			IsRestricted:      isRestricted,
+			RestrictionReason: restrictionReason,
 		})
+
+		newSectorHealthMap[id] = SectorHealth{
+			SectorID:          id,
+			SectorName:        secName,
+			AverageChange:     avgChg,
+			BreadthAboveVWAP:  breadth,
+			IsRestricted:      isRestricted,
+			RestrictionReason: restrictionReason,
+		}
 	}
+	a.sectorHealthMap = newSectorHealthMap
 
 	// Deterministic Sort: Primary by ChangePercent DESC, Secondary tie-breaker by SectorID ASC
 	slices.SortFunc(sectorDTOs, func(a, b SectorRankDTO) int {
@@ -166,7 +121,6 @@ func (a *Actor) computeAndBroadcastSnapshot() {
 		} else if a.ChangePercent < b.ChangePercent {
 			return 1
 		}
-		// Deterministic tie-breaker prevents UI pills from shuffling when change is 0.00%
 		if a.SectorID < b.SectorID {
 			return -1
 		} else if a.SectorID > b.SectorID {
@@ -175,45 +129,20 @@ func (a *Actor) computeAndBroadcastSnapshot() {
 		return 0
 	})
 
-	leaderMap := make(map[uint8]bool, 2)
-	laggingMap := make(map[uint8]bool, 2)
-
-	// Only assign leaders/laggards if there is real price movement
-	hasMovement := false
-	for _, s := range sectorDTOs {
-		if s.ChangePercent != 0.0 {
-			hasMovement = true
-			break
+	for i := range sectorDTOs {
+		if i < 2 && sectorDTOs[i].ChangePercent > 0 {
+			sectorDTOs[i].IsLeader = true
 		}
-	}
-
-	if hasMovement {
-		for i := range sectorDTOs {
-			if i < 2 && sectorDTOs[i].ChangePercent > 0 {
-				sectorDTOs[i].IsLeader = true
-				leaderMap[sectorDTOs[i].SectorID] = true
-			}
-			if i >= len(sectorDTOs)-2 && len(sectorDTOs) >= 4 && sectorDTOs[i].ChangePercent < 0 {
-				sectorDTOs[i].IsLagging = true
-				laggingMap[sectorDTOs[i].SectorID] = true
-			}
+		if i >= len(sectorDTOs)-2 && len(sectorDTOs) >= 4 && sectorDTOs[i].ChangePercent < 0 {
+			sectorDTOs[i].IsLagging = true
 		}
 	}
 
 	// 4. Quant Score Calculation for all active equities
 	for _, idx := range a.activeIndices {
 		s := &a.stocks[idx]
-		var secStock *StockMetrics
-		if sIdx, ok := a.sectorIndices[s.SectorID]; ok {
-			secStock = &a.stocks[sIdx]
-		} else if s.SectorID == screener.SectorBank && a.hasBankNifty {
-			secStock = &a.stocks[a.bankNiftyIdx]
-		}
-		isLeader := leaderMap[s.SectorID]
-		isLagging := laggingMap[s.SectorID]
-
-		CalculateBullishScore(s, niftyStock, secStock, isLeader, breadthRatio)
-		CalculateBearishScore(s, niftyStock, secStock, isLagging, breadthRatio)
+		CalculateBullishScore(s, breadthRatio)
+		CalculateBearishScore(s, breadthRatio)
 	}
 
 	// 5. Quicksort Active Indices by BullishScore (~2 microseconds)
@@ -231,19 +160,15 @@ func (a *Actor) computeAndBroadcastSnapshot() {
 	})
 
 	pulseDTO := MarketPulseDTO{
-		MarketState:            "OPEN",
-		NiftyLTP:               niftyLTP,
-		NiftyChangePercent:     niftyChg,
-		BankNiftyLTP:           bankLTP,
-		BankNiftyChangePercent: bankChg,
-		BreadthAboveVWAP:       math.Round(breadthRatio*1000.0) / 10.0,
-		MarketRegime:           regime,
+		MarketState:      "OPEN",
+		BreadthAboveVWAP: math.Round(breadthRatio*1000.0) / 10.0,
+		MarketRegime:     regime,
 	}
 
-	// Invoke Phase 2 Autonomous Execution Engine every 1.0s (even when 0 browser tabs are open!)
+	// Invoke Phase 2 Autonomous Execution Engine every 1.0s
 	var execState *ExecutionStateDTO
 	if a.execHook != nil {
-		execState = a.execHook.OnSecondTick(&a.stocks, a.activeIndices, bullishSorted, leaderMap, pulseDTO, a.inMacroShock.Load())
+		execState = a.execHook.OnSecondTick(&a.stocks, a.activeIndices, bullishSorted, a.sectorHealthMap, pulseDTO)
 	}
 
 	if a.wsHub == nil || a.wsHub.ClientCount() == 0 {

@@ -60,6 +60,14 @@ export function SectorHeatmapBar({ sectors, selectedSectorId, onSelectSector }: 
                   #{idx + 1}
                 </span>
                 <span className="font-bold">{sec.sector_name.replace("NIFTY ", "")}</span>
+                {sec.is_restricted && (
+                  <span
+                    className="text-[9px] uppercase px-1.5 py-0.5 rounded bg-rose-100 text-rose-800 border border-rose-200 font-bold"
+                    title={sec.restriction_reason || "Trading restricted in this sector"}
+                  >
+                    RESTRICTED
+                  </span>
+                )}
               </div>
 
               <div className="flex items-center gap-1.5">

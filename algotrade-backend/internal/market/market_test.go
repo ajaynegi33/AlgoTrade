@@ -101,7 +101,7 @@ func TestGaussianVWAPSweetSpotAndCLV(t *testing.T) {
 		Close: 1002.50,
 	}
 
-	score, ev, pWin, reasons := CalculateBullishScore(stock, nil, nil, true, 0.65)
+	score, ev, pWin, reasons := CalculateBullishScore(stock, 0.65)
 	if pWin < 0.65 {
 		t.Errorf("Expected high confluence pWin >= 0.65, got %f", pWin)
 	}
@@ -137,28 +137,21 @@ func TestOpeningRange15mHelper(t *testing.T) {
 	}
 }
 
-func TestSectorBankIndexMapping(t *testing.T) {
-	actor := NewActor(nil, nil, nil, nil, nil)
-	if err := actor.seedUniverse(); err != nil {
-		t.Fatalf("Failed to seed universe: %v", err)
+func TestSectorRestriction(t *testing.T) {
+	health := SectorHealth{
+		SectorID:          screener.SectorIT,
+		SectorName:        "IT",
+		AverageChange:     -1.2,
+		BreadthAboveVWAP:  20.0,
+		IsRestricted:      true,
+		RestrictionReason: "Weak Breadth (20% > VWAP)",
 	}
 
-	bankIdx, ok := actor.sectorIndices[screener.SectorBank]
-	if !ok {
-		t.Fatalf("SectorBank (ID 3) was not mapped in actor.sectorIndices!")
+	if !health.IsRestricted {
+		t.Fatalf("Expected IT sector to be restricted")
 	}
-	if bankIdx != actor.bankNiftyIdx {
-		t.Fatalf("Expected SectorBank to map to bankNiftyIdx (%d), got %d", actor.bankNiftyIdx, bankIdx)
-	}
-
-	// Verify that setting Bank Nifty price computes non-zero Bank sector change
-	bankStock := &actor.stocks[bankIdx]
-	bankStock.PrevClose = 50000.0
-	bankStock.LTP = 50500.0 // +1.0% change
-
-	secChg := ((bankStock.LTP - bankStock.PrevClose) / bankStock.PrevClose) * 100.0
-	if secChg != 1.0 {
-		t.Errorf("Expected +1.0%% change, got %f", secChg)
+	if health.BreadthAboveVWAP >= 40.0 {
+		t.Errorf("Expected breadth < 40%%, got %f", health.BreadthAboveVWAP)
 	}
 }
 

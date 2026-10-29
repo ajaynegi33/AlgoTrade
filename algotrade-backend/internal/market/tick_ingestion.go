@@ -53,13 +53,7 @@ func (a *Actor) processTick(tick *ParsedTick) {
 		if tick.PrevClose > 0 {
 			stock.PrevClose = tick.PrevClose
 		}
-		if tick.IsIndex {
-			if tick.Open > 0 {
-				stock.ExchangeVWAP = tick.Open
-			} else {
-				stock.ExchangeVWAP = tick.LTP
-			}
-		} else {
+		if tick.VWAP > 0 {
 			stock.ExchangeVWAP = tick.VWAP
 		}
 		stock.LastUpdatedUnix = tick.ExchangeTime
@@ -84,7 +78,7 @@ func (a *Actor) processTick(tick *ParsedTick) {
 			stock.BaselineCumVolume = a.slotBaselines[idx][barIdx].MedianCumVol
 		}
 		if w := a.workers[idx]; w != nil {
-			w.OnTickHotPath(stock, a.inMacroShock.Load())
+			w.OnTickHotPath(stock, false)
 		}
 		return
 	}
@@ -166,18 +160,7 @@ func (a *Actor) processTick(tick *ParsedTick) {
 
 	// Update stock scalar quotes
 	stock.LTP = tick.LTP
-	if tick.IsIndex {
-		// Indices do not transmit exchange VWAP; maintain synthetic intraday anchor so Nifty > VWAP works
-		if stock.ExchangeVWAP <= 0 {
-			if tick.Open > 0 {
-				stock.ExchangeVWAP = tick.Open
-			} else {
-				stock.ExchangeVWAP = tick.LTP
-			}
-		} else {
-			stock.ExchangeVWAP = 0.995*stock.ExchangeVWAP + 0.005*tick.LTP
-		}
-	} else if tick.VWAP > 0 {
+	if tick.VWAP > 0 {
 		stock.ExchangeVWAP = tick.VWAP
 	}
 	if tick.Open > 0 {
@@ -195,67 +178,58 @@ func (a *Actor) processTick(tick *ParsedTick) {
 	stock.Volume = tick.Volume
 	stock.LastUpdatedUnix = tick.ExchangeTime
 
-	if !tick.IsIndex {
-		stock.Bid1Price = tick.Bid1Price
-		stock.Ask1Price = tick.Ask1Price
-		stock.BidLevels = tick.BidLevels
-		stock.AskLevels = tick.AskLevels
+	stock.Bid1Price = tick.Bid1Price
+	stock.Ask1Price = tick.Ask1Price
+	stock.BidLevels = tick.BidLevels
+	stock.AskLevels = tick.AskLevels
 
-		// Dual-alpha EMA Smoothing & Lee-Ready Aggressor Flow using prevAsk1/prevBid1/prevLTP
-		var alpha float32 = 0.03
-		if tickDeltaVol > 0 {
-			alpha = 0.20
-			var isBuyTick bool
-			if tick.LTP >= float64(prevAsk1) && prevAsk1 > 0 {
-				isBuyTick = true
-			} else if tick.LTP <= float64(prevBid1) && prevBid1 > 0 {
-				isBuyTick = false
-			} else {
-				midpoint := float64(prevBid1+prevAsk1) / 2.0
-				if prevBid1 > 0 && prevAsk1 > 0 && tick.LTP != midpoint {
-					isBuyTick = tick.LTP > midpoint
-				} else {
-					isBuyTick = tick.LTP >= prevLTP
-				}
-			}
-
-			if isBuyTick {
-				stock.BarBuyVolume += tickDeltaVol
-				stock.FastAggressorEMA = 0.25*1.0 + 0.75*stock.FastAggressorEMA
-			} else {
-				stock.BarSellVolume += tickDeltaVol
-				stock.FastAggressorEMA = 0.25*0.0 + 0.75*stock.FastAggressorEMA
-			}
-		}
-
-		stock.SmoothedBuyerRatio = alpha*tick.RawBuyerRatio + (1.0-alpha)*stock.SmoothedBuyerRatio
-
-		if totalBarVol := stock.BarBuyVolume + stock.BarSellVolume; totalBarVol >= 500 {
-			stock.AggressorBuyRatio = float32(stock.BarBuyVolume) / float32(totalBarVol)
+	// Dual-alpha EMA Smoothing & Lee-Ready Aggressor Flow using prevAsk1/prevBid1/prevLTP
+	var alpha float32 = 0.03
+	if tickDeltaVol > 0 {
+		alpha = 0.20
+		var isBuyTick bool
+		if tick.LTP >= float64(prevAsk1) && prevAsk1 > 0 {
+			isBuyTick = true
+		} else if tick.LTP <= float64(prevBid1) && prevBid1 > 0 {
+			isBuyTick = false
 		} else {
-			stock.AggressorBuyRatio = 0.50
+			midpoint := float64(prevBid1+prevAsk1) / 2.0
+			if prevBid1 > 0 && prevAsk1 > 0 && tick.LTP != midpoint {
+				isBuyTick = tick.LTP > midpoint
+			} else {
+				isBuyTick = tick.LTP >= prevLTP
+			}
 		}
 
-		// Pullback Hysteresis Latch
-		atrSafe := math.Max(stock.ATR14, stock.LTP*0.0025)
-		if stock.LTP > stock.ExchangeVWAP+1.0*atrSafe {
-			stock.WasExtended = true
-		} else if stock.WasExtended && stock.LTP <= stock.ExchangeVWAP+0.50*atrSafe {
-			stock.PullbackCount++
-			stock.WasExtended = false
+		if isBuyTick {
+			stock.BarBuyVolume += tickDeltaVol
+			stock.FastAggressorEMA = 0.25*1.0 + 0.75*stock.FastAggressorEMA
+		} else {
+			stock.BarSellVolume += tickDeltaVol
+			stock.FastAggressorEMA = 0.25*0.0 + 0.75*stock.FastAggressorEMA
 		}
-	} else if a.hasNifty && idx == a.niftyIdx && stock.RollingPeak > 0 {
-		// Instantaneous Nifty 50 Flash Shock detector (-0.18% drop from 20s RollingPeak)
-		dropPct := ((stock.LTP - stock.RollingPeak) / stock.RollingPeak) * 100.0
-		if dropPct <= -0.18 {
-			a.macroShockExp = tick.ExchangeTime + 180
-			a.inMacroShock.Store(true)
-		}
+	}
+
+	stock.SmoothedBuyerRatio = alpha*tick.RawBuyerRatio + (1.0-alpha)*stock.SmoothedBuyerRatio
+
+	if totalBarVol := stock.BarBuyVolume + stock.BarSellVolume; totalBarVol >= 500 {
+		stock.AggressorBuyRatio = float32(stock.BarBuyVolume) / float32(totalBarVol)
+	} else {
+		stock.AggressorBuyRatio = 0.50
+	}
+
+	// Pullback Hysteresis Latch
+	atrSafe := math.Max(stock.ATR14, stock.LTP*0.0025)
+	if stock.LTP > stock.ExchangeVWAP+1.0*atrSafe {
+		stock.WasExtended = true
+	} else if stock.WasExtended && stock.LTP <= stock.ExchangeVWAP+0.50*atrSafe {
+		stock.PullbackCount++
+		stock.WasExtended = false
 	}
 
 	// O(1) lock-free hot-path dispatch to active PositionWorker if bound
 	if w := a.workers[idx]; w != nil {
-		w.OnTickHotPath(stock, a.inMacroShock.Load())
+		w.OnTickHotPath(stock, false)
 	}
 }
 

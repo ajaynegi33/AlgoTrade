@@ -288,12 +288,12 @@ func TestPhase26FalsificationSuite_BugsB1ToB5(t *testing.T) {
 	bel.SmoothedBuyerRatio = 0.42
 	bel.AggressorBuyRatio = 0.44
 	bel.FastAggressorEMA = 0.43
-	scoreWeakFlow, _, _, _ := market.CalculateBullishScore(&bel, nil, nil, true, 0.65)
+	scoreWeakFlow, _, _, _ := market.CalculateBullishScore(&bel, 0.65)
 
 	bel.SmoothedBuyerRatio = 0.78
 	bel.AggressorBuyRatio = 0.82
 	bel.FastAggressorEMA = 0.84
-	scoreStrongFlow, _, _, _ := market.CalculateBullishScore(&bel, nil, nil, true, 0.65)
+	scoreStrongFlow, _, _, _ := market.CalculateBullishScore(&bel, 0.65)
 
 	if scoreStrongFlow-scoreWeakFlow < 12.0 {
 		t.Fatalf("Bug B4 Falsified: expected strong institutional flow to boost BullishScore by >= 12 pts, got weak=%.2f strong=%.2f",
@@ -534,7 +534,7 @@ func TestActivePositionsStableEntryOrder(t *testing.T) {
 		wB.latestLTPBits.Store(math.Float64bits(3500.0 - float64(i)*1.0))
 		wC.latestLTPBits.Store(math.Float64bits(2500.0 + float64(i)*2.0))
 
-		state := mgr.OnSecondTick(&stocks, nil, nil, nil, pulse, false)
+		state := mgr.OnSecondTick(&stocks, nil, nil, nil, pulse)
 		if len(state.ActivePositions) != 3 {
 			t.Fatalf("iteration %d: expected 3 active positions, got %d", i, len(state.ActivePositions))
 		}

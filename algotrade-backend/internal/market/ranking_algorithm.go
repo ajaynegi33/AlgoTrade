@@ -8,7 +8,7 @@ import (
 var istZone = ISTLocation
 
 // CalculateBullishScore performs institutional quantification of a long trade setup
-func CalculateBullishScore( stock *StockMetrics, nifty *StockMetrics, sector *StockMetrics, isLeaderSector bool, breadthRatio float64 ) (score float64, ev float64, pWin float64, reasons ReasonFlag) {
+func CalculateBullishScore(stock *StockMetrics, breadthRatio float64) (score float64, ev float64, pWin float64, reasons ReasonFlag) {
 	if stock.LTP <= 0 || stock.ExchangeVWAP <= 0 {
 		return 0, 0, 0.44, 0
 	}
@@ -120,40 +120,7 @@ func CalculateBullishScore( stock *StockMetrics, nifty *StockMetrics, sector *St
 		stockRetOpen = (stock.LTP - stock.Open) / stock.Open
 	}
 
-	var niftyRetOpen, niftyRet30m float64
-	if nifty != nil {
-		if nifty.Open > 0 {
-			niftyRetOpen = (nifty.LTP - nifty.Open) / nifty.Open
-		}
-		nRef := nifty.SessionBars[lookbackIdx].Close
-		if nRef <= 0 {
-			nRef = nifty.Open
-		}
-		if nRef > 0 {
-			niftyRet30m = (nifty.LTP - nRef) / nRef
-		}
-	}
-
-	var secRetOpen, secRet30m float64
-	if sector != nil {
-		if sector.Open > 0 {
-			secRetOpen = (sector.LTP - sector.Open) / sector.Open
-		}
-		sRef := sector.SessionBars[lookbackIdx].Close
-		if sRef <= 0 {
-			sRef = sector.Open
-		}
-		if sRef > 0 {
-			secRet30m = (sector.LTP - sRef) / sRef
-		}
-	} else {
-		secRetOpen = niftyRetOpen
-		secRet30m = niftyRet30m
-	}
-
-	rsOpen := stockRetOpen - (0.6*niftyRetOpen + 0.4*secRetOpen)
-	rs30m := stockRet30m - (0.6*niftyRet30m + 0.4*secRet30m)
-	compositeRS := 0.5*rsOpen + 0.5*rs30m
+	compositeRS := 0.5*stockRetOpen + 0.5*stockRet30m
 	stock.CompositeRS = compositeRS * 100.0 // Percentage representation
 
 	// 7. Microstructure Flow & Iceberg Filter
@@ -161,10 +128,6 @@ func CalculateBullishScore( stock *StockMetrics, nifty *StockMetrics, sector *St
 		reasons |= ReasonOrderBookWall
 	} else if stock.SmoothedBuyerRatio >= 0.60 && stock.AggressorBuyRatio < 0.45 {
 		reasons |= PenaltyIcebergSell
-	}
-
-	if isLeaderSector {
-		reasons |= ReasonSectorLeader
 	}
 
 	// 8. Opening Range Breakout (ORB)
@@ -196,8 +159,8 @@ func CalculateBullishScore( stock *StockMetrics, nifty *StockMetrics, sector *St
 	// 10. Calibrated Orthogonal Bayesian Confluence PWin
 	pWin = 0.44 // Empirical Base Prior for > 1.5R move
 
-	// Bucket A: Macro + Sector Confluence
-	if breadthRatio >= 0.55 && isLeaderSector && nifty != nil && nifty.LTP > nifty.ExchangeVWAP {
+	// Bucket A: Market Breadth Confluence
+	if breadthRatio >= 0.55 {
 		pWin += 0.07
 	}
 	// Bucket B: Microstructure Execution
@@ -287,9 +250,6 @@ func CalculateBullishScore( stock *StockMetrics, nifty *StockMetrics, sector *St
 // CalculateBearishScore performs institutional quantification of a short-selling breakdown setup
 func CalculateBearishScore(
 	stock *StockMetrics,
-	nifty *StockMetrics,
-	sector *StockMetrics,
-	isLaggingSector bool,
 	breadthRatio float64,
 ) (score float64, ev float64, pWin float64, reasons ReasonFlag) {
 	if stock.LTP <= 0 || stock.ExchangeVWAP <= 0 {
@@ -333,9 +293,6 @@ func CalculateBearishScore(
 
 	// Aggressor Sell Flow
 	aggressorSellRatio := 1.0 - stock.AggressorBuyRatio
-	if isLaggingSector && aggressorSellRatio >= 0.58 {
-		reasons |= ReasonSectorLagging
-	}
 
 	// Support Haircut on Day Low
 	stopProxy := math.Max(stock.ExchangeVWAP+0.25*atrSafe, currBar.High+0.15*atrSafe)
@@ -357,7 +314,7 @@ func CalculateBearishScore(
 	}
 
 	pWin = 0.44
-	if breadthRatio <= 0.45 && isLaggingSector && nifty != nil && nifty.LTP < nifty.ExchangeVWAP {
+	if breadthRatio <= 0.45 {
 		pWin += 0.07
 	}
 	if aggressorSellRatio >= 0.58 && stock.SmoothedBuyerRatio <= 0.42 {

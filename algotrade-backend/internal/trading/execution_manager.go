@@ -152,9 +152,8 @@ func (m *Manager) OnSecondTick(
 	stocks *[512]market.StockMetrics,
 	activeIndices []uint16,
 	bullishSorted []uint16,
-	leaderMap map[uint8]bool,
+	sectorHealthMap map[uint8]market.SectorHealth,
 	pulse market.MarketPulseDTO,
-	inMacroShock bool,
 ) *market.ExecutionStateDTO {
 	now := time.Now()
 	var topRVOL float64
@@ -196,11 +195,6 @@ func (m *Manager) OnSecondTick(
 	var blockedMargin, unrealisedPnL float64
 	activeDTOs := make([]market.ActivePositionDTO, 0, len(activeList))
 	for _, w := range activeList {
-		// If macro flash shock just hit, immediately cancel any unfilled ENTRY_PLACED buy orders
-		if inMacroShock && w.filledEntryQty.Load() == 0 {
-			w.TriggerEmergencyExit("MACRO_FLASH_SHOCK_CANCEL_PENDING_ENTRY")
-			continue
-		}
 		// Mandatory 15:14 IST Auto-Squareoff Sweep
 		if sessionClock.Phase == "AUTO_SQUAREOFF_SWEEP" {
 			w.TriggerEmergencyExit("MANDATORY_1514_IST_MIS_SQUAREOFF")
@@ -231,8 +225,7 @@ func (m *Manager) OnSecondTick(
 	candidate, pickStatus, pickReason, candidateGates := PickBestLongCandidate(
 		stocks,
 		bullishSorted,
-		leaderMap,
-		pulse.MarketRegime,
+		sectorHealthMap,
 		sessionClock,
 		capDTO.NetEquity,
 		capDTO.FreeMargin,
@@ -266,7 +259,7 @@ func (m *Manager) OnSecondTick(
 	stateDTO := &market.ExecutionStateDTO{
 		Mode:              settings.Mode,
 		AutoExecute:       settings.AutoExecute,
-		MacroShockActive:  inMacroShock,
+		MacroShockActive:  false,
 		GateStatus:        gateStatus,
 		GateReason:        gateReason,
 		Capital:           capDTO,

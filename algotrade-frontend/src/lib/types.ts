@@ -122,6 +122,8 @@ export interface SectorRankData {
   breadth_above_vwap: number;
   is_leader: boolean;
   is_lagging: boolean;
+  is_restricted?: boolean;
+  restriction_reason?: string;
 }
 
 export interface StockRankData {
