@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/ajaynegi33/AlgoTrade/internal/diagnostics"
 )
 
 var (
@@ -170,6 +172,12 @@ func (collector *EventCollector) persistBatch(batch []any) {
 	if collector.db == nil || len(batch) == 0 {
 		return
 	}
+
+	batchStartTime := time.Now()
+	defer func() {
+		batchElapsedDuration := time.Since(batchStartTime)
+		diagnostics.RecordLatency("monitoring_sqlite_batch_persist", batchElapsedDuration, 50*time.Millisecond)
+	}()
 
 	tx, err := collector.db.Begin()
 	if err != nil {

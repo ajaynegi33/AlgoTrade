@@ -22,6 +22,7 @@
 
 # misc
 .DS_Store
+.idea/
 *.pem
 
 # debug
@@ -51,6 +52,11 @@ algotrade-backend/data/
 algotrade-backend/reports/
 
 algotradebackend/AlgoTrade-key.pem
+
+# Execution Traces
+*.trace
+*.trace.tmp
+algotrade-backend/traces/
 
 # build / distribution
 dist/

@@ -5,6 +5,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/ajaynegi33/AlgoTrade/internal/diagnostics"
 	"github.com/ajaynegi33/AlgoTrade/internal/market"
 )
 
@@ -334,6 +335,12 @@ func (worker *PositionWorker) executeThreeStepScaleOut() {
 
 // executeEmergencyFlatten runs the 3-Stage Bulletproof Exit Protocol until RemainingQty() == 0
 func (worker *PositionWorker) executeEmergencyFlatten(reason string) {
+	emergencyFlattenStartTime := time.Now()
+	defer func() {
+		flattenElapsedDuration := time.Since(emergencyFlattenStartTime)
+		diagnostics.RecordLatency("emergency_position_flatten", flattenElapsedDuration, 800*time.Millisecond)
+	}()
+
 	if worker.isClosed.Load() {
 		return
 	}

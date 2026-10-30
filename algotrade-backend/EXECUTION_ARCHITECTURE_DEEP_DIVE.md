@@ -475,6 +475,41 @@ Execution Engine (Gatekeeper / PositionWorker)
 
 ---
 
+### Step 9: Runtime Execution Tracer Flight Recorder & Latency Watchdog
+
+#### Beginner Intuition
+Like an airplane's black box, the **Flight Recorder** continuously records everything happening inside the Go runtime—goroutine context switches, lock contention, Garbage Collector stop-the-world pauses, and network stalls—into a 8MB circular memory ring buffer.
+Under normal conditions, it performs **zero disk writes** and incurs negligible CPU overhead (< 0.5%). If a sudden latency spike occurs (e.g., market tick processing exceeds 10ms or order placement exceeds 1500ms), the watchdog automatically dumps the black box snapshot to a `.trace` file on disk. You can open this file in Google Chrome to inspect the exact microsecond of delay.
+
+#### Package Architecture (`internal/diagnostics/`)
+```
+internal/diagnostics/
+  ├── flight_recorder.go      # Go runtime/trace circular ring buffer & background snapshot worker
+  ├── storage.go              # Atomic file persistence, companion JSON metadata & retention pruning
+  ├── handler.go              # Protected HTTP endpoints (/api/diagnostics/flight-recorder/*)
+  ├── types.go                # Configuration, metadata DTOs & status structs
+  └── flight_recorder_test.go # Comprehensive unit tests with race detection
+```
+
+#### Calibrated Watchdog Hook Points
+| Watchdog Target | Location | Normal Latency | Spike Threshold | What a Spike Diagnostic Reveals |
+| :--- | :--- | :--- | :--- | :--- |
+| **Market Snapshot & Broadcast** | `market/snapshot_publisher.go` | 0.2ms – 0.8ms | **> 10ms** | STW GC pauses, CPU core starvation, or lock contention in actor metrics. |
+| **Zerodha Order REST Operations**| `trading/broker_adapters.go` | 150ms – 300ms | **> 1500ms** | Zerodha Kite Gateway network congestion, TCP TLS handshake stalls, or connection pool exhaustion. |
+| **Emergency Position Flatten** | `trading/position_exit.go` | 10ms – 50ms | **> 800ms** | Order cancellation delays or thread scheduling lag during critical market exit. |
+| **SQLite Monitoring Batch Persist**| `monitoring/collector.go` | 1ms – 5ms | **> 50ms** | Disk checkpoint lock, SQLite WAL write contention, or SSD I/O latency. |
+
+#### Developer Inspection Workflow
+```bash
+# 1. Trigger an on-demand manual trace snapshot (or wait for an automated watchdog spike)
+curl -X POST http://localhost:8080/api/diagnostics/flight-recorder/dump -H "Authorization: Bearer <TOKEN>"
+
+# 2. Inspect the saved trace snapshot directly in your browser
+go tool trace data/traces/trace_20261030_153012_market_snapshot_broadcast.trace
+```
+
+---
+
 ## 4. Comprehensive Inventory of System Waits, Pauses & Timers
 
 Every wait, pause, sleep, and timer in the engine is purpose-built to handle network latencies, broker rate limits, or exchange rules. Nothing is guesswork.
@@ -498,6 +533,9 @@ Every wait, pause, sleep, and timer in the engine is purpose-built to handle net
 | **30 seconds** | `monitoring/scheduler.go:69` | `watchLoop` | Scheduler check interval; monitors wall clock for 15:45 IST EOD trigger. |
 | **15:45 IST** | `monitoring/scheduler.go:94` | `GenerateAndSaveDailyReport` | Daily automated EOD trigger time; runs post-market when all trades and auction settlements are finalized. |
 | **15:14 IST** | `trading/session_clock.go:63` | `AUTO_SQUAREOFF_SWEEP` | Mandatory intraday square-off window; flattens all MIS positions before Zerodha RMS penalty square-off at 15:15 IST. |
+| **60 seconds** | `diagnostics/flight_recorder.go` | `CooldownDuration` | **Cascading Dump Storm Debounce**: Prevents redundant disk I/O and server saturation during sustained downstream stalls. |
+| **20 seconds** | `diagnostics/flight_recorder.go` | `StartupGracePeriod` | **Warmup Suppression Window**: Mutes false-positive watchdog dumps during system boot, DB migrations, and historical bar caching. |
+| **10 seconds** | `diagnostics/flight_recorder.go` | `MinEventAge` | **Flight Recorder Ring Window**: Guarantees that saved snapshots retain at least the preceding 10s of Go execution events. |
 
 ---
 

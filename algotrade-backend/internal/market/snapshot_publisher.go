@@ -6,13 +6,20 @@ import (
 	"slices"
 	"time"
 
+	"github.com/ajaynegi33/AlgoTrade/internal/diagnostics"
 	"github.com/ajaynegi33/AlgoTrade/internal/screener"
 )
 
 // computeAndBroadcastSnapshot runs on the 1-second ticker to calculate breadth, regime, and ranking,
 // invoke the execution hook, and broadcast RankedSnapshot to connected WebSockets.
 func (actor *Actor) computeAndBroadcastSnapshot() {
-	nowUnix := time.Now().Unix()
+	computationStartTime := time.Now()
+	defer func() {
+		computationDuration := time.Since(computationStartTime)
+		diagnostics.RecordLatency("market_snapshot_broadcast", computationDuration, 10*time.Millisecond)
+	}()
+
+	nowUnix := computationStartTime.Unix()
 
 	// 1. Calculate Market Breadth (% > VWAP)
 	var aboveVWAPCount, activeQuotedCount int

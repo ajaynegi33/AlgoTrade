@@ -11,6 +11,7 @@ import (
 
 	"github.com/ajaynegi33/AlgoTrade/internal/config"
 	"github.com/ajaynegi33/AlgoTrade/internal/database"
+	"github.com/ajaynegi33/AlgoTrade/internal/diagnostics"
 	"github.com/ajaynegi33/AlgoTrade/internal/kite"
 	"github.com/ajaynegi33/AlgoTrade/internal/market"
 	"github.com/ajaynegi33/AlgoTrade/internal/monitoring"
@@ -22,15 +23,16 @@ import (
 
 // App encapsulates the application dependencies and runtime components
 type App struct {
-	cfg             *config.Config
-	db              *sql.DB
-	server          *http.Server
-	tickerClient    *kite.TickerClient
-	marketHub       *market.Actor
-	tradeManager    *trading.Manager
-	screenerService *screener.Service
-	collector       *monitoring.EventCollector
-	scheduler       *monitoring.EODScheduler
+	cfg                   *config.Config
+	db                    *sql.DB
+	server                *http.Server
+	tickerClient          *kite.TickerClient
+	marketHub             *market.Actor
+	tradeManager          *trading.Manager
+	screenerService       *screener.Service
+	collector             *monitoring.EventCollector
+	scheduler             *monitoring.EODScheduler
+	flightRecorderManager *diagnostics.FlightRecorderManager
 }
 
 // NewApp instantiates all services, wires dependencies, and builds the HTTP server
@@ -63,12 +65,17 @@ func NewApp(cfg *config.Config) (*App, error) {
 	scheduler := monitoring.NewEODScheduler(db, "reports")
 	scheduler.Start(context.Background())
 
+	// Initialize Runtime Tracer Flight Recorder Manager
+	flightRecorderConfig := diagnostics.DefaultFlightRecorderConfig()
+	flightRecorderManager := diagnostics.NewFlightRecorderManager(flightRecorderConfig)
+	diagnostics.SetGlobalRecorder(flightRecorderManager)
+
 	// Re-seed historical baselines & scanned universe on Zerodha OAuth login
 	kiteService.RegisterOnAuthenticated(func() {
 		marketHub.OnKiteAuthenticated()
 	})
 
-	handler := buildRouter(cfg, db, userStore, kiteService, screenerService, marketHub, tradeManager, wsHub, scheduler)
+	handler := buildRouter(cfg, db, userStore, kiteService, screenerService, marketHub, tradeManager, wsHub, scheduler, flightRecorderManager)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -80,20 +87,27 @@ func NewApp(cfg *config.Config) (*App, error) {
 	}
 
 	return &App{
-		cfg:             cfg,
-		db:              db,
-		server:          server,
-		tickerClient:    tickerClient,
-		marketHub:       marketHub,
-		tradeManager:    tradeManager,
-		screenerService: screenerService,
-		collector:       collector,
-		scheduler:       scheduler,
+		cfg:                   cfg,
+		db:                    db,
+		server:                server,
+		tickerClient:          tickerClient,
+		marketHub:             marketHub,
+		tradeManager:          tradeManager,
+		screenerService:       screenerService,
+		collector:             collector,
+		scheduler:             scheduler,
+		flightRecorderManager: flightRecorderManager,
 	}, nil
 }
 
-// Start launches the ticker, market hub, initial scan, and HTTP server
+// Start launches the ticker, market hub, initial scan, flight recorder, and HTTP server
 func (app *App) Start() error {
+	if app.flightRecorderManager != nil {
+		if startError := app.flightRecorderManager.Start(context.Background()); startError != nil {
+			slog.Warn("Failed to start flight recorder manager", "error", startError)
+		}
+	}
+
 	app.tickerClient.Start()
 
 	if err := app.marketHub.Start(); err != nil {
@@ -137,6 +151,9 @@ func (app *App) Stop(ctx context.Context) {
 	}
 	if app.collector != nil {
 		app.collector.Stop()
+	}
+	if app.flightRecorderManager != nil {
+		_ = app.flightRecorderManager.Stop()
 	}
 
 	app.tradeManager.Stop()

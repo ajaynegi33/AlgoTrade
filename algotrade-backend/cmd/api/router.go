@@ -8,6 +8,7 @@ import (
 
 	"github.com/ajaynegi33/AlgoTrade/internal/auth"
 	"github.com/ajaynegi33/AlgoTrade/internal/config"
+	"github.com/ajaynegi33/AlgoTrade/internal/diagnostics"
 	"github.com/ajaynegi33/AlgoTrade/internal/kite"
 	"github.com/ajaynegi33/AlgoTrade/internal/market"
 	"github.com/ajaynegi33/AlgoTrade/internal/monitoring"
@@ -29,6 +30,7 @@ func buildRouter(
 	tradeManager *trading.Manager,
 	wsHub *ws.ClientHub,
 	scheduler *monitoring.EODScheduler,
+	flightRecorderManager *diagnostics.FlightRecorderManager,
 ) http.Handler {
 	mux := http.NewServeMux()
 
@@ -39,6 +41,7 @@ func buildRouter(
 	screenerHandler := screener.NewHandler(screenerService)
 	marketHandler := market.NewHandler(marketHub, wsHub)
 	tradeHandler := trading.NewHandler(tradeManager)
+	diagnosticsHandler := diagnostics.NewHandler(flightRecorderManager)
 
 	// Auth Middleware
 	requireAuth := auth.AuthMiddleware(cfg.JWTSecret)
@@ -137,6 +140,12 @@ func buildRouter(
 			"is_email_sent": isEmailSent == 1,
 		})
 	})
+
+	// Runtime Diagnostics & Execution Trace Flight Recorder Routes (Admin Protected)
+	mux.Handle("POST /api/diagnostics/flight-recorder/dump", requireAuth(http.HandlerFunc(diagnosticsHandler.TriggerManualDump)))
+	mux.Handle("GET /api/diagnostics/flight-recorder/status", requireAuth(http.HandlerFunc(diagnosticsHandler.GetStatus)))
+	mux.Handle("GET /api/diagnostics/flight-recorder/traces", requireAuth(http.HandlerFunc(diagnosticsHandler.ListTraces)))
+	mux.Handle("GET /api/diagnostics/flight-recorder/traces/{filename}", requireAuth(http.HandlerFunc(diagnosticsHandler.DownloadTrace)))
 
 	// Wrap Global Middlewares: Recovery -> CORS -> Router
 	var rootHandler http.Handler = mux

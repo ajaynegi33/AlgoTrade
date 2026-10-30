@@ -9,8 +9,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ajaynegi33/AlgoTrade/internal/market"
+	"github.com/ajaynegi33/AlgoTrade/internal/diagnostics"
 	"github.com/ajaynegi33/AlgoTrade/internal/kite"
+	"github.com/ajaynegi33/AlgoTrade/internal/market"
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 )
 
@@ -134,6 +135,7 @@ func (broker *ZerodhaLiveBroker) PlaceLimitBuy(
 		return "", kite.ErrNoSession
 	}
 
+	apiCallStartTime := time.Now()
 	resp, err := client.PlaceOrder(DefaultVariety, kiteconnect.OrderParams{
 		Exchange:        ExchangeNSE,
 		Tradingsymbol:   symbol,
@@ -145,6 +147,7 @@ func (broker *ZerodhaLiveBroker) PlaceLimitBuy(
 		Price:           limitPrice,
 		Tag:             OrderTag,
 	})
+	diagnostics.RecordLatency("zerodha_place_limit_buy", time.Since(apiCallStartTime), 1500*time.Millisecond)
 	if err != nil {
 		return "", fmt.Errorf("zerodha PlaceLimitBuy failed for %s: %w", symbol, err)
 	}
@@ -215,6 +218,7 @@ func (broker *ZerodhaLiveBroker) PlaceEmergencySweepSell(
 	}
 
 	protectiveLimit := RoundDownToTick(math.Max(tickSize, refPrice*(1.0-maxSlippagePct)), tickSize)
+	apiCallStartTime := time.Now()
 	resp, err := client.PlaceOrder(DefaultVariety, kiteconnect.OrderParams{
 		Exchange:        ExchangeNSE,
 		Tradingsymbol:   symbol,
@@ -226,6 +230,7 @@ func (broker *ZerodhaLiveBroker) PlaceEmergencySweepSell(
 		Price:           protectiveLimit,
 		Tag:             OrderTag,
 	})
+	diagnostics.RecordLatency("zerodha_emergency_sweep_sell", time.Since(apiCallStartTime), 1500*time.Millisecond)
 	if err != nil {
 		return "", fmt.Errorf("zerodha PlaceEmergencySweepSell (slip=%.2f%%) failed for %s: %w", maxSlippagePct*100, symbol, err)
 	}
@@ -260,6 +265,7 @@ func (broker *ZerodhaLiveBroker) PlaceSLOrder(
 		return "", kite.ErrNoSession
 	}
 
+	apiCallStartTime := time.Now()
 	resp, err := client.PlaceOrder(DefaultVariety, kiteconnect.OrderParams{
 		Exchange:        ExchangeNSE,
 		Tradingsymbol:   symbol,
@@ -272,6 +278,7 @@ func (broker *ZerodhaLiveBroker) PlaceSLOrder(
 		Price:           limitPrice,
 		Tag:             OrderTag,
 	})
+	diagnostics.RecordLatency("zerodha_place_sl_order", time.Since(apiCallStartTime), 1500*time.Millisecond)
 	if err != nil {
 		return "", fmt.Errorf("zerodha PlaceSLOrder failed for %s: %w", symbol, err)
 	}
@@ -299,7 +306,9 @@ func (broker *ZerodhaLiveBroker) ModifySLOrder(
 	if err := broker.waitRateLimit(ctx); err != nil {
 		return err
 	}
+	apiCallStartTime := time.Now()
 	_, err := broker.kiteService.RawModifyOrderPUT(ctx, DefaultVariety, orderID, "SL", newQty, newLimit, newTrigger)
+	diagnostics.RecordLatency("zerodha_modify_sl_order", time.Since(apiCallStartTime), 1500*time.Millisecond)
 	return err
 }
 
@@ -315,7 +324,9 @@ func (broker *ZerodhaLiveBroker) MutateSLToMarket(
 	if err := broker.waitRateLimit(ctx); err != nil {
 		return err
 	}
+	apiCallStartTime := time.Now()
 	_, err := broker.kiteService.RawModifyOrderPUT(ctx, DefaultVariety, orderID, "MARKET", qty, 0.0, 0.0)
+	diagnostics.RecordLatency("zerodha_mutate_sl_to_market", time.Since(apiCallStartTime), 1500*time.Millisecond)
 	return err
 }
 
@@ -331,7 +342,9 @@ func (broker *ZerodhaLiveBroker) CancelOrder(ctx context.Context, orderID string
 	if client == nil || session == nil || session.AccessToken == "" {
 		return kite.ErrNoSession
 	}
+	apiCallStartTime := time.Now()
 	_, err := client.CancelOrder(DefaultVariety, orderID, nil)
+	diagnostics.RecordLatency("zerodha_cancel_order", time.Since(apiCallStartTime), 1500*time.Millisecond)
 	return err
 }
 
