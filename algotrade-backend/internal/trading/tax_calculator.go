@@ -1,18 +1,13 @@
 package trading
 
-import "math"
+import (
+	"math"
 
-// TaxBreakdown holds the itemised NSE Cash Intraday (MIS) statutory & brokerage charges
-type TaxBreakdown struct {
-	BuyBrokerage  float64 `json:"buy_brokerage"`
-	SellBrokerage float64 `json:"sell_brokerage"`
-	STT           float64 `json:"stt"`           // 0.025% on Sell turnover
-	ExchangeTxn   float64 `json:"exchange_txn"`  // 0.00297% on total turnover (NSE)
-	SEBICharges   float64 `json:"sebi_charges"`  // 0.0001% on total turnover
-	StampDuty     float64 `json:"stamp_duty"`    // 0.003% on Buy turnover
-	GST           float64 `json:"gst"`           // 18% on (Brokerage + ExchangeTxn + SEBI)
-	TotalCharges  float64 `json:"total_charges"` // Exact sum of all statutory & brokerage fees
-}
+	"github.com/ajaynegi33/AlgoTrade/internal/market"
+)
+
+// TaxBreakdown aliases market.TaxBreakdownDTO to prevent duplicate struct definitions
+type TaxBreakdown = market.TaxBreakdownDTO
 
 // CalculateRoundTripCharges computes the exact Zerodha + NSE Cash MIS round-trip charges in ₹
 func CalculateRoundTripCharges(buyPrice, sellPrice float64, qty int) TaxBreakdown {
@@ -47,11 +42,13 @@ func CalculatePositionTaxBreakdown(buyPrice, sellPrice float64, qty int, isSplit
 	gst := math.Round(0.18*(buyBrokerageFee+sellBrokerageFee+exch+sebi)*100.0) / 100.0
 	buyBrokerageFee = math.Round(buyBrokerageFee*100.0) / 100.0
 	sellBrokerageFee = math.Round(sellBrokerageFee*100.0) / 100.0
+	brokerage := math.Round((buyBrokerageFee+sellBrokerageFee)*100.0) / 100.0
 	total := math.Round((buyBrokerageFee+sellBrokerageFee+stt+exch+sebi+stamp+gst)*100.0) / 100.0
 
 	return TaxBreakdown{
 		BuyBrokerage:  buyBrokerageFee,
 		SellBrokerage: sellBrokerageFee,
+		Brokerage:     brokerage,
 		STT:           stt,
 		ExchangeTxn:   exch,
 		SEBICharges:   sebi,

@@ -323,14 +323,14 @@ stateDiagram-v2
 ┌────────────────────────────────────────────────────────────────────────┐
 │ TIER 1: Lock-Free Atomic Hot Path (<250ns, Zero Heap Allocations)      │
 │ Called directly by Single-Writer Actor: worker.OnTickHotPath()         │
-│ - Reads/Writes: latestLTPBits, highWaterMarkBits, confirmedStopBits,  │
+│ - Reads/Writes: latestLTPBits, highWaterMarkBits, confirmedStopBits,   │
 │   shadowStopBits, proposedStopBits via atomic.Uint64 bitcasts          │
 │ - Ratchets in-memory shadow stops via CAS loops                        │
 │ - Signals worker goroutine via non-blocking wakeCh send                │
 └────────────────────────────────────┬───────────────────────────────────┘
                                      │ Non-blocking signal
 ┌────────────────────────────────────▼───────────────────────────────────┐
-│ TIER 2: Dedicated Worker Goroutine (Event Loop)                       │
+│ TIER 2: Dedicated Worker Goroutine (Event Loop)                        │
 │ go worker.workerLoop()                                                 │
 │ - Coordinates all network operations, timers, and order mutations      │
 │ - Listens on:                                                          │

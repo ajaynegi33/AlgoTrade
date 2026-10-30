@@ -93,15 +93,14 @@ func buildRouter(
 	mux.HandleFunc("POST /api/kite/postback", tradeHandler.HandleKitePostback)
 
 	// Market Structure & Order Block Routes (legacy compatibility - returns empty list)
-	mux.HandleFunc("GET /api/structure/orderblock-tree", func(writer http.ResponseWriter, request *http.Request) {
+	emptyListHandler := func(writer http.ResponseWriter, request *http.Request) {
 		response.Success(writer, http.StatusOK, []any{})
-	})
-	mux.HandleFunc("GET /api/prediction/orderblock-tree", func(writer http.ResponseWriter, request *http.Request) {
-		response.Success(writer, http.StatusOK, []any{})
-	})
+	}
+	mux.HandleFunc("GET /api/structure/orderblock-tree", emptyListHandler)
+	mux.HandleFunc("GET /api/prediction/orderblock-tree", emptyListHandler)
 
 	// Monitoring & EOD Optimization Engine Routes
-	mux.HandleFunc("POST /api/monitoring/generate-eod", func(writer http.ResponseWriter, request *http.Request) {
+	generateEODHandler := func(writer http.ResponseWriter, request *http.Request) {
 		date := request.URL.Query().Get("date")
 		if scheduler == nil {
 			response.Error(writer, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "EOD scheduler not initialized")
@@ -113,20 +112,9 @@ func buildRouter(
 			return
 		}
 		response.Success(writer, http.StatusOK, summary)
-	})
-	mux.HandleFunc("POST /api/v1/monitoring/generate-eod", func(writer http.ResponseWriter, request *http.Request) {
-		date := request.URL.Query().Get("date")
-		if scheduler == nil {
-			response.Error(writer, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "EOD scheduler not initialized")
-			return
-		}
-		summary, err := scheduler.TriggerManualReport(request.Context(), date)
-		if err != nil {
-			response.Error(writer, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
-			return
-		}
-		response.Success(writer, http.StatusOK, summary)
-	})
+	}
+	mux.HandleFunc("POST /api/monitoring/generate-eod", generateEODHandler)
+	mux.HandleFunc("POST /api/v1/monitoring/generate-eod", generateEODHandler)
 	mux.HandleFunc("GET /api/monitoring/reports/latest", func(writer http.ResponseWriter, request *http.Request) {
 		if db == nil {
 			response.Error(writer, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Database not available")

@@ -212,8 +212,8 @@ func (worker *PositionWorker) GetSLOrderID() string {
 	return worker.slOrderID
 }
 
-// GetRemainingQty returns the exact net open share count (FilledEntryQty - FilledExitQty)
-func (worker *PositionWorker) GetRemainingQty() int {
+// RemainingQty returns the exact net open share count (FilledEntryQty - FilledExitQty)
+func (worker *PositionWorker) RemainingQty() int {
 	remainingShares := int(worker.filledEntryQty.Load() - worker.filledExitQty.Load())
 	if remainingShares < 0 {
 		return 0
@@ -221,19 +221,9 @@ func (worker *PositionWorker) GetRemainingQty() int {
 	return remainingShares
 }
 
-// RemainingQty is a backward-compatible alias for GetRemainingQty
-func (worker *PositionWorker) RemainingQty() int {
-	return worker.GetRemainingQty()
-}
-
-// GetLatestLTP returns the most recent tick LTP seen by this worker
-func (worker *PositionWorker) GetLatestLTP() float64 {
-	return math.Float64frombits(worker.latestLTPBits.Load())
-}
-
-// LatestLTP is a backward-compatible alias for GetLatestLTP
+// LatestLTP returns the most recent tick LTP seen by this worker
 func (worker *PositionWorker) LatestLTP() float64 {
-	return worker.GetLatestLTP()
+	return math.Float64frombits(worker.latestLTPBits.Load())
 }
 
 // GetOpenRiskRupees returns the active downside capital risk of this position in Rupees.
@@ -242,7 +232,7 @@ func (worker *PositionWorker) GetOpenRiskRupees() float64 {
 	if worker.isClosed.Load() {
 		return 0
 	}
-	remainingShares := worker.GetRemainingQty()
+	remainingShares := worker.RemainingQty()
 	filledEntry := int(worker.filledEntryQty.Load())
 
 	// Position already completely flat
@@ -276,11 +266,6 @@ func (worker *PositionWorker) GetOpenRiskRupees() float64 {
 		return 0
 	}
 	return math.Max(0.0, entryPrice-confirmedStop) * float64(remainingShares)
-}
-
-// OpenRiskRupees is an alias for GetOpenRiskRupees
-func (worker *PositionWorker) OpenRiskRupees() float64 {
-	return worker.GetOpenRiskRupees()
 }
 
 // Start places the entry limit order and launches the dedicated worker goroutine
@@ -323,21 +308,11 @@ func (worker *PositionWorker) wakeWorker() {
 	}
 }
 
-// wake is a backward-compatible alias for wakeWorker
-func (worker *PositionWorker) wake() {
-	worker.wakeWorker()
-}
-
-// notifyWorkerClosed triggers the onClosed callback with strict idempotency (guaranteed exactly once)
-func (worker *PositionWorker) notifyWorkerClosed() {
+// notifyClosed triggers the onClosed callback with strict idempotency (guaranteed exactly once)
+func (worker *PositionWorker) notifyClosed() {
 	if worker.onClosed != nil && worker.hasClosedNotified.CompareAndSwap(false, true) {
 		worker.onClosed(worker)
 	}
-}
-
-// notifyClosed is a backward-compatible alias for notifyWorkerClosed
-func (worker *PositionWorker) notifyClosed() {
-	worker.notifyWorkerClosed()
 }
 
 func (worker *PositionWorker) OnOrderDelta(legType string, orderEvent OrderUpdateEvent, deltaFilled int) {
@@ -409,7 +384,7 @@ func (worker *PositionWorker) OnOrderDelta(legType string, orderEvent OrderUpdat
 	case worker.fillNotifyCh <- struct{}{}:
 	default:
 	}
-	worker.wake()
+	worker.wakeWorker()
 }
 
 func (worker *PositionWorker) finalizeClosedLocked(reason string) {
@@ -565,11 +540,6 @@ func (worker *PositionWorker) handleEntryTimeout() {
 		}
 	}
 	worker.persistPositionState()
-}
-
-// BuildPositionDTO builds an ActivePositionDTO telemetry snapshot for frontend broadcasts and persistence
-func (worker *PositionWorker) BuildPositionDTO() market.ActivePositionDTO {
-	return worker.ToDTO()
 }
 
 func (worker *PositionWorker) ToDTO() market.ActivePositionDTO {

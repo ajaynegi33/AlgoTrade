@@ -49,7 +49,7 @@ func (worker *PositionWorker) OnTickHotPath(stockMetrics *market.StockMetrics, i
 		return
 	}
 
-	if worker.GetRemainingQty() <= 0 {
+	if worker.RemainingQty() <= 0 {
 		return
 	}
 

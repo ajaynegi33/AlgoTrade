@@ -16,10 +16,6 @@ func round2(value float64) float64 {
 	return math.Round(value*100.0) / 100.0
 }
 
-func RoundToTwoDecimals(value float64) float64 {
-	return round2(value)
-}
-
 func formatHoldDuration(durationSeconds int64) string {
 	if durationSeconds <= 0 {
 		return "0s"
@@ -277,18 +273,7 @@ func buildTradeHistoryFromDTO(
 		gross = totalSellValue - totalInvested
 	}
 
-	tb := CalculatePositionTaxBreakdown(buyPrice, sellPrice, qty, act.HasTranche1Completed)
-	taxDTO := market.TaxBreakdownDTO{
-		BuyBrokerage:  tb.BuyBrokerage,
-		SellBrokerage: tb.SellBrokerage,
-		Brokerage:     round2(tb.BuyBrokerage + tb.SellBrokerage),
-		STT:           tb.STT,
-		ExchangeTxn:   tb.ExchangeTxn,
-		SEBICharges:   tb.SEBICharges,
-		StampDuty:     tb.StampDuty,
-		GST:           tb.GST,
-		TotalCharges:  tb.TotalCharges,
-	}
+	taxDTO := CalculatePositionTaxBreakdown(buyPrice, sellPrice, qty, act.HasTranche1Completed)
 
 	netAfterTax := round2(gross - taxDTO.TotalCharges)
 
