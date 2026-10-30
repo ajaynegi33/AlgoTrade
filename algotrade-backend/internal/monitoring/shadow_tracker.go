@@ -49,6 +49,9 @@ func ResolveShadowSignals(db *sql.DB, tradingDate string) (int, error) {
 			pending = append(pending, p)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("error iterating shadow signals: %w", err)
+	}
 
 	if len(pending) == 0 {
 		return 0, nil
@@ -139,6 +142,9 @@ func fetchSubsequentBars(db *sql.DB, token int64, afterTime time.Time) ([]Candle
 			b.BarTime, _ = time.Parse(time.RFC3339, tStr)
 			bars = append(bars, b)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating historical bars: %w", err)
 	}
 	return bars, nil
 }

@@ -217,6 +217,9 @@ func ComputeEODMetrics(db *sql.DB, tradingDate string) (*EODReportSummary, error
 
 		report.TradeLedger = append(report.TradeLedger, rec)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating positions: %w", err)
+	}
 
 	// 2. Compute Summary Ratios
 	if report.TotalTrades > 0 {
@@ -371,6 +374,10 @@ func ComputeEODMetrics(db *sql.DB, tradingDate string) (*EODReportSummary, error
 					}
 				}
 			}
+			if err := pRows.Err(); err != nil {
+				pRows.Close()
+				return nil, fmt.Errorf("error iterating probability bucket rows: %w", err)
+			}
 			pRows.Close()
 			if bucket.TradeCount > 0 {
 				bucket.WinRatePct = math.Round((float64(bucket.WinningCount)/float64(bucket.TradeCount))*1000.0) / 10.0
@@ -402,6 +409,9 @@ func ComputeEODMetrics(db *sql.DB, tradingDate string) (*EODReportSummary, error
 				}
 				sumShadowR += simR
 			}
+		}
+		if err := sRows.Err(); err != nil {
+			return nil, fmt.Errorf("error iterating shadow signals: %w", err)
 		}
 		if report.ShadowSummary.ShadowSignalCount > 0 {
 			report.ShadowSummary.ShadowWinRatePct = math.Round((float64(shadowWins)/float64(report.ShadowSummary.ShadowSignalCount))*1000.0) / 10.0
