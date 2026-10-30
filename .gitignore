@@ -50,3 +50,8 @@ Kite Docs
 algotrade-backend/data/
 
 algotradebackend/AlgoTrade-key.pem
+
+# build / distribution
+dist/
+algotrade-backend/dist/
+
