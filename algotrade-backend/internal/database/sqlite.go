@@ -197,7 +197,13 @@ func runMigrations(db *sql.DB) error {
 			breakeven_stop REAL NOT NULL DEFAULT 0,
 			base_buffer REAL NOT NULL DEFAULT 0,
 			high_water_mark REAL NOT NULL DEFAULT 0,
+			low_water_mark REAL NOT NULL DEFAULT 0,
 			one_r REAL NOT NULL DEFAULT 0,
+			mfe_r REAL NOT NULL DEFAULT 0,
+			mae_r REAL NOT NULL DEFAULT 0,
+			intended_entry_price REAL NOT NULL DEFAULT 0,
+			entry_slippage_pct REAL NOT NULL DEFAULT 0,
+			exit_slippage_pct REAL NOT NULL DEFAULT 0,
 			initial_qty INTEGER NOT NULL DEFAULT 0,
 			filled_entry_qty INTEGER NOT NULL DEFAULT 0,
 			filled_exit_qty INTEGER NOT NULL DEFAULT 0,
@@ -246,6 +252,34 @@ func runMigrations(db *sql.DB) error {
 			lock_reason TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (trading_date, mode)
 		);`,
+		`CREATE TABLE IF NOT EXISTS shadow_signals (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			trading_date TEXT NOT NULL,
+			signal_time DATETIME NOT NULL,
+			symbol TEXT NOT NULL,
+			instrument_token INTEGER NOT NULL,
+			pattern_type TEXT NOT NULL,
+			bullish_score REAL NOT NULL,
+			rejection_reason TEXT NOT NULL,
+			entry_price REAL NOT NULL,
+			hypothetical_stop REAL NOT NULL,
+			one_r REAL NOT NULL,
+			target_1r REAL NOT NULL,
+			outcome TEXT NOT NULL DEFAULT 'PENDING',
+			simulated_r REAL NOT NULL DEFAULT 0.0,
+			resolved_at DATETIME,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_shadow_signals_date ON shadow_signals(trading_date);`,
+		`CREATE TABLE IF NOT EXISTS daily_eod_reports (
+			trading_date TEXT PRIMARY KEY,
+			report_markdown TEXT NOT NULL,
+			report_html TEXT NOT NULL,
+			summary_json TEXT NOT NULL,
+			is_email_sent INTEGER NOT NULL DEFAULT 0,
+			email_recipient TEXT NOT NULL DEFAULT '',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
 	}
 
 	for _, query := range queries {
@@ -257,6 +291,12 @@ func runMigrations(db *sql.DB) error {
 	// Idempotent column migrations
 	_, _ = db.Exec(`ALTER TABLE scanned_stocks ADD COLUMN mis_leverage REAL NOT NULL DEFAULT 5.0;`)
 	_, _ = db.Exec(`ALTER TABLE positions ADD COLUMN exit_price REAL NOT NULL DEFAULT 0.0;`)
+	_, _ = db.Exec(`ALTER TABLE positions ADD COLUMN low_water_mark REAL NOT NULL DEFAULT 0.0;`)
+	_, _ = db.Exec(`ALTER TABLE positions ADD COLUMN mfe_r REAL NOT NULL DEFAULT 0.0;`)
+	_, _ = db.Exec(`ALTER TABLE positions ADD COLUMN mae_r REAL NOT NULL DEFAULT 0.0;`)
+	_, _ = db.Exec(`ALTER TABLE positions ADD COLUMN intended_entry_price REAL NOT NULL DEFAULT 0.0;`)
+	_, _ = db.Exec(`ALTER TABLE positions ADD COLUMN entry_slippage_pct REAL NOT NULL DEFAULT 0.0;`)
+	_, _ = db.Exec(`ALTER TABLE positions ADD COLUMN exit_slippage_pct REAL NOT NULL DEFAULT 0.0;`)
 
 	return nil
 }

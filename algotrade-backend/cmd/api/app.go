@@ -13,6 +13,7 @@ import (
 	"github.com/ajaynegi33/AlgoTrade/internal/database"
 	"github.com/ajaynegi33/AlgoTrade/internal/kite"
 	"github.com/ajaynegi33/AlgoTrade/internal/market"
+	"github.com/ajaynegi33/AlgoTrade/internal/monitoring"
 	"github.com/ajaynegi33/AlgoTrade/internal/screener"
 	"github.com/ajaynegi33/AlgoTrade/internal/trading"
 	"github.com/ajaynegi33/AlgoTrade/internal/user"
@@ -28,6 +29,8 @@ type App struct {
 	marketHub       *market.Actor
 	tradeManager    *trading.Manager
 	screenerService *screener.Service
+	collector       *monitoring.EventCollector
+	scheduler       *monitoring.EODScheduler
 }
 
 // NewApp instantiates all services, wires dependencies, and builds the HTTP server
@@ -52,12 +55,20 @@ func NewApp(cfg *config.Config) (*App, error) {
 	marketHub := market.NewActor(db, tickerClient, histService, wsHub, screenerService)
 	tradeManager := trading.NewManager(db, marketHub, kiteService, tickerClient)
 
+	// Initialize Monitoring EventCollector & EOD Scheduler
+	collector := monitoring.NewEventCollector(db)
+	monitoring.SetCollector(collector)
+	collector.Start(context.Background())
+
+	scheduler := monitoring.NewEODScheduler(db, "reports")
+	scheduler.Start(context.Background())
+
 	// Re-seed historical baselines & scanned universe on Zerodha OAuth login
 	kiteService.RegisterOnAuthenticated(func() {
 		marketHub.OnKiteAuthenticated()
 	})
 
-	handler := buildRouter(cfg, db, userStore, kiteService, screenerService, marketHub, tradeManager, wsHub)
+	handler := buildRouter(cfg, db, userStore, kiteService, screenerService, marketHub, tradeManager, wsHub, scheduler)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -76,6 +87,8 @@ func NewApp(cfg *config.Config) (*App, error) {
 		marketHub:       marketHub,
 		tradeManager:    tradeManager,
 		screenerService: screenerService,
+		collector:       collector,
+		scheduler:       scheduler,
 	}, nil
 }
 
@@ -117,6 +130,13 @@ func (app *App) Stop(ctx context.Context) {
 
 	if err := app.server.Shutdown(ctx); err != nil {
 		slog.Error("Graceful shutdown error", "error", err)
+	}
+
+	if app.scheduler != nil {
+		app.scheduler.Stop()
+	}
+	if app.collector != nil {
+		app.collector.Stop()
 	}
 
 	app.tradeManager.Stop()

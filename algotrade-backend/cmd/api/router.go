@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/ajaynegi33/AlgoTrade/internal/config"
 	"github.com/ajaynegi33/AlgoTrade/internal/kite"
 	"github.com/ajaynegi33/AlgoTrade/internal/market"
+	"github.com/ajaynegi33/AlgoTrade/internal/monitoring"
 	"github.com/ajaynegi33/AlgoTrade/internal/response"
 	"github.com/ajaynegi33/AlgoTrade/internal/screener"
 	"github.com/ajaynegi33/AlgoTrade/internal/trading"
@@ -19,13 +21,14 @@ import (
 // buildRouter constructs the HTTP ServeMux, binds routes and aliases, and applies middlewares
 func buildRouter(
 	cfg *config.Config,
-	_ *sql.DB,
+	db *sql.DB,
 	userStore user.Store,
 	kiteService *kite.Service,
 	screenerService *screener.Service,
 	marketHub *market.Actor,
 	tradeManager *trading.Manager,
 	wsHub *ws.ClientHub,
+	scheduler *monitoring.EODScheduler,
 ) http.Handler {
 	mux := http.NewServeMux()
 
@@ -95,6 +98,56 @@ func buildRouter(
 	})
 	mux.HandleFunc("GET /api/prediction/orderblock-tree", func(writer http.ResponseWriter, request *http.Request) {
 		response.Success(writer, http.StatusOK, []any{})
+	})
+
+	// Monitoring & EOD Optimization Engine Routes
+	mux.HandleFunc("POST /api/monitoring/generate-eod", func(writer http.ResponseWriter, request *http.Request) {
+		date := request.URL.Query().Get("date")
+		if scheduler == nil {
+			response.Error(writer, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "EOD scheduler not initialized")
+			return
+		}
+		summary, err := scheduler.TriggerManualReport(request.Context(), date)
+		if err != nil {
+			response.Error(writer, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+			return
+		}
+		response.Success(writer, http.StatusOK, summary)
+	})
+	mux.HandleFunc("POST /api/v1/monitoring/generate-eod", func(writer http.ResponseWriter, request *http.Request) {
+		date := request.URL.Query().Get("date")
+		if scheduler == nil {
+			response.Error(writer, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "EOD scheduler not initialized")
+			return
+		}
+		summary, err := scheduler.TriggerManualReport(request.Context(), date)
+		if err != nil {
+			response.Error(writer, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+			return
+		}
+		response.Success(writer, http.StatusOK, summary)
+	})
+	mux.HandleFunc("GET /api/monitoring/reports/latest", func(writer http.ResponseWriter, request *http.Request) {
+		if db == nil {
+			response.Error(writer, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Database not available")
+			return
+		}
+		var date, md, html, summaryJSON string
+		var isEmailSent int
+		err := db.QueryRow(`
+			SELECT trading_date, report_markdown, report_html, summary_json, is_email_sent
+			FROM daily_eod_reports
+			ORDER BY trading_date DESC LIMIT 1
+		`).Scan(&date, &md, &html, &summaryJSON, &isEmailSent)
+		if err != nil {
+			response.Error(writer, http.StatusNotFound, "NOT_FOUND", "No reports generated yet")
+			return
+		}
+		response.Success(writer, http.StatusOK, map[string]any{
+			"trading_date":  date,
+			"summary":       json.RawMessage(summaryJSON),
+			"is_email_sent": isEmailSent == 1,
+		})
 	})
 
 	// Wrap Global Middlewares: Recovery -> CORS -> Router

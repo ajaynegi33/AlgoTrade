@@ -3,8 +3,10 @@ package trading
 import (
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/ajaynegi33/AlgoTrade/internal/market"
+	"github.com/ajaynegi33/AlgoTrade/internal/monitoring"
 	"github.com/ajaynegi33/AlgoTrade/internal/screener"
 )
 
@@ -189,6 +191,22 @@ func PickBestLongCandidate(
 		if !sizing.IsApproved {
 			candidateDiagnostic.BlockingReason = sizing.RejectReason
 			candidateDiagnostics = append(candidateDiagnostics, candidateDiagnostic)
+
+			if collector := monitoring.GetCollector(); collector != nil {
+				collector.EmitShadowSignal(monitoring.ShadowSignalEvent{
+					TradingDate:      time.Now().Format("2006-01-02"),
+					SignalTime:       time.Now(),
+					Symbol:           symbol,
+					InstrumentToken:  stock.InstrumentToken,
+					PatternType:      matchedPattern,
+					BullishScore:     stock.BullishScore,
+					RejectionReason:  sizing.RejectReason,
+					EntryPrice:       stock.LTP,
+					HypotheticalStop: sizing.StopSpec.InitialStop,
+					OneR:             sizing.StopSpec.OneR,
+					Target1R:         stock.LTP + sizing.StopSpec.OneR,
+				})
+			}
 			continue
 		}
 
@@ -205,6 +223,23 @@ func PickBestLongCandidate(
 				SignalBarLow: signalBarLow,
 				BullishScore: stock.BullishScore,
 				Sizing:       sizing,
+			}
+		} else {
+			// Track secondary qualified setups as shadow signals
+			if collector := monitoring.GetCollector(); collector != nil {
+				collector.EmitShadowSignal(monitoring.ShadowSignalEvent{
+					TradingDate:      time.Now().Format("2006-01-02"),
+					SignalTime:       time.Now(),
+					Symbol:           symbol,
+					InstrumentToken:  stock.InstrumentToken,
+					PatternType:      matchedPattern,
+					BullishScore:     stock.BullishScore,
+					RejectionReason:  fmt.Sprintf("Lower rank than winning candidate (%s)", winningSignal.Symbol),
+					EntryPrice:       stock.LTP,
+					HypotheticalStop: sizing.StopSpec.InitialStop,
+					OneR:             sizing.StopSpec.OneR,
+					Target1R:         stock.LTP + sizing.StopSpec.OneR,
+				})
 			}
 		}
 	}

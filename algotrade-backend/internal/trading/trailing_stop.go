@@ -53,13 +53,18 @@ func (worker *PositionWorker) OnTickHotPath(stockMetrics *market.StockMetrics, i
 		return
 	}
 
-	// 1. Update High-Water Mark (HWM)
+	// 1. Update High-Water Mark (HWM) and Low-Water Mark (LWM)
 	entryPrice := worker.GetEntryPrice()
 	breakevenStop := worker.GetBreakevenStop()
 	highWaterMark := math.Float64frombits(worker.highWaterMarkBits.Load())
 	if lastTradedPrice > highWaterMark {
 		highWaterMark = lastTradedPrice
 		worker.highWaterMarkBits.Store(math.Float64bits(highWaterMark))
+	}
+	lowWaterMark := math.Float64frombits(worker.lowWaterMarkBits.Load())
+	if lowWaterMark == 0 || lastTradedPrice < lowWaterMark {
+		lowWaterMark = lastTradedPrice
+		worker.lowWaterMarkBits.Store(math.Float64bits(lowWaterMark))
 	}
 	currentRMultiple := (lastTradedPrice - entryPrice) / worker.OneR
 	maxFavorableRMultiple := (highWaterMark - entryPrice) / worker.OneR

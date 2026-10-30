@@ -83,9 +83,11 @@ type ActivePositionDTO struct {
 	BreakevenStop    float64 `json:"breakeven_stop"`
 	BaseBuffer       float64 `json:"base_buffer"`
 	HighWaterMark    float64 `json:"high_water_mark"`
+	LowWaterMark     float64 `json:"low_water_mark,omitempty"`
 	OneR             float64 `json:"one_r"`
 	RMultiple        float64 `json:"r_multiple"`
 	MFERMultiple     float64 `json:"mfe_r_multiple"`
+	MAERMultiple     float64 `json:"mae_r_multiple,omitempty"`
 	InitialQty       int     `json:"initial_qty"`
 	RemainingQty     int     `json:"remaining_qty"`
 	ModCount         int     `json:"mod_count"`

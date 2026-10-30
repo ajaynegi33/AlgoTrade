@@ -53,6 +53,7 @@ type PositionWorker struct {
 	breakevenStopBits    atomic.Uint64
 	latestLTPBits        atomic.Uint64
 	highWaterMarkBits    atomic.Uint64
+	lowWaterMarkBits     atomic.Uint64
 	confirmedStopBits    atomic.Uint64
 	shadowStopBits       atomic.Uint64
 	proposedStopBits     atomic.Uint64
@@ -79,8 +80,10 @@ type PositionWorker struct {
 	scaleOutOrderID  string
 	slOrderStatus    string
 	slOpenSinceMs    int64
-	entryCostRupees  float64
-	exitProceeds     float64
+	entryCostRupees      float64
+	intendedEntryPrice   float64
+	entrySlippagePct     float64
+	exitProceeds         float64
 	realisedGrossPnL float64
 	totalCharges     float64
 	realisedNetPnL   float64
@@ -162,6 +165,7 @@ func NewPositionWorker(parentCtx context.Context, cfg WorkerConfig) *PositionWor
 		SignalBarLow:         cfg.Sizing.StopSpec.SignalBarLow,
 		state:                StateEntryPlaced,
 		entryTimeoutDuration: timeoutDur,
+		intendedEntryPrice:   cfg.Sizing.EntryLimitPrice,
 		wakeCh:               make(chan struct{}, 1),
 		emergReasonCh:        make(chan string, 4),
 		fillNotifyCh:         make(chan struct{}, 8),
@@ -179,6 +183,7 @@ func NewPositionWorker(parentCtx context.Context, cfg WorkerConfig) *PositionWor
 	worker.breakevenStopBits.Store(math.Float64bits(cfg.Sizing.BreakevenStop))
 	worker.latestLTPBits.Store(math.Float64bits(cfg.Sizing.EntryLimitPrice))
 	worker.highWaterMarkBits.Store(math.Float64bits(cfg.Sizing.EntryLimitPrice))
+	worker.lowWaterMarkBits.Store(math.Float64bits(cfg.Sizing.EntryLimitPrice))
 	worker.confirmedStopBits.Store(math.Float64bits(cfg.Sizing.StopSpec.InitialStop))
 	worker.shadowStopBits.Store(math.Float64bits(cfg.Sizing.StopSpec.InitialStop))
 	worker.proposedStopBits.Store(math.Float64bits(cfg.Sizing.StopSpec.InitialStop))
@@ -343,12 +348,20 @@ func (worker *PositionWorker) OnOrderDelta(legType string, orderEvent OrderUpdat
 			prevEntry := worker.filledEntryQty.Load()
 			newEntry := prevEntry + int64(deltaFilled)
 			worker.filledEntryQty.Store(newEntry)
-			if orderEvent.AveragePrice > 0 {
-				worker.entryCostRupees += float64(deltaFilled) * orderEvent.AveragePrice
-				worker.EntryPrice = worker.entryCostRupees / float64(newEntry)
-				worker.entryPriceBits.Store(math.Float64bits(worker.EntryPrice))
-			} else {
-				worker.entryCostRupees += float64(deltaFilled) * worker.EntryPrice
+			fillPx := orderEvent.AveragePrice
+			if fillPx <= 0 {
+				fillPx = worker.EntryPrice
+			}
+			worker.entryCostRupees += float64(deltaFilled) * fillPx
+			worker.EntryPrice = worker.entryCostRupees / float64(newEntry)
+			worker.entryPriceBits.Store(math.Float64bits(worker.EntryPrice))
+
+			if prevEntry == 0 {
+				worker.highWaterMarkBits.Store(math.Float64bits(fillPx))
+				worker.lowWaterMarkBits.Store(math.Float64bits(fillPx))
+				if worker.intendedEntryPrice > 0 {
+					worker.entrySlippagePct = ((fillPx - worker.intendedEntryPrice) / worker.intendedEntryPrice) * 100.0
+				}
 			}
 		}
 		if (orderEvent.Status == OrderStatusRejected || orderEvent.Status == OrderStatusCancelled) && worker.filledEntryQty.Load() == 0 {
@@ -575,6 +588,7 @@ func (worker *PositionWorker) ToDTO() market.ActivePositionDTO {
 
 	ltp := worker.LatestLTP()
 	hwm := math.Float64frombits(worker.highWaterMarkBits.Load())
+	lwm := math.Float64frombits(worker.lowWaterMarkBits.Load())
 	curStop := math.Float64frombits(worker.confirmedStopBits.Load())
 	shadowStop := math.Float64frombits(worker.shadowStopBits.Load())
 	remQty := worker.RemainingQty()
@@ -582,10 +596,16 @@ func (worker *PositionWorker) ToDTO() market.ActivePositionDTO {
 	gear := int(worker.currentGear.Load())
 	hasTranche1Completed := worker.hasTranche1Completed.Load()
 
-	var rMult, mfeR float64
+	var rMult, mfeR, maeR float64
 	if worker.OneR > 0 {
 		rMult = (ltp - entryPx) / worker.OneR
 		mfeR = (hwm - entryPx) / worker.OneR
+		if lwm > 0 {
+			maeR = (lwm - entryPx) / worker.OneR
+			if maeR > 0 {
+				maeR = 0
+			}
+		}
 	}
 
 	var unrealised float64
@@ -644,9 +664,11 @@ func (worker *PositionWorker) ToDTO() market.ActivePositionDTO {
 		BreakevenStop:    math.Round(beStop*100.0) / 100.0,
 		BaseBuffer:       math.Round(worker.BaseBuffer*100.0) / 100.0,
 		HighWaterMark:    math.Round(hwm*100.0) / 100.0,
+		LowWaterMark:     math.Round(lwm*100.0) / 100.0,
 		OneR:             math.Round(worker.OneR*100.0) / 100.0,
 		RMultiple:        math.Round(rMult*100.0) / 100.0,
 		MFERMultiple:     math.Round(mfeR*100.0) / 100.0,
+		MAERMultiple:     math.Round(maeR*100.0) / 100.0,
 		InitialQty:       initQty,
 		RemainingQty:     remQty,
 		ModCount:         mods,
@@ -675,6 +697,8 @@ func (worker *PositionWorker) persistPositionState() {
 	slOrd := worker.slOrderID
 	scaleOrd := worker.scaleOutOrderID
 	closedAt := worker.closedAt
+	intendedEntryPx := worker.intendedEntryPrice
+	entrySlippagePct := worker.entrySlippagePct
 	worker.mu.RUnlock()
 
 	t1Int := 0
@@ -691,10 +715,12 @@ func (worker *PositionWorker) persistPositionState() {
 			position_id, trading_date, mode, symbol, instrument_token, state, pattern_type,
 			entry_order_id, sl_order_id, scale_out_order_id,
 			entry_price, exit_price, initial_stop, current_stop, shadow_stop, breakeven_stop, base_buffer,
-			high_water_mark, one_r, initial_qty, filled_entry_qty, filled_exit_qty,
+			high_water_mark, low_water_mark, one_r, mfe_r, mae_r,
+			intended_entry_price, entry_slippage_pct, exit_slippage_pct,
+			initial_qty, filled_entry_qty, filled_exit_qty,
 			mod_count, current_gear, tranche1_done,
 			realised_gross_pnl, total_charges, realised_net_pnl, exit_reason, opened_at, closed_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(position_id) DO UPDATE SET
 			state = excluded.state,
 			entry_order_id = excluded.entry_order_id,
@@ -706,6 +732,12 @@ func (worker *PositionWorker) persistPositionState() {
 			shadow_stop = excluded.shadow_stop,
 			breakeven_stop = excluded.breakeven_stop,
 			high_water_mark = excluded.high_water_mark,
+			low_water_mark = excluded.low_water_mark,
+			mfe_r = excluded.mfe_r,
+			mae_r = excluded.mae_r,
+			intended_entry_price = excluded.intended_entry_price,
+			entry_slippage_pct = excluded.entry_slippage_pct,
+			exit_slippage_pct = excluded.exit_slippage_pct,
 			initial_qty = excluded.initial_qty,
 			filled_entry_qty = excluded.filled_entry_qty,
 			filled_exit_qty = excluded.filled_exit_qty,
@@ -721,7 +753,9 @@ func (worker *PositionWorker) persistPositionState() {
 		worker.PositionID, worker.TradingDate, worker.Mode, worker.Symbol, worker.Token, dto.State, worker.PatternType,
 		entryOrd, slOrd, scaleOrd,
 		dto.EntryPrice, dto.ExitPrice, dto.InitialStop, dto.CurrentStop, dto.ShadowStop, dto.BreakevenStop, dto.BaseBuffer,
-		dto.HighWaterMark, dto.OneR, dto.InitialQty, worker.filledEntryQty.Load(), worker.filledExitQty.Load(),
+		dto.HighWaterMark, dto.LowWaterMark, dto.OneR, dto.MFERMultiple, dto.MAERMultiple,
+		intendedEntryPx, entrySlippagePct, 0.0,
+		dto.InitialQty, worker.filledEntryQty.Load(), worker.filledExitQty.Load(),
 		dto.ModCount, dto.CurrentGear, t1Int,
 		dto.RealisedGrossPnL, dto.EstimatedCharges, dto.NetTotalPnL, dto.ExitReason,
 		worker.OpenedAt.UTC().Format(time.RFC3339), closedVal,
