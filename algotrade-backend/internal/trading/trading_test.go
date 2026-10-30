@@ -59,14 +59,14 @@ func TestStockMetricsAlignmentAndPhase2Math(t *testing.T) {
 		stock.BidLevels[i] = market.DepthLevel{Price: float32(779.95 - float64(i)*0.05), Qty: 50000}
 	}
 
-	// ₹1,00,000 account
-	s100k := ComputePositionSize(&stock, 775.00, 100000.0, 100000.0, 0.005, 1.0, 1.0)
+	// ₹1,00,000 account (2% heat = ₹2,000)
+	s100k := ComputePositionSize(&stock, 775.00, 100000.0, 100000.0, 0.005, 1.0, 1.0, 2000.0)
 	if !s100k.IsApproved || s100k.Quantity <= 0 {
 		t.Fatalf("expected ₹1L sizing to be approved, got: %+v", s100k)
 	}
 
 	// ₹10 Crore account (must be capped by 20% top-3 ask liquidity = 30,000 shares)
-	s10Cr := ComputePositionSize(&stock, 775.00, 100000000.0, 100000000.0, 0.005, 1.0, 1.0)
+	s10Cr := ComputePositionSize(&stock, 775.00, 100000000.0, 100000000.0, 0.005, 1.0, 1.0, 2000000.0)
 	if !s10Cr.IsApproved || s10Cr.Quantity != 30000 {
 		t.Fatalf("expected ₹10Cr sizing to be liquidity-capped at 30000 shares, got qty=%d", s10Cr.Quantity)
 	}
@@ -96,7 +96,7 @@ func TestPositionWorkerThreeStepScaleOutAndShadowStopMod25(t *testing.T) {
 		stock.BidLevels[i] = market.DepthLevel{Price: float32(219.95 - float64(i)*0.05), Qty: 10000}
 	}
 
-	sizing := ComputePositionSize(&stock, 218.40, 200000.0, 200000.0, 0.005, 1.0, 1.0)
+	sizing := ComputePositionSize(&stock, 218.40, 200000.0, 200000.0, 0.005, 1.0, 1.0, 4000.0)
 	if !sizing.IsApproved {
 		t.Fatalf("sizing rejected: %s", sizing.RejectReason)
 	}
@@ -270,7 +270,7 @@ func TestPhase26FalsificationSuite_BugsB1ToB5(t *testing.T) {
 		bel.BidLevels[i] = market.DepthLevel{Price: float32(219.90 - float64(i)*0.05), Qty: 15000}
 	}
 
-	s10k := ComputePositionSize(&bel, 218.40, 10000.0, 10000.0, 0.005, 0.65, 1.0)
+	s10k := ComputePositionSize(&bel, 218.40, 10000.0, 10000.0, 0.005, 0.65, 1.0, 200.0)
 	if !s10k.IsApproved || s10k.Quantity < 25 {
 		t.Fatalf("Bug B5 Falsified: expected ₹10k capital w/ 5x MIS to approve meaningful quantity even in midday compression, got: %+v", s10k)
 	}
@@ -1326,6 +1326,211 @@ func TestRunawayPriceGuard(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if !worker.isMarketExitPending.Load() {
 		t.Fatalf("Expected isMarketExitPending to be true due to price runaway")
+	}
+}
+
+func TestPositionWorker_OpenRiskAndBreakevenDrop(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var worker *PositionWorker
+	reconciler := NewOrderReconciler(nil, func(posID, legType string, ev OrderUpdateEvent, delta int) {
+		if worker != nil {
+			worker.OnOrderDelta(legType, ev, delta)
+		}
+	})
+	paper := NewPaperBroker(func(ev OrderUpdateEvent) {
+		reconciler.ProcessOrderEvent(ev)
+	})
+
+	stock := &market.StockMetrics{
+		InstrumentToken: 88888,
+		LTP:             100.0,
+		Ask1Price:       100.05,
+		Bid1Price:       99.95,
+		TickSize:        0.05,
+	}
+
+	sizing := SizingDecision{
+		IsApproved:      true,
+		Quantity:        100,
+		DustFloorQty:    5,
+		EntryLimitPrice: 100.0,
+		BreakevenStop:   100.30,
+		StopSpec: StopAndBufferSpec{
+			InitialStop:  98.0,
+			OneR:         2.0,
+			BaseBuffer:   0.5,
+			SignalBarLow: 98.2,
+		},
+	}
+
+	mockBroker := &partialFillMockBroker{PaperBroker: paper}
+	worker = NewPositionWorker(ctx, WorkerConfig{
+		PositionID:           "POS-HEAT-TEST-1",
+		TradingDate:          "2026-10-30",
+		Mode:                 "PAPER",
+		Symbol:               "HEATTEST",
+		Token:                88888,
+		TickSize:             0.05,
+		MISLeverage:          5.0,
+		Sizing:               sizing,
+		EntryTimeoutDuration: 5 * time.Minute,
+		Broker:               mockBroker,
+		PaperBroker:          paper,
+		Reconciler:           reconciler,
+		GetStockPtr:          func() *market.StockMetrics { return stock },
+	})
+
+	if err := worker.Start(); err != nil {
+		t.Fatalf("worker.Start failed: %v", err)
+	}
+
+	// 1. In StateEntryPlaced (0 fills): Open risk = (EntryPrice - InitialStop) * InitialQty = (100 - 98) * 100 = ₹200.00
+	restingOpenRisk := worker.GetOpenRiskRupees()
+	if math.Abs(restingOpenRisk-200.0) > 1e-4 {
+		t.Fatalf("Expected resting open risk ₹200.00, got ₹%.2f", restingOpenRisk)
+	}
+
+	// 2. Partial fill of 60 shares arrives
+	worker.OnOrderDelta("ENTRY", OrderUpdateEvent{
+		OrderID:        worker.entryOrderID,
+		Status:         OrderStatusOpen,
+		FilledQuantity: 60,
+		AveragePrice:   100.0,
+	}, 60)
+
+	filledOpenRisk := worker.GetOpenRiskRupees()
+	// Open risk for 60 filled shares with stop still at InitialStop (98.0) = (100 - 98) * 60 = ₹120.00
+	if math.Abs(filledOpenRisk-120.0) > 1e-4 {
+		t.Fatalf("Expected filled open risk ₹120.00, got ₹%.2f", filledOpenRisk)
+	}
+
+	// 3. Stop loss ratchets up to 99.00 (halfway to breakeven)
+	worker.confirmedStopBits.Store(math.Float64bits(99.00))
+	ratchetedOpenRisk := worker.GetOpenRiskRupees()
+	// Risk = (100 - 99) * 60 = ₹60.00
+	if math.Abs(ratchetedOpenRisk-60.0) > 1e-4 {
+		t.Fatalf("Expected ratcheted open risk ₹60.00, got ₹%.2f", ratchetedOpenRisk)
+	}
+
+	// 4. Stop loss reaches Breakeven (100.30)
+	worker.confirmedStopBits.Store(math.Float64bits(100.30))
+	breakevenOpenRisk := worker.GetOpenRiskRupees()
+	// Risk MUST drop to strictly 0.00 (Heat is released!)
+	if breakevenOpenRisk != 0.0 {
+		t.Fatalf("Expected breakeven open risk to be strictly 0.0, got ₹%.2f", breakevenOpenRisk)
+	}
+
+	// 5. Stop loss moves into Profit Lock (102.00)
+	worker.confirmedStopBits.Store(math.Float64bits(102.00))
+	profitLockOpenRisk := worker.GetOpenRiskRupees()
+	if profitLockOpenRisk != 0.0 {
+		t.Fatalf("Expected profit lock open risk to be strictly 0.0, got ₹%.2f", profitLockOpenRisk)
+	}
+}
+
+func TestContinuousPortfolioHeatEngine(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cm := NewCapitalManager(nil, nil)
+	_ = cm.UpdatePaperCapital(100000.0) // ₹1,00,000 Equity -> 2.0% Max Portfolio Heat = ₹2,000.00
+
+	stock1 := &market.StockMetrics{InstrumentToken: 1001, LTP: 100.0, Ask1Price: 100.05, Bid1Price: 99.95, TickSize: 0.05, MISLeverage: 5.0}
+	stock1.SetSymbol("STOCK1")
+	stock2 := &market.StockMetrics{InstrumentToken: 1002, LTP: 200.0, Ask1Price: 200.05, Bid1Price: 199.95, TickSize: 0.05, MISLeverage: 5.0}
+	stock2.SetSymbol("STOCK2")
+
+	paper := NewPaperBroker(nil)
+	reconciler := NewOrderReconciler(nil, nil)
+
+	// Worker 1: Risk = (100 - 98) * 450 = ₹900.00 (0.90% Heat)
+	w1 := NewPositionWorker(ctx, WorkerConfig{
+		PositionID:   "POS-1",
+		TradingDate:  "2026-10-30",
+		Mode:         "PAPER",
+		Symbol:       "STOCK1",
+		Token:        1001,
+		Sizing:       SizingDecision{Quantity: 450, EntryLimitPrice: 100.0, BreakevenStop: 100.35, StopSpec: StopAndBufferSpec{InitialStop: 98.0, OneR: 2.0}},
+		Broker:       paper,
+		PaperBroker:  paper,
+		Reconciler:   reconciler,
+	})
+	w1.filledEntryQty.Store(450)
+	w1.confirmedStopBits.Store(math.Float64bits(98.0))
+
+	// Worker 2: Risk = (200 - 196) * 225 = ₹900.00 (0.90% Heat)
+	w2 := NewPositionWorker(ctx, WorkerConfig{
+		PositionID:   "POS-2",
+		TradingDate:  "2026-10-30",
+		Mode:         "PAPER",
+		Symbol:       "STOCK2",
+		Token:        1002,
+		Sizing:       SizingDecision{Quantity: 225, EntryLimitPrice: 200.0, BreakevenStop: 200.70, StopSpec: StopAndBufferSpec{InitialStop: 196.0, OneR: 4.0}},
+		Broker:       paper,
+		PaperBroker:  paper,
+		Reconciler:   reconciler,
+	})
+	w2.filledEntryQty.Store(225)
+	w2.confirmedStopBits.Store(math.Float64bits(196.0))
+
+	// 1. Total Open Risk = ₹900 + ₹900 = ₹1,800.00 (1.80% Heat)
+	totalRisk := w1.GetOpenRiskRupees() + w2.GetOpenRiskRupees()
+	if math.Abs(totalRisk-1800.0) > 1e-4 {
+		t.Fatalf("Expected total open risk ₹1800.00, got ₹%.2f", totalRisk)
+	}
+
+	capDTO, _, _ := cm.ComputeCapitalSummary(20000.0, 0.0, totalRisk, 2, 1.0)
+	if math.Abs(capDTO.PortfolioHeatPct-0.018) > 1e-4 {
+		t.Fatalf("Expected PortfolioHeatPct 0.018 (1.8%%), got %.4f", capDTO.PortfolioHeatPct)
+	}
+
+	maxHeat := 0.02 * capDTO.NetEquity // ₹2,000.00
+	remBudget := math.Max(0.0, maxHeat-totalRisk) // ₹200.00 remaining
+	if math.Abs(remBudget-200.0) > 1e-4 {
+		t.Fatalf("Expected remaining heat budget ₹200.00, got ₹%.2f", remBudget)
+	}
+
+	// 2. Candidate 3 requires ₹500 risk -> Candidate risk is clamped by remBudget (₹200)
+	candStock := &market.StockMetrics{InstrumentToken: 1003, LTP: 50.0, Ask1Price: 50.05, Bid1Price: 49.95, TickSize: 0.05, ATR14: 1.50, MISLeverage: 5.0}
+	for i := 0; i < 5; i++ {
+		candStock.AskLevels[i] = market.DepthLevel{Price: float32(50.05 + float64(i)*0.05), Qty: 20000}
+		candStock.BidLevels[i] = market.DepthLevel{Price: float32(49.95 - float64(i)*0.05), Qty: 20000}
+	}
+
+	// Sizing with ₹200 remaining heat budget
+	sizingClamped := ComputePositionSize(candStock, 49.30, capDTO.NetEquity, capDTO.FreeMargin, 0.005, 1.0, 1.0, remBudget)
+	if sizingClamped.IsApproved {
+		// Risk budget must be clamped to ₹200
+		if sizingClamped.RiskBudgetRupees > 200.01 {
+			t.Fatalf("Expected candidate risk budget clamped to <= ₹200, got ₹%.2f", sizingClamped.RiskBudgetRupees)
+		}
+	}
+
+	// 3. Worker 1 trails stop to Breakeven (100.35)!
+	w1.confirmedStopBits.Store(math.Float64bits(100.35))
+
+	// Verify Worker 1 open risk dropped to 0!
+	if w1Risk := w1.GetOpenRiskRupees(); w1Risk != 0.0 {
+		t.Fatalf("Expected Worker 1 open risk to be 0 after trailing to breakeven, got ₹%.2f", w1Risk)
+	}
+
+	// Total heat is now ONLY Worker 2 = ₹900.00 (0.90% Heat)
+	newTotalRisk := w1.GetOpenRiskRupees() + w2.GetOpenRiskRupees()
+	if math.Abs(newTotalRisk-900.0) > 1e-4 {
+		t.Fatalf("Expected total risk to drop to ₹900.00, got ₹%.2f", newTotalRisk)
+	}
+
+	newRemBudget := math.Max(0.0, maxHeat-newTotalRisk) // ₹1,100.00 freed up!
+	if math.Abs(newRemBudget-1100.0) > 1e-4 {
+		t.Fatalf("Expected freed up heat budget ₹1,100.00, got ₹%.2f", newRemBudget)
+	}
+
+	// Now Candidate 3 can be approved with full unconstrained risk budget (₹500 < ₹1,100)
+	sizingFull := ComputePositionSize(candStock, 49.30, capDTO.NetEquity, capDTO.FreeMargin, 0.005, 1.0, 1.0, newRemBudget)
+	if !sizingFull.IsApproved || sizingFull.Quantity <= 0 {
+		t.Fatalf("Expected Candidate 3 to be approved after heat release, got: %+v", sizingFull)
 	}
 }
 

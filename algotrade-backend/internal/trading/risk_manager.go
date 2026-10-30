@@ -244,8 +244,8 @@ func (cm *CapitalManager) UpdateSettings(newSettings ExecutionSettings, activeOp
 	if newSettings.RiskPerTradePct <= 0 || newSettings.RiskPerTradePct > 0.03 {
 		return errors.New("risk_per_trade_pct must be between 0.001 (0.1%) and 0.03 (3.0%)")
 	}
-	if newSettings.MaxOpenPositions < 1 || newSettings.MaxOpenPositions > 15 {
-		return errors.New("max_open_positions must be between 1 and 15")
+	if newSettings.MaxOpenPositions < 1 || newSettings.MaxOpenPositions > 50 {
+		return errors.New("max_open_positions must be between 1 and 50")
 	}
 	if newSettings.PaperCapital >= 500.0 {
 		cm.settings.PaperCapital = newSettings.PaperCapital
@@ -338,6 +338,7 @@ func (cm *CapitalManager) ensureCurrentTradingDateLocked() {
 func (cm *CapitalManager) ComputeCapitalSummary(
 	blockedMargin float64,
 	unrealisedPnL float64,
+	totalOpenRiskRupees float64,
 	activeCount int,
 	sessionSizeMult float64,
 ) (market.CapitalSummaryDTO, market.DailyRiskDTO, float64) {
@@ -393,6 +394,11 @@ func (cm *CapitalManager) ComputeCapitalSummary(
 	deployedExposure := math.Round(blockedMargin * 5.0 * 100.0) / 100.0
 	freeBuyingPower5x := math.Round(freeMargin * 5.0 * 100.0) / 100.0
 
+	var portfolioHeatPct float64
+	if netEquity > 0 {
+		portfolioHeatPct = totalOpenRiskRupees / netEquity
+	}
+
 	capDTO := market.CapitalSummaryDTO{
 		Mode:                 mode,
 		PaperCapital:         cm.settings.PaperCapital,
@@ -409,6 +415,9 @@ func (cm *CapitalManager) ComputeCapitalSummary(
 		NetDayPnL:            math.Round((netPnL+unrealisedPnL)*100.0) / 100.0,
 		RiskPerTradePct:      effRiskPct,
 		CurrentRiskBudget:    math.Round(currentRiskBudget*100.0) / 100.0,
+		TotalOpenRiskRupees:  math.Round(totalOpenRiskRupees*100.0) / 100.0,
+		PortfolioHeatPct:     math.Round(portfolioHeatPct*10000.0) / 10000.0,
+		MaxPortfolioHeatPct:  0.02,
 		MaxOpenPositions:     cm.settings.MaxOpenPositions,
 		ActivePositionsCount: activeCount,
 	}

@@ -203,7 +203,7 @@ func (manager *Manager) OnSecondTick(
 		return strings.Compare(workerA.PositionID, workerB.PositionID)
 	})
 
-	var blockedMargin, unrealisedPnL float64
+	var blockedMargin, unrealisedPnL, totalOpenRiskRupees float64
 	activeDTOs := make([]market.ActivePositionDTO, 0, len(activePositionWorkers))
 	for _, worker := range activePositionWorkers {
 		// Mandatory 15:14 IST Auto-Squareoff Sweep
@@ -214,6 +214,7 @@ func (manager *Manager) OnSecondTick(
 		dto := worker.ToDTO()
 		activeDTOs = append(activeDTOs, dto)
 		unrealisedPnL += dto.UnrealisedPnL
+		totalOpenRiskRupees += worker.GetOpenRiskRupees()
 		qtyForMargin := max(dto.RemainingQty, dto.InitialQty)
 		misLeverage := worker.MISLeverage
 		if misLeverage < 1.0 {
@@ -225,12 +226,21 @@ func (manager *Manager) OnSecondTick(
 	capDTO, dailyRiskDTO, drawdownMult := manager.capitalMgr.ComputeCapitalSummary(
 		blockedMargin,
 		unrealisedPnL,
+		totalOpenRiskRupees,
 		len(activeDTOs),
 		sessionClock.SizeMultiplier,
 	)
 
+	maxPortfolioHeatRupees := 0.02 * capDTO.NetEquity
+	remainingHeatBudgetRupees := math.Max(0.0, maxPortfolioHeatRupees-totalOpenRiskRupees)
+	var portfolioHeatPercentage float64
+	if capDTO.NetEquity > 0 {
+		portfolioHeatPercentage = totalOpenRiskRupees / capDTO.NetEquity
+	}
+	isPortfolioHeatExceeded := totalOpenRiskRupees >= maxPortfolioHeatRupees
+
 	gateStatus := "PAUSED_MANUAL"
-	gateReason := "Auto-Execute is paused. Toggle ARMED to enable autonomous signal "
+	gateReason := "Auto-Execute is paused. Toggle ARMED to enable autonomous signal processing"
 
 	// Always compute Top 5 Candidate Gate Diagnostics for the Trader Cockpit Inspector
 	candidate, pickStatus, pickReason, candidateGateDiagnostics := PickBestLongCandidate(
@@ -242,6 +252,7 @@ func (manager *Manager) OnSecondTick(
 		capDTO.FreeMargin,
 		settings.RiskPerTradePct,
 		drawdownMult,
+		remainingHeatBudgetRupees,
 		manager.isSymbolUnavailable,
 	)
 
@@ -251,9 +262,10 @@ func (manager *Manager) OnSecondTick(
 	} else if settings.Mode == "LIVE" && (manager.kiteService == nil || !manager.kiteService.GetStatus().IsConnected) {
 		gateStatus = "LOCKED_KITE_OFFLINE"
 		gateReason = "Zerodha Kite session is disconnected. Authenticate to trade in LIVE mode."
-	} else if len(activeDTOs) >= settings.MaxOpenPositions {
-		gateStatus = "MAX_POSITIONS_ACTIVE"
-		gateReason = fmt.Sprintf("Max concurrent positions (%d/%d) reached. Trailing active stops.", len(activeDTOs), settings.MaxOpenPositions)
+	} else if isPortfolioHeatExceeded {
+		gateStatus = "LOCKED_MAX_PORTFOLIO_HEAT"
+		gateReason = fmt.Sprintf("Max Portfolio Heat (%.2f%% / 2.00%%) reached. Open risk is ₹%.2f. Awaiting active stops to trail to breakeven.",
+			portfolioHeatPercentage*100.0, totalOpenRiskRupees)
 	} else if settings.AutoExecute {
 		gateStatus = pickStatus
 		gateReason = pickReason
@@ -625,7 +637,7 @@ func (manager *Manager) GetCurrentState() *market.ExecutionStateDTO {
 	now := time.Now()
 	clock := EvaluateGlobalSessionClocks(now, 50.0, 1.0)
 	settings := manager.capitalMgr.GetSettings()
-	capDTO, riskDTO, _ := manager.capitalMgr.ComputeCapitalSummary(0, 0, 0, clock.SizeMultiplier)
+	capDTO, riskDTO, _ := manager.capitalMgr.ComputeCapitalSummary(0, 0, 0, 0, clock.SizeMultiplier)
 	return &market.ExecutionStateDTO{
 		Mode:            settings.Mode,
 		IsAutoExecuteEnabled: settings.AutoExecute,

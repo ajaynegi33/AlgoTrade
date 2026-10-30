@@ -231,6 +231,53 @@ func (worker *PositionWorker) LatestLTP() float64 {
 	return worker.GetLatestLTP()
 }
 
+// GetOpenRiskRupees returns the active downside capital risk of this position in Rupees.
+// Once the trailing stop reaches or exceeds BreakevenStop, open risk drops to 0.0 (releasing portfolio heat).
+func (worker *PositionWorker) GetOpenRiskRupees() float64 {
+	if worker.isClosed.Load() {
+		return 0
+	}
+	remainingShares := worker.GetRemainingQty()
+	filledEntry := int(worker.filledEntryQty.Load())
+
+	// Position already completely flat
+	if filledEntry > 0 && remainingShares <= 0 {
+		return 0
+	}
+
+	entryPrice := worker.GetEntryPrice()
+	confirmedStop := math.Float64frombits(worker.confirmedStopBits.Load())
+	breakevenStop := worker.GetBreakevenStop()
+
+	// Breakeven Heat Release: Once stop is at or above Breakeven, downside risk to account equity is 0!
+	if (breakevenStop > 0 && confirmedStop >= breakevenStop) || confirmedStop >= entryPrice {
+		return 0
+	}
+
+	// Case 1: Entry limit order is still resting unfilled in the order book (reserve initial planned risk)
+	if filledEntry == 0 {
+		worker.mu.RLock()
+		initialQty := worker.InitialQty
+		initialStop := worker.InitialStop
+		worker.mu.RUnlock()
+		if initialQty <= 0 || initialStop <= 0 || initialStop >= entryPrice {
+			return 0
+		}
+		return math.Max(0.0, entryPrice-initialStop) * float64(initialQty)
+	}
+
+	// Case 2: Active filled position with stop still below breakeven
+	if confirmedStop <= 0 || confirmedStop >= entryPrice {
+		return 0
+	}
+	return math.Max(0.0, entryPrice-confirmedStop) * float64(remainingShares)
+}
+
+// OpenRiskRupees is an alias for GetOpenRiskRupees
+func (worker *PositionWorker) OpenRiskRupees() float64 {
+	return worker.GetOpenRiskRupees()
+}
+
 // Start places the entry limit order and launches the dedicated worker goroutine
 func (worker *PositionWorker) Start() error {
 	worker.persistPositionState()

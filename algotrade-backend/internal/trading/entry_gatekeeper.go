@@ -26,7 +26,7 @@ func PickBestLongCandidate(
 	bullishSortedStockIndices []uint16,
 	sectorHealthMap map[uint8]market.SectorHealth,
 	sessionClock market.GlobalSessionClockDTO,
-	netEquity, freeMargin, riskPct, drawdownMult float64,
+	netEquity, freeMargin, riskPct, drawdownMult, remainingHeatBudgetRupees float64,
 	isSymbolUnavailable func(symbol string, token uint32) bool,
 ) (*CandidateSignal, string, string, []market.CandidateGateDiagnosticDTO) {
 	isRegimeValid := true
@@ -184,7 +184,7 @@ func PickBestLongCandidate(
 			continue
 		}
 
-		sizing := ComputePositionSize(stock, signalBarLow, netEquity, freeMargin, riskPct, sizeMult, drawdownMult)
+		sizing := ComputePositionSize(stock, signalBarLow, netEquity, freeMargin, riskPct, sizeMult, drawdownMult, remainingHeatBudgetRupees)
 		candidateDiagnostic.IsSizingApproved = sizing.IsApproved
 		if !sizing.IsApproved {
 			candidateDiagnostic.BlockingReason = sizing.RejectReason

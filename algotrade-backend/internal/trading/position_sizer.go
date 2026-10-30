@@ -106,6 +106,7 @@ func ComputePositionSize(
 	riskPerTradePct float64,
 	sessionSizeMult float64,
 	drawdownMult float64,
+	remainingHeatBudgetRupees float64,
 ) SizingDecision {
 	tickSize := float64(stockMetrics.TickSize)
 	if tickSize <= 0 {
@@ -149,6 +150,16 @@ func ComputePositionSize(
 	// Small-Account Floor (₹500 to ₹25,000): prevent session/drawdown multipliers from starving 5x MIS sizing
 	if netEquity <= 25000.0 {
 		riskBudget = math.Max(riskBudget, netEquity*0.0075)
+	}
+
+	// Cap risk budget by remaining portfolio heat capacity (2.0% equity ceiling)
+	if remainingHeatBudgetRupees > 0 {
+		riskBudget = math.Min(riskBudget, remainingHeatBudgetRupees)
+	} else if remainingHeatBudgetRupees == 0 {
+		return SizingDecision{
+			IsApproved:   false,
+			RejectReason: "portfolio heat capacity exhausted (2.0% equity heat limit reached)",
+		}
 	}
 
 	leverage := float64(stockMetrics.MISLeverage)
