@@ -491,9 +491,9 @@ Execution Engine (Gatekeeper / PositionWorker)
    $$\text{MAE}_R = \frac{\text{LowWaterMark} - \text{EntryPrice}}{\text{OneR}} \quad (\text{Expressed as negative } R)$$
 2. **Shadow Tracking Counterfactuals**:
    Evaluates subsequent 5m bars of rejected setups:
-   - Did price hit $+1.0R$ target first? $\implies \text{Result: WIN\_1R}$.
-   - Did price hit hypothetical stop first? $\implies \text{Result: LOSS\_1R}$.
-   - Neither reached by 15:15 IST? $\implies \text{Result: EOD\_EXPIRE}$.
+   - Did price hit $+1.0R$ target first? $\implies \text{Result: WIN (1R)}$.
+   - Did price hit hypothetical stop first? $\implies \text{Result: LOSS (1R)}$.
+   - Neither reached by 15:15 IST? $\implies \text{Result: EOD EXPIRED}$.
 3. **Slippage & Friction Audit**:
    $$\text{SlippagePct} = \frac{\text{ActualFillPrice} - \text{SignalTriggerPrice}}{\text{SignalTriggerPrice}} \times 100\%$$
    Flags illiquid equities where average entry slippage exceeds $0.08\%$.

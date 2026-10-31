@@ -278,16 +278,16 @@ $$\text{EV} = \left( P_{\text{win}} \times R_{\text{win}} \right) - \left( (1.0 
 
 ### 2. Relative Volume Pace ($\text{RVOL}_{\text{pace}}$)
 Instead of comparing total session volume to yesterday, AlgoTrade compares the current 5-minute bar to the exact time-matched historical average:
-$$\text{RVOL}_{\text{pace}}(t) = \frac{V_{\text{current\_5m\_bar}}(t)}{\frac{1}{K} \sum_{d=1}^{K} V_{5m}(d, t)}$$
+$$\text{RVOL}_{\text{pace}}(t) = \frac{V_{5\text{m}}(t)}{\frac{1}{K} \sum_{d=1}^{K} V_{5\text{m}}(d, t)}$$
 - An $\text{RVOL}_{\text{pace}} \ge 1.5\times$ at 10:15 AM means the stock is trading $150\%$ of its normal 10:15 AM institutional volume.
 
 ### 3. Universe Market Breadth Ratio
 $$\text{Breadth Ratio} = \frac{\sum_{i=1}^{N_{\text{active}}} \mathbb{I}(P_{\text{LTP}, i} > \text{VWAP}_i)}{N_{\text{active}}}$$
 Where $\mathbb{I}(\cdot)$ is the indicator function returning $1$ if true, $0$ if false.
 
-### 4. Mathematical Position Sizing ($1\%$ Fixed Risk)
-Position size is dynamically computed based on the volatility of the stop loss, ensuring no single trade ever risks more than $1\%$ of capital:
-$$\text{Quantity} = \left\lfloor \frac{\text{Account Capital} \times 0.01}{|P_{\text{entry}} - P_{\text{stop\_loss}}|} \right\rfloor$$
+### 4. Mathematical Position Sizing (1% Fixed Risk)
+Position size is dynamically computed based on the volatility of the stop loss, ensuring no single trade ever risks more than 1% of capital:
+$$\text{Quantity} = \left\lfloor \frac{\text{Account Capital} \times 0.01}{|P_{\text{entry}} - P_{\text{stop}}|} \right\rfloor$$
 
 ### 5. Excursion Analysis (MFE / MAE)
 $$\text{MFE}_R = \frac{\text{HighWaterMark} - P_{\text{entry}}}{\text{OneR}}, \quad \text{MAE}_R = \frac{\text{LowWaterMark} - P_{\text{entry}}}{\text{OneR}}$$
