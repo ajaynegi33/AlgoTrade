@@ -647,10 +647,29 @@ func (capitalManager *CapitalManager) SyncUniverseLeverages(ctx context.Context)
 			})
 		}
 
-		margins, marginErr := client.GetOrderMargins(kiteconnect.GetMarginParams{
-			OrderParams: params,
-			Compact:     true,
-		})
+		var margins []kiteconnect.OrderMargins
+		var marginErr error
+
+		rateLimiter := capitalManager.kiteService.GetRateLimiter()
+		if rateLimiter != nil {
+			responseInterface, executeErr := rateLimiter.ExecuteBackgroundSync(ctx, func() (interface{}, error) {
+				return client.GetOrderMargins(kiteconnect.GetMarginParams{
+					OrderParams: params,
+					Compact:     true,
+				})
+			})
+			if executeErr != nil {
+				marginErr = executeErr
+			} else if castMargins, isMargins := responseInterface.([]kiteconnect.OrderMargins); isMargins {
+				margins = castMargins
+			}
+		} else {
+			margins, marginErr = client.GetOrderMargins(kiteconnect.GetMarginParams{
+				OrderParams: params,
+				Compact:     true,
+			})
+		}
+
 		if marginErr != nil {
 			slog.Warn("GetOrderMargins batch failed, keeping cached SQLite MIS leverages", "error", marginErr)
 			return
@@ -677,7 +696,9 @@ func (capitalManager *CapitalManager) SyncUniverseLeverages(ctx context.Context)
 			_ = tx.Commit()
 		}
 
-		time.Sleep(350 * time.Millisecond)
+		if rateLimiter == nil {
+			time.Sleep(350 * time.Millisecond)
+		}
 	}
 
 	if updatedCount > 0 {

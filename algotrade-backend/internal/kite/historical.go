@@ -1,6 +1,7 @@
 package kite
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ajaynegi33/AlgoTrade/internal/kiteratelimiter"
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 )
 
@@ -140,24 +142,46 @@ func (service *HistoricalService) SeedStockBaselines(token uint32, lastPrice flo
 		return service.generateFallbackProfile(token, lastPrice), nil
 	}
 
-	// Wait for rate limiter (2.5 req/s)
-	if service.rateTicker != nil {
-		<-service.rateTicker.C
-	}
-
 	// Fetch 30 calendar days of 5-minute candles (guarantees >= 20 trading days + today's intraday bars)
 	toTime := time.Now()
 	fromTime := toTime.AddDate(0, 0, -30)
 
-	candles, err := client.GetHistoricalData(int(token), "5minute", fromTime, toTime, false, false)
-	if err != nil {
-		errStr := err.Error()
+	var candles []kiteconnect.HistoricalData
+	var fetchErr error
+
+	var rateLimiter *kiteratelimiter.CentralKiteDispatcher
+	if service.kiteService != nil {
+		rateLimiter = service.kiteService.GetRateLimiter()
+	}
+
+	if rateLimiter != nil {
+		contextWithTimeout, cancelTimeout := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancelTimeout()
+
+		responseInterface, executeErr := rateLimiter.ExecuteHistorical(contextWithTimeout, func() (interface{}, error) {
+			return client.GetHistoricalData(int(token), "5minute", fromTime, toTime, false, false)
+		})
+		if executeErr != nil {
+			fetchErr = executeErr
+		} else if castCandles, isCandles := responseInterface.([]kiteconnect.HistoricalData); isCandles {
+			candles = castCandles
+		}
+	} else {
+		// Wait for fallback rate limiter (2.5 req/s)
+		if service.rateTicker != nil {
+			<-service.rateTicker.C
+		}
+		candles, fetchErr = client.GetHistoricalData(int(token), "5minute", fromTime, toTime, false, false)
+	}
+
+	if fetchErr != nil {
+		errStr := fetchErr.Error()
 		if strings.Contains(errStr, "403") || strings.Contains(strings.ToLower(errStr), "permission") {
 			service.setHealthy(false, "Kite Historical API returned 403 Permission Denied — verify Historical API toggle in Kite Developer Console")
 		} else {
-			service.setHealthy(false, fmt.Sprintf("Kite Historical error: %v", err))
+			service.setHealthy(false, fmt.Sprintf("Kite Historical error: %v", fetchErr))
 		}
-		slog.Warn("Failed to fetch historical data from Kite, using fallback/cached baseline", "token", token, "error", err)
+		slog.Warn("Failed to fetch historical data from Kite, using fallback/cached baseline", "token", token, "error", fetchErr)
 		if cached != nil {
 			return cached, nil
 		}

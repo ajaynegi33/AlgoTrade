@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ajaynegi33/AlgoTrade/internal/config"
+	"github.com/ajaynegi33/AlgoTrade/internal/kiteratelimiter"
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 )
 
@@ -88,6 +89,7 @@ type Service struct {
 	db              *sql.DB
 	client          *kiteconnect.Client
 	httpClient      *http.Client
+	rateLimiter     *kiteratelimiter.CentralKiteDispatcher
 	session         *SessionInfo
 	onAuthenticated []func()
 	mu              sync.RWMutex
@@ -112,10 +114,13 @@ func NewService(cfg *config.Config, db *sql.DB) *Service {
 		Timeout:   7 * time.Second,
 	}
 
+	rateLimiter := kiteratelimiter.NewCentralKiteDispatcher()
+
 	service := &Service{
-		cfg:        cfg,
-		db:         db,
-		httpClient: httpClient,
+		cfg:         cfg,
+		db:          db,
+		httpClient:  httpClient,
+		rateLimiter: rateLimiter,
 	}
 
 	if cfg.IsKiteConfigured() {
@@ -130,6 +135,18 @@ func NewService(cfg *config.Config, db *sql.DB) *Service {
 	}
 
 	return service
+}
+
+// GetRateLimiter returns the centralized Kite channel rate limiter
+func (service *Service) GetRateLimiter() *kiteratelimiter.CentralKiteDispatcher {
+	return service.rateLimiter
+}
+
+// Stop terminates the centralized rate limiter and background workers
+func (service *Service) Stop() {
+	if service.rateLimiter != nil {
+		service.rateLimiter.Stop()
+	}
 }
 
 // RegisterOnAuthenticated registers a callback invoked whenever a Kite session becomes active
@@ -343,29 +360,42 @@ func (service *Service) GetEquityMargins() (*EquityMargins, error) {
 	client := service.client
 	session := service.session
 	configured := service.cfg.IsKiteConfigured()
+	dispatcher := service.rateLimiter
 	service.mu.RUnlock()
 
 	if !configured || client == nil || session == nil || session.AccessToken == "" || isSessionExpired(session.CreatedAt) {
 		return nil, ErrNoSession
 	}
 
-	margins, err := client.GetUserMargins()
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch equity margins: %w", err)
+	var rawMargins kiteconnect.AllMargins
+	if dispatcher != nil {
+		result, dispatchError := dispatcher.ExecuteAccountSync(context.Background(), func() (interface{}, error) {
+			return client.GetUserMargins()
+		})
+		if dispatchError != nil {
+			return nil, fmt.Errorf("failed to fetch equity margins: %w", dispatchError)
+		}
+		rawMargins = result.(kiteconnect.AllMargins)
+	} else {
+		var err error
+		rawMargins, err = client.GetUserMargins()
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch equity margins: %w", err)
+		}
 	}
 
 	return &EquityMargins{
-		Net:            margins.Equity.Net,
-		AvailableCash:  margins.Equity.Available.Cash,
-		Collateral:     margins.Equity.Available.Collateral,
-		AdHocMargin:    margins.Equity.Available.AdHocMargin,
-		IntradayPayin:  margins.Equity.Available.IntradayPayin,
-		OpeningBalance: margins.Equity.Available.OpeningBalance,
-		LiveBalance:    margins.Equity.Available.LiveBalance,
-		UtilisedDebits: margins.Equity.Used.Debits,
-		UtilisedPayout: margins.Equity.Used.Payout,
-		M2MRealised:    margins.Equity.Used.M2MRealised,
-		M2MUnrealised:  margins.Equity.Used.M2MUnrealised,
+		Net:            rawMargins.Equity.Net,
+		AvailableCash:  rawMargins.Equity.Available.Cash,
+		Collateral:     rawMargins.Equity.Available.Collateral,
+		AdHocMargin:    rawMargins.Equity.Available.AdHocMargin,
+		IntradayPayin:  rawMargins.Equity.Available.IntradayPayin,
+		OpeningBalance: rawMargins.Equity.Available.OpeningBalance,
+		LiveBalance:    rawMargins.Equity.Available.LiveBalance,
+		UtilisedDebits: rawMargins.Equity.Used.Debits,
+		UtilisedPayout: rawMargins.Equity.Used.Payout,
+		M2MRealised:    rawMargins.Equity.Used.M2MRealised,
+		M2MUnrealised:  rawMargins.Equity.Used.M2MUnrealised,
 	}, nil
 }
 
@@ -411,9 +441,21 @@ func (service *Service) RawModifyOrderPUT(
 	request.Header.Set("X-Kite-Version", "3")
 	request.Header.Set("Authorization", fmt.Sprintf("token %s:%s", session.APIKey, session.AccessToken))
 
-	responseObj, err := service.httpClient.Do(request)
-	if err != nil {
-		return "", fmt.Errorf("kite modify PUT network error: %w", err)
+	var responseObj *http.Response
+	if service.rateLimiter != nil {
+		result, dispatchError := service.rateLimiter.ExecuteEmergencyOrder(ctx, func() (interface{}, error) {
+			return service.httpClient.Do(request)
+		})
+		if dispatchError != nil {
+			return "", fmt.Errorf("kite modify PUT rate limiter error: %w", dispatchError)
+		}
+		responseObj = result.(*http.Response)
+	} else {
+		var err error
+		responseObj, err = service.httpClient.Do(request)
+		if err != nil {
+			return "", fmt.Errorf("kite modify PUT network error: %w", err)
+		}
 	}
 	defer responseObj.Body.Close()
 
