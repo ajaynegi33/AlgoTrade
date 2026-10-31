@@ -233,8 +233,9 @@ func ComputePositionSize(
 	}
 
 	// Marginal viable partial-fill dust floor:
-	// A small partial fill is viable if expected profit at +1R covers the flat ₹20 exit brokerage + taxes (≈ ₹25)
-	marginalExitFriction := 25.0
+	// A small partial fill is viable if expected profit at +1R covers actual round-trip statutory friction for that quantity
+	chargesForOneShare := CalculateRoundTripCharges(entryLimitPrice, target1RPrice, 1).TotalCharges
+	marginalExitFriction := math.Max(chargesForOneShare, 20.0) // At least the flat ₹20 exit brokerage fee
 	effectiveOneR := math.Max(0.50, stopSpec.OneR)
 	marginalViableQty := int(math.Ceil(marginalExitFriction / effectiveOneR))
 	// Dust floor must never exceed 15% of allocated position size or 1 share minimum

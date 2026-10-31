@@ -200,12 +200,14 @@ func (worker *PositionWorker) GetBreakevenStop() float64 {
 	return math.Float64frombits(worker.breakevenStopBits.Load())
 }
 
+// GetInitialQty returns the original allocated position quantity (thread-safe accessor for test assertions and diagnostics)
 func (worker *PositionWorker) GetInitialQty() int {
 	worker.mu.RLock()
 	defer worker.mu.RUnlock()
 	return worker.InitialQty
 }
 
+// GetSLOrderID returns the current broker stop-loss order identifier (thread-safe accessor for test assertions and diagnostics)
 func (worker *PositionWorker) GetSLOrderID() string {
 	worker.mu.RLock()
 	defer worker.mu.RUnlock()
@@ -277,6 +279,9 @@ func (worker *PositionWorker) Start() error {
 		stockPtr = worker.getStockPtr()
 	}
 
+	// Launch worker loop first so it is immediately receptive to order fills and channel notifications
+	go worker.workerLoop()
+
 	orderID, err := worker.broker.PlaceLimitBuy(worker.ctx, worker.Symbol, worker.Token, worker.InitialQty, worker.EntryPrice, stockPtr)
 	if err != nil {
 		worker.mu.Lock()
@@ -287,6 +292,7 @@ func (worker *PositionWorker) Start() error {
 		worker.isClosed.Store(true)
 		worker.persistPositionState()
 		worker.notifyClosed()
+		worker.cancel() // Cleanly terminate workerLoop
 		return err
 	}
 
@@ -296,8 +302,6 @@ func (worker *PositionWorker) Start() error {
 
 	worker.reconciler.RegisterOrder(orderID, worker.PositionID, "ENTRY", worker.Symbol, "BUY", "LIMIT", worker.InitialQty, worker.EntryPrice, 0, OrderStatusOpen)
 	worker.persistPositionState()
-
-	go worker.workerLoop()
 	return nil
 }
 
@@ -542,17 +546,19 @@ func (worker *PositionWorker) handleEntryTimeout() {
 	worker.InitialQty = filled
 	worker.BreakevenStop = beStop
 	hasSL := worker.slOrderID != ""
+	slOrderID := worker.slOrderID
 	slQty := worker.slOrderQty
+	workerState := worker.state
 	worker.mu.Unlock()
 	worker.breakevenStopBits.Store(math.Float64bits(beStop))
 
 	if !hasSL {
 		worker.ensureInitialSLPlaced()
-	} else if filled > slQty && !worker.hasTranche1Completed.Load() && worker.state != StateScaleOutPending && worker.modCount.Load() < MaxSafetyModifications {
+	} else if filled > slQty && !worker.hasTranche1Completed.Load() && workerState != StateScaleOutPending && worker.modCount.Load() < MaxSafetyModifications {
 		curStop := math.Float64frombits(worker.confirmedStopBits.Load())
 		limitPx := ComputeSellSLLimitPrice(curStop, worker.TickSize)
 		ltp := worker.LatestLTP()
-		if err := worker.broker.ModifySLOrder(worker.ctx, worker.slOrderID, filled, curStop, limitPx, ltp, worker.TickSize); err == nil {
+		if err := worker.broker.ModifySLOrder(worker.ctx, slOrderID, filled, curStop, limitPx, ltp, worker.TickSize); err == nil {
 			worker.mu.Lock()
 			worker.slOrderQty = filled
 			worker.mu.Unlock()

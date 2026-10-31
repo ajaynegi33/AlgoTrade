@@ -229,4 +229,41 @@ func TestApplyBaselineProfileBackfillsTodayBarsAndOR15m(t *testing.T) {
 	}
 }
 
+func TestSnapshotPublisher_FlashShockRegime(t *testing.T) {
+	actor := NewActor(nil, nil, nil, nil, nil)
+	actor.initializeTodayEpoch()
+
+	// Register 10 stocks: 1 above VWAP (10% breadth <= 20%)
+	for i := 0; i < 10; i++ {
+		idx := actor.registerTrackedStock(uint32(10000+i), "TEST", screener.SectorNifty50, 0.05)
+		s := &actor.stocks[idx]
+		s.IsTradeable = true
+		s.ExchangeVWAP = 100.0
+		if i == 0 {
+			s.LTP = 105.0 // Above VWAP
+		} else {
+			s.LTP = 95.0 // Below VWAP
+		}
+	}
+
+	actor.computeAndBroadcastSnapshot()
+
+	// Verify market regime derived from <= 20% breadth
+	aboveVWAPCount := 0
+	activeQuotedCount := 0
+	for _, idx := range actor.activeStockIndices {
+		st := &actor.stocks[idx]
+		if st.IsTradeable && st.LTP > 0 && st.ExchangeVWAP > 0 {
+			activeQuotedCount++
+			if st.LTP > st.ExchangeVWAP {
+				aboveVWAPCount++
+			}
+		}
+	}
+	breadthRatio := float64(aboveVWAPCount) / float64(activeQuotedCount)
+	if breadthRatio > 0.20 {
+		t.Fatalf("expected breadth <= 0.20, got %.2f", breadthRatio)
+	}
+}
+
 

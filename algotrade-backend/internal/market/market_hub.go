@@ -432,12 +432,28 @@ func (actor *Actor) applyBaselineProfile(profile *kite.StockBaselineProfile) {
 			}
 		}
 
-		// Compute initial 9 EMA across today's seeded 5m bars
+		// Compute initial 9 EMA strictly across completed 5m bars.
+		// If market is currently open (09:15 - 15:30), the bar at maxSlot is actively forming
+		// and will be finalized at rollover in tick_ingestion. Only completed bars seed runningEMA.
 		const alphaEMA9 = 2.0 / (9.0 + 1.0)
 		var runningEMA float64
 		var previousEMA float64
 		var completedBarCount int
-		for barIndex := 0; barIndex <= maxSlot && barIndex < 75; barIndex++ {
+
+		completedBarLimit := maxSlot - 1
+		nowIST := time.Now().In(istZone)
+		minsSince0915 := (nowIST.Hour()*60 + nowIST.Minute()) - (9*60 + 15)
+		if minsSince0915 >= 0 && minsSince0915 < 375 {
+			activeSlot := minsSince0915 / 5
+			if completedBarLimit >= activeSlot {
+				completedBarLimit = activeSlot - 1
+			}
+		} else if minsSince0915 >= 375 {
+			// Post-market: all bars up to maxSlot are completed
+			completedBarLimit = maxSlot
+		}
+
+		for barIndex := 0; barIndex <= completedBarLimit && barIndex < 75; barIndex++ {
 			closingPrice := s.SessionBars[barIndex].Close
 			if closingPrice > 0 {
 				completedBarCount++

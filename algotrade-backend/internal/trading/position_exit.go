@@ -215,32 +215,6 @@ func (worker *PositionWorker) executeThreeStepScaleOut() {
 		}
 	}
 
-	if remainingQuantity <= 1 {
-		// 1-share position cannot be halved (remainingQuantity / 2 = 0).
-		// Mark Tranche 1 as completed so it does not loop, and let the 1 share ride with the runner trailing stop.
-		worker.hasTranche1Completed.Store(true)
-		worker.isTranche1Pending.Store(false)
-		worker.mu.Lock()
-		worker.state = StateProtectedActive
-		worker.mu.Unlock()
-
-		// Ensure stop is immediately ratcheted to Tax-Free Breakeven if not already higher
-		confirmedStopLossPrice := math.Float64frombits(worker.confirmedStopBits.Load())
-		breakevenStopPrice := worker.GetBreakevenStop()
-		lastTradedPrice := worker.LatestLTP()
-		if breakevenStopPrice > confirmedStopLossPrice && worker.modCount.Load() < MaxSafetyModifications {
-			breakevenLimitPrice := ComputeSellSLLimitPrice(breakevenStopPrice, worker.TickSize)
-			if err := worker.broker.ModifySLOrder(worker.ctx, stopLossOrderID, remainingQuantity, breakevenStopPrice, breakevenLimitPrice, lastTradedPrice, worker.TickSize); err == nil {
-				worker.modCount.Add(1)
-				worker.lastModUnixMs.Store(time.Now().UnixMilli())
-				worker.confirmedStopBits.Store(math.Float64bits(breakevenStopPrice))
-				worker.shadowStopBits.Store(math.Float64bits(breakevenStopPrice))
-			}
-		}
-		worker.persistPositionState()
-		return
-	}
-
 	scaleOutQty := remainingQuantity / 2
 	runnerQty := remainingQuantity - scaleOutQty
 	confirmedStopLossPrice := math.Float64frombits(worker.confirmedStopBits.Load())

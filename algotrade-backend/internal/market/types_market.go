@@ -18,7 +18,7 @@ type MarketPulseDTO struct {
 	BankNiftyLTP           float64 `json:"banknifty_ltp"`
 	BankNiftyChangePercent float64 `json:"banknifty_change_percent"`
 	BreadthAboveVWAP       float64 `json:"breadth_above_vwap"` // Percentage of universe stocks > VWAP
-	MarketRegime           string  `json:"market_regime"`      // "BULLISH_EXPANSION", "BEARISH_EXPANSION", "SIDEWAYS_CHOP"
+	MarketRegime           string  `json:"market_regime"`      // "BULLISH_EXPANSION", "BEARISH_EXPANSION", "SIDEWAYS_CHOP", "FLASH_SHOCK"
 }
 
 // SectorRankDTO represents a sector's real-time performance on Dalal Street

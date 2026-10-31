@@ -40,10 +40,12 @@ func (actor *Actor) computeAndBroadcastSnapshot() {
 	// 2. Market Regime Context (Derived purely from universe breadth)
 	regime := "SIDEWAYS_CHOP"
 	switch {
-	case breadthRatio >= 0.58:
-		regime = "BULLISH_EXPANSION"
+	case breadthRatio <= 0.20:
+		regime = "FLASH_SHOCK"
 	case breadthRatio <= 0.40:
 		regime = "BEARISH_EXPANSION"
+	case breadthRatio >= 0.58:
+		regime = "BULLISH_EXPANSION"
 	}
 
 	// 3. Compute Sector Performance & Sector Restrictions (Granular bottom-up from tradeable stocks)
@@ -146,6 +148,8 @@ func (actor *Actor) computeAndBroadcastSnapshot() {
 	}
 
 	// 4. Quant Score Calculation for all active equities
+	// Note: CalculateBearishScore provides dedicated UI telemetry for the Trader Cockpit's
+	// "Top Bearish Outliers" panel and operates independently of the long-only (AT26LONG) engine.
 	for _, stockIndex := range actor.activeStockIndices {
 		stockMetric := &actor.stocks[stockIndex]
 		CalculateBullishScore(stockMetric, breadthRatio)

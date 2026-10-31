@@ -1916,5 +1916,89 @@ func TestPositionWorker_SingleShareScaleOutProtection(t *testing.T) {
 	}
 }
 
+func TestMacroRegime_FlashShockLockout(t *testing.T) {
+	mgr := NewManager(nil, nil, nil, nil)
+	defer mgr.Stop()
+
+	mgr.capitalMgr.UpdateSettings(ExecutionSettings{
+		Mode:            "PAPER",
+		RiskPerTradePct: 0.0075,
+		AutoExecute:     true,
+	}, 1)
+
+	var stocks [512]market.StockMetrics
+	pulse := market.MarketPulseDTO{
+		BreadthAboveVWAP: 15.0,
+		MarketRegime:     "FLASH_SHOCK",
+	}
+
+	state := mgr.OnSecondTick(&stocks, nil, nil, nil, pulse)
+	if !state.IsMacroShockActive {
+		t.Fatalf("expected IsMacroShockActive=true when regime is FLASH_SHOCK")
+	}
+	if state.GateStatus != "LOCKED_MACRO_SHOCK" {
+		t.Fatalf("expected GateStatus=LOCKED_MACRO_SHOCK, got %s", state.GateStatus)
+	}
+}
+
+func TestPaperBroker_FastRLockHotPath(t *testing.T) {
+	broker := NewPaperBroker(nil)
+
+	stock := &market.StockMetrics{
+		InstrumentToken: 55555,
+		LTP:             100.0,
+		Ask1Price:       100.05,
+		Bid1Price:       99.95,
+	}
+
+	// 1. Tick for token with zero resting orders: must complete near-instantly without panic
+	broker.EvaluateTickForToken(stock)
+
+	// 2. Place resting BUY limit order @ 95.0 (well below LTP 100.0)
+	ctx := context.Background()
+	_, err := broker.PlaceLimitBuy(ctx, "TEST", 55555, 10, 95.0, stock)
+	if err != nil {
+		t.Fatalf("PlaceLimitBuy failed: %v", err)
+	}
+
+	// 3. Tick with LTP 100.0: should NOT trigger fill
+	broker.EvaluateTickForToken(stock)
+	orders, _ := broker.FetchOrders(ctx)
+	if len(orders) != 1 || orders[0].Status != OrderStatusOpen {
+		t.Fatalf("expected order to remain OPEN, got status=%s", orders[0].Status)
+	}
+
+	// 4. Tick with LTP 94.5: should trigger fill
+	stock.LTP = 94.5
+	broker.EvaluateTickForToken(stock)
+	orders, _ = broker.FetchOrders(ctx)
+	if len(orders) != 1 || orders[0].Status != OrderStatusComplete {
+		t.Fatalf("expected order to become COMPLETE, got status=%s", orders[0].Status)
+	}
+}
+
+func TestDynamicMarginalFriction_TaxCalculator(t *testing.T) {
+	stock := market.StockMetrics{
+		InstrumentToken: 99999,
+		LTP:             1000.0,
+		ATR14:           15.0,
+		TickSize:        0.05,
+		CurrentBarIdx:   5,
+	}
+	stock.SessionBars[5] = market.OHLCVBar{Open: 1000.0, High: 1010.0, Low: 995.0, Close: 1000.0}
+
+	sizing := ComputePositionSize(&stock, 995.0, 500000.0, 500000.0, 0.0075, 1.0, 1.0, 10000.0)
+	if !sizing.IsApproved {
+		t.Fatalf("expected sizing to be approved, got reject: %s", sizing.RejectReason)
+	}
+	if sizing.DustFloorQty < 1 {
+		t.Fatalf("expected dust floor qty >= 1, got %d", sizing.DustFloorQty)
+	}
+	expectedMinCharges := CalculateRoundTripCharges(sizing.EntryLimitPrice, sizing.EntryLimitPrice+sizing.StopSpec.OneR, 1).TotalCharges
+	if expectedMinCharges <= 0 {
+		t.Fatalf("expected non-zero charges calculation for 1 share")
+	}
+}
+
 
 

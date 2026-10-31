@@ -176,7 +176,8 @@ internal/market/market_hub.go: Actor.runLoop()
 | :--- | :--- | :--- | :--- |
 | **Breadth Sample Viability**| `activeQuotedCount` | `activeQuotedCount > 0` | Fallback breadth to $0.50$ (neutral) |
 | **Bullish Expansion State** | `breadthRatio` | $\text{breadthRatio} \ge 0.58$ | Classify `BULLISH_EXPANSION` |
-| **Bearish Expansion State** | `breadthRatio` | $\text{breadthRatio} \le 0.40$ | Classify `BEARISH_EXPANSION` |
+| **Bearish Expansion State** | `breadthRatio` | $0.20 < \text{breadthRatio} \le 0.40$ | Classify `BEARISH_EXPANSION` |
+| **Macro Flash Shock State** | `breadthRatio` | $\text{breadthRatio} \le 0.20$ | Classify `FLASH_SHOCK` & Lock Gate (`LOCKED_MACRO_SHOCK`) |
 | **Sector Weak Breadth Lock**| `secPerf.breadth` | $\text{breadth} < 40.0\%$ | Mark `IsRestricted = true` ("Weak Breadth") |
 | **Sector Heavy Dump Lock**  | `secPerf.avgChg` | $\text{avgChg} < -0.50\%$ | Mark `IsRestricted = true` ("Heavy Selling Pressure") |
 | **WebSocket Broadcast Guard**| `actor.wsHub.ClientCount()` | `== 0` | Skip DTO allocations & network serialization |

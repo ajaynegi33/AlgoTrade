@@ -14,7 +14,6 @@ import (
 
 	"github.com/ajaynegi33/AlgoTrade/internal/kite"
 	"github.com/ajaynegi33/AlgoTrade/internal/market"
-	"github.com/ajaynegi33/AlgoTrade/internal/monitoring"
 )
 
 // Manager orchestrates Signal Selection, Capital Sizing, PositionWorkers, Reconciler, and 15:14 IST Auto-Squareoff
@@ -260,6 +259,9 @@ func (manager *Manager) OnSecondTick(
 	if dailyRiskDTO.IsCircuitBreakerLocked {
 		gateStatus = "LOCKED_CIRCUIT_BREAKER"
 		gateReason = dailyRiskDTO.LockReason
+	} else if pulse.MarketRegime == "FLASH_SHOCK" {
+		gateStatus = "LOCKED_MACRO_SHOCK"
+		gateReason = "Universe breadth collapsed <= 20.0%. Catastrophic liquidation active — new entries prohibited."
 	} else if settings.Mode == "LIVE" && (manager.kiteService == nil || !manager.kiteService.GetStatus().IsConnected) {
 		gateStatus = "LOCKED_KITE_OFFLINE"
 		gateReason = "Zerodha Kite session is disconnected. Authenticate to trade in LIVE mode."
@@ -267,23 +269,6 @@ func (manager *Manager) OnSecondTick(
 		gateStatus = "LOCKED_MAX_PORTFOLIO_HEAT"
 		gateReason = fmt.Sprintf("Max Portfolio Heat (%.2f%% / 2.00%%) reached. Open risk is ₹%.2f. Awaiting active stops to trail to breakeven.",
 			portfolioHeatPercentage*100.0, totalOpenRiskRupees)
-		if candidate != nil {
-			if collector := monitoring.GetCollector(); collector != nil {
-				collector.EmitShadowSignal(monitoring.ShadowSignalEvent{
-					TradingDate:      time.Now().Format("2006-01-02"),
-					SignalTime:       time.Now(),
-					Symbol:           candidate.Symbol,
-					InstrumentToken:  candidate.Token,
-					PatternType:      candidate.PatternType,
-					BullishScore:     candidate.BullishScore,
-					RejectionReason:  "Max Portfolio Heat 2.0% Cap Reached",
-					EntryPrice:       candidate.Sizing.EntryLimitPrice,
-					HypotheticalStop: candidate.Sizing.StopSpec.InitialStop,
-					OneR:             candidate.Sizing.StopSpec.OneR,
-					Target1R:         candidate.Sizing.EntryLimitPrice + candidate.Sizing.StopSpec.OneR,
-				})
-			}
-		}
 	} else if settings.AutoExecute {
 		gateStatus = pickStatus
 		gateReason = pickReason
