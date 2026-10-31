@@ -1,4 +1,4 @@
-# AlgoTrade ⚡
+# AlgoTrade - Long cash equity intraday
 ### Institutional-Grade Quantitative Trading & Real-Time Risk Execution Platform
 
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go)](https://go.dev/)
