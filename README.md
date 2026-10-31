@@ -26,13 +26,14 @@
 1. [What is AlgoTrade? (Intuitive Overview)](#what-is-algotrade-intuitive-overview)
 2. [Why Retail Traders Lose Money & How AlgoTrade Solves It](#why-retail-traders-lose-money--how-algotrade-solves-it)
 3. [The Trading Edge & Core Strategy Playbook](#the-trading-edge--core-strategy-playbook)
-4. [Mathematical Foundations & Verification Formulas](#mathematical-foundations--verification-formulas)
-5. [System Architecture & Concurrency Model (For Engineers)](#system-architecture--concurrency-model-for-engineers)
-6. [Risk Management & Safety Verification Checkpoints](#risk-management--safety-verification-checkpoints)
-7. [Go Runtime Tracer Flight Recorder & Diagnostics](#go-runtime-tracer-flight-recorder--diagnostics)
-8. [End-of-Day (EOD) Optimization Engine](#end-of-day-eod-optimization-engine)
-9. [Quickstart & Setup Guide](#quickstart--setup-guide)
-10. [License & Attribution](#license--attribution)
+4. [Intraday Stock Selection, Playbook Timing & Pre-Trade Gatekeeping](#intraday-stock-selection-playbook-timing--pre-trade-gatekeeping)
+5. [Mathematical Foundations & Formulas](#mathematical-foundations--formulas)
+6. [System Architecture & Concurrency Model (For Engineers)](#system-architecture--concurrency-model-for-engineers)
+7. [Risk Management & Safety Verification Checkpoints](#risk-management--safety-verification-checkpoints)
+8. [Go Runtime Tracer Flight Recorder & Diagnostics](#go-runtime-tracer-flight-recorder--diagnostics)
+9. [End-of-Day (EOD) Optimization Engine](#end-of-day-eod-optimization-engine)
+10. [Quickstart & Setup Guide](#quickstart--setup-guide)
+11. [License & Attribution](#license--attribution)
 
 ---
 
@@ -50,7 +51,7 @@ Think of AlgoTrade as an **unemotional, institutional trading desk in a single b
 flowchart LR
     A["Raw NSE Ticks<br/>(Zerodha WebSocket)"] --> B["Actor Model Hub<br/>(5,000+ ticks/sec)"]
     B --> C["Market Breadth &<br/>RVOL Filter"]
-    C --> D{"Setup Valid?<br/>EV ≥ +0.20R"}
+    C --> D{"Setup Valid?<br/>EV ≥ +0.25R"}
     D -->|No| E["Shadow Tracking<br/>(Analyze Rejection)"]
     D -->|Yes| F["Position Worker<br/>(5m Timeout & SL)"]
     F --> G["Live Orderbook<br/>WebSockets & UI"]
@@ -101,6 +102,167 @@ The core setup is the **Institutional Pullback Reclaim (VWAP & Order Block Confl
 
 ---
 
+## ⏱️ Intraday Stock Selection, Playbook Timing & Pre-Trade Gatekeeping
+
+AlgoTrade executes trades with surgical precision. It does not blindly enter whenever a green candle appears. Every buy order must pass through a strict **3-Tier Stock Selection Funnel**, satisfy the **Intraday Session Playbook**, trigger one of **Three Structural Institutional Setups**, and survive an exhaustive **Pre-Trade Gatekeeping Matrix**.
+
+---
+
+### 1. Intraday Timing Windows & The Session Playbook (When Buying Can Happen)
+
+Intraday liquidity, institutional participation, and microstructure volatility shift drastically throughout the trading day. Trading during the opening cross is gambling against high-frequency market-making algorithms, while trading during midday lunch is chopping capital in random Brownian noise.
+
+AlgoTrade partitions the Indian trading day into **6 distinct algorithmic phases** (governed by [`session_clock.go`](file:///Users/ajaynegi/Downloads/AlgoTrade/algotrade-backend/internal/trading/session_clock.go)):
+
+| Time Window (IST) | Session Phase | New Entries? | Sizing Multiplier | Min Score & RVOL | Institutional Playbook Rationale |
+| :--- | :--- | :---: | :---: | :---: | :--- |
+| **09:15 – 09:30** | `OPENING_NOISE_BLACKOUT` | ❌ **LOCKED** | 0.0x | N/A | **Opening Auction Absorption**: Absorbs opening retail auction imbalances, wide bid-ask spreads, and fakeout spikes. Establishes the 15-minute Opening Range High ($\text{ORH}$) and Low ($\text{ORL}$). |
+| **09:30 – 11:30** | `MORNING_DISCOVERY_DRIVE` | ✅ **ACTIVE** | **1.0x (Full)** | Score $\ge 75.0$<br/>RVOL $\ge 1.5\times$ | **Peak Domestic & Asia Overlap**: Peak morning liquidity. Institutional desks establish daily trend direction. All 3 strategy setups active (`VWAP_PULLBACK_RECLAIM`, `FAILED_BREAKDOWN_SPRING`, `ORB_RETEST_RECLAIM`). |
+| **11:30 – 13:30** | `MIDDAY_COMPRESSION`<br/>*(Standard Mode)* | ❌ **LOCKED** | 0.0x | Score $\ge 85.0$<br/>RVOL $\ge 2.0\times$ | **Brownian Noise Lockout**: Domestic institutional flow dries up before European markets open. Trades entering here suffer severe stop-out chop without momentum follow-through. |
+| **11:30 – 13:30** | `MIDDAY_COMPRESSION`<br/>*(Domestic Tape Override)* | ⚡ **ACTIVE** | **0.5x (Half)** | Score $\ge 80.0$<br/>RVOL $\ge 2.5\times$ | **Extreme Domestic Surge**: Unlocks *only* if Market Breadth $\ge 70.0\%$ (70% of universe above VWAP) AND candidate RVOL $\ge 2.5\times$. High-barrier entry with halved risk. |
+| **13:30 – 14:45** | `EUROPE_OVERLAP_EXPANSION`| ✅ **ACTIVE** | **1.0x (Full)** | Score $\ge 76.0$<br/>RVOL $\ge 1.5\times$ | **European & London Desk Overlap**: Frankfurt and London institutions inject fresh volume into Indian equities. Unlocks second-wave trend continuation and clean VWAP reclaims. |
+| **14:45 – 15:14** | `EXIT_ONLY_LOCKOUT` | ❌ **LOCKED** | 0.0x | N/A | **Pre-Close Trail Window**: Zero new positions allowed. Focus shifts exclusively to trailing active runner stops and tightening defense before market close. |
+| **15:14 – 15:30** | `AUTO_SQUAREOFF_SWEEP` | ❌ **LOCKED** | 0.0x | N/A | **Mandatory MIS Flatten**: The 4-Stage Bulletproof Exit sweeps all open intraday positions at market before Zerodha RMS penalty auto-square-off at 15:20 IST. |
+| **15:30 – 09:15** | `MARKET_CLOSED` | ❌ **LOCKED** | 0.0x | N/A | **Overnight Capital Safety**: Zero overnight exposure. Complete immunity to gap-down risks, international macro shocks, and overnight interest charges. |
+
+---
+
+### 2. The 3-Tier Stock Selection Funnel (From 200+ Equities to 1 Execution)
+
+```mermaid
+flowchart TD
+    A["Level 1: 200+ NSE F&O Universe<br/>(Zerodha Kite Ticker L2 5-Depth Binary Ticks)"] --> B["Single-Writer Actor Engine<br/>(Contiguous [512]StockMetrics Array, <250ns/tick)"]
+    B --> C["Level 2: 1-Second Quant Ranking Engine<br/>(Calculates 5-Factor Bullish Score 0-100, RVOL, RS, Flow, EV)"]
+    C --> D["Top 5 Ranked Bullish Outliers<br/>(Sorted indices via slices.SortFunc in ~2µs)"]
+    D --> E["Level 3: Pre-Trade Gatekeeper<br/>(entry_gatekeeper.go: PickBestLongCandidate)"]
+    E --> F{"Gatekeeper Filter Checks<br/>Regime • Sector • RVOL • Ask Wall • Setup Match"}
+    F -->|Rejection| G["Shadow Signal Tracking<br/>(Logged to SQLite for Counterfactual Analysis)"]
+    F -->|Qualified Winner| H["Position Sizer & Portfolio Heat Guard<br/>(4 Constraints • Max 2.0% Heat • 1.5x Tax Net Profit)"]
+    H --> I["Spawn PositionWorker<br/>(Place Limit Buy Order @ Ask1 + 1 Tick)"]
+```
+
+#### Tier 1: Real-Time Tick Ingestion & In-Memory Metrics
+- The WebSocket stream pipes Level 2 binary tick packets (184 bytes each) into a 65,536-capacity ring buffer.
+- The Single-Writer Actor parses ticks and continuously calculates:
+  - Official Exchange VWAP and 5-minute OHLCV bars.
+  - 9 EMA (Exponential Moving Average) smoothed with $\alpha = 0.20$ and seeded from first 9 completed 5m closes.
+  - Aggressor Buy/Sell Volume using the Lee-Ready algorithm.
+  - Dual-Alpha Smoothed Buyer Ratio ($0.20$ on trades, $0.03$ on passive book depth shifts).
+  - Continuous Exponential Rolling Peak ($\tau = 20.0\text{s}$) to detect sudden tape crashes.
+
+#### Tier 2: 1-Second Quant Scoring Engine
+Every second, the system scores all active equities using the **5-Factor Institutional Composite Bullish Rank Score ($0 \dots 100$)**:
+$$\text{Score} = (0.26 \times S_{\text{vwap}}) + (0.22 \times S_{\text{rvol}}) + (0.18 \times S_{\text{rs}}) + (0.20 \times S_{\text{flow}}) + (0.14 \times S_{\text{ev}})$$
+- **Gaussian VWAP Sweet-Spot Curve ($S_{\text{vwap}}$)**: Peaks when price is between $+0.15\text{ ATR}$ and $+0.35\text{ ATR}$ above VWAP. Heavily penalizes stocks extended $> 1.5\text{ ATR}$ (chasing).
+- **Sigmoidal RVOL ($S_{\text{rvol}}$)**: Compares current 5m volume to time-matched historical average.
+- **Hyperbolic Tangent Relative Strength ($S_{\text{rs}}$)**: Outperformance vs Nifty 50 benchmark.
+- **Order Flow Aggressor Score ($S_{\text{flow}}$)**: Buyer absorption from Level 2 depth.
+- **Expected Value Score ($S_{\text{ev}}$)**: Mathematical expectancy after transaction friction.
+The top 5 scoring stocks are extracted for gatekeeping.
+
+#### Tier 3: Pre-Trade Gatekeeping & Structural Setup Verification
+The candidate must pass all pre-trade safety gates and match one of three high-probability structural setups.
+
+---
+
+### 3. The 3 Qualified Strategy Setups (Why Buying Happens)
+
+AlgoTrade enters *only* on confirmed institutional setups where retail participants are trapped or where smart money is actively defending key reference levels.
+
+#### 📌 Setup 1: VWAP Pullback Reclaim (`VWAP_PULLBACK_RECLAIM`)
+*Based on Richie Naso (NYSE Specialist) & Dr. Samir Varma Quant Principles*
+
+```
+Price
+  ▲
+  │               [Current Bar Reclaims High] ──> BUY ENTRY
+  │                     ▲
+  │                    ┌┴┐
+  │         ┌─┐        │ │
+  │         │ │        └┬┘
+  │         └┬┘   ┌─┐   │ 
+  │──────────┼────┴─┴───┼────────── 9 EMA (Rising, Slope ≥ -0.05 ATR)
+  │          │          │
+  │══════════╪══════════╪══════════ Exchange VWAP (Support)
+  │          │   (Dip)
+  │          ▼
+  │       [Signal Bar Low - 0.20 ATR] ──> INITIAL STOP LOSS
+  └──────────────────────────────────────────────────────────► Time
+```
+
+- **Core Concept**: Institutions execute large orders at VWAP. When a leading stock pulls back to VWAP in an uptrend, institutions absorb selling pressure and defend their average price.
+- **9 EMA Confluence Law**: 9 EMA must be warm ($> 0$), trading above or at VWAP ($\text{EMA}_9 \ge \text{VWAP}$), and its ATR-normalized slope must be flat or rising:
+  $$\frac{\Delta \text{EMA}_9}{\text{ATR}_{\text{safe}}} \ge -0.05$$
+- **Price Pullback Zone**: Price must be within an optimal entry window above VWAP:
+  $$0.05 \le \frac{\text{LTP} - \text{ExchangeVWAP}}{\text{ATR}_{\text{safe}}} \le 0.55$$
+- **Dip Depth**: The previous 5-minute candle low must have tested the VWAP zone:
+  $$\text{VWAP} - 0.15\text{ ATR} \le \text{PreviousBar.Low} \le \text{VWAP} + 0.35\text{ ATR}$$
+- **Reclaim Confirmation**: Live price must surge above both the current bar's open and the prior bar's midpoint:
+  $$\text{LTP} > \max\left(\text{CurrentBar.Open} + 2\text{ ticks}, \frac{\text{PreviousBar.Open} + \text{PreviousBar.Close}}{2.0}\right)$$
+- **Aggressor Flow**: Close Location Value $\text{CLV} \ge 0.58$, $\text{AggressorBuyRatio} \ge 0.56$, $\text{FastAggressorEMA} \ge 0.55$, and $\text{SmoothedBuyerRatio} \ge 0.55$.
+- **Volatility-Buffered Stop**: Placed below the swing low with a $0.20\text{ ATR}$ safety margin to prevent stop runs:
+  $$\text{StopPrice} = \min(\text{PreviousBar.Low}, \text{CurrentBar.Low}) - 0.20 \times \text{ATR}_{\text{safe}}$$
+
+---
+
+#### 📌 Setup 2: Failed Breakdown Reclaim / Bear Trap Spring (`FAILED_BREAKDOWN_SPRING`)
+*Based on Richie Naso & Rishi Narang Market Microstructure Laws*
+
+- **Core Concept**: Market makers intentionally drive price below VWAP to trigger retail stop-loss market orders, providing the liquidity needed to fill large institutional buy orders. Once retail is shaken out, the stock snaps back above VWAP, trapping aggressive short sellers who are forced to buy to cover.
+- **Dip Sweep**: Previous bar washes below VWAP by up to $0.45\text{ ATR}$:
+  $$\text{ExchangeVWAP} - 0.45\text{ ATR} \le \text{PreviousBar.Low} < \text{ExchangeVWAP} - 0.05\text{ ATR}$$
+- **Rapid Snapback Reclaim**: Live price violently surges back above VWAP and exceeds current bar open:
+  $$\text{LTP} \ge \text{ExchangeVWAP} + 0.05\text{ ATR} \quad \land \quad \text{LTP} > \text{CurrentBar.Open} + 2\text{ ticks}$$
+- **Trapped-Short Squeeze Flow**: $\text{CompositeRVOL} \ge 1.5\times$, $\text{CLV} \ge 0.60$, $\text{AggressorBuyRatio} \ge 0.58$, $\text{FastAggressorEMA} \ge 0.56$.
+- **Volatility-Buffered Stop**: Placed safely below the sweep low:
+  $$\text{StopPrice} = \text{PreviousBar.Low} - 0.20 \times \text{ATR}_{\text{safe}}$$
+
+---
+
+#### 📌 Setup 3: 15-Minute Opening Range Retest Reclaim (`ORB_RETEST_RECLAIM`)
+*Abolishes Naive First-Breakout Traps (80% Failure Rate)*
+
+- **Core Concept**: Academic literature and empirical evidence prove that buying the initial 15-minute high breakout fails up to $80\%$ of the time due to institutional fade algorithms. AlgoTrade **never buys the first breakout poke**. Instead, it waits for a completed 5-minute candle to close above the range high, followed by a pullback retest where previous resistance becomes confirmed support.
+- **Range Compression**: The 15-minute range must not be overextended:
+  $$\text{ORH} - \text{ORL} \le 1.8 \times \text{ATR}_{\text{safe}}$$
+- **Confirmed Breakout Close**: At least one completed 5-minute candle in the session must have closed strictly above $\text{ORH}$:
+  $$\exists \, b \in \text{CompletedBars}, \quad \text{Bar}[b].\text{Close} > \text{ORH}$$
+- **Retest Support Hold**: Previous candle low tests and holds the $\text{ORH}$ support boundary:
+  $$\text{ORH} - 0.35\text{ ATR} \le \text{PreviousBar.Low} \le \text{ORH} + 0.25\text{ ATR}$$
+- **Reclaim Continuation**: Price holds above $\text{ORH}$ and current bar open without being overextended:
+  $$\text{ORH} < \text{LTP} \le \text{ORH} + 0.45\text{ ATR} \quad \land \quad \text{LTP} > \text{CurrentBar.Open} + 1\text{ tick}$$
+- **Institutional Surge**: $\text{CompositeRVOL} \ge 1.8\times$, $\text{CLV} \ge 0.62$, $\text{AggressorBuyRatio} \ge 0.58$, $\text{FastAggressorEMA} \ge 0.56$.
+- **Volatility-Buffered Stop**: Placed below the retest pivot low:
+  $$\text{StopPrice} = \min(\text{PreviousBar.Low}, \text{CurrentBar.Low}) - 0.20 \times \text{ATR}_{\text{safe}}$$
+
+---
+
+### 4. Comprehensive Pre-Trade Filter & Rejection Matrix (Why Trades Are Blocked)
+
+Even if a stock looks bullish, it will be firmly rejected if it violates any safety condition. The Cockpit UI displays real-time diagnostic cards explaining the exact blocking reason:
+
+| Gate Check | Inspected Condition | Exact Passing Threshold | Why It Blocks (Rejection Reason Code) |
+| :--- | :--- | :--- | :--- |
+| **Session Clock** | `sessionClock.IsNewEntryAllowed` | `== true` | `LOCKED_SESSION_WINDOW`: Outside trading hours, during 09:15-09:30 blackout, 11:30-13:30 midday lull, or post-14:45 exit window. |
+| **Symbol Cooldown**| Active position or exit timer | Cooldown elapsed ($> 15\text{ min}$) | `POSITION_ACTIVE_OR_COOLDOWN`: Prevents overtrading, churn, and revenge-trading on the same symbol. |
+| **Sector Health** | Granular Sector Circuit Breaker | Sector Breadth $\ge 40\%$ and Sector Avg Change $\ge -0.50\%$ | `SECTOR_RESTRICTED`: The entire sector (e.g., Nifty Bank, IT) is experiencing systemic selling pressure. |
+| **Quant Score** | `stock.BullishScore` | $\ge 75.0$ (Morning) / $\ge 80.0$ (Midday) / $\ge 76.0$ (Europe) | `SCORE_BELOW_MIN`: Stock does not possess strong enough multi-factor momentum or institutional sponsorship. |
+| **Expected Value**| `stock.EV` | $\ge +0.25R$ after transaction friction | `EV_BELOW_THRESHOLD`: Statistical win probability $\times$ reward does not mathematically justify the risk. |
+| **Relative Volume**| `compositeRVOL` | $\ge 1.5\times$ (Morning) / $\ge 2.0\times$ (Midday) | `RVOL_INSUFFICIENT`: Stock is moving on light retail volume without institutional participation. |
+| **Ask Wall Filter**| Depth Levels 1 & 2 vs Ask Level 1 | $\text{Ask1Qty} \le 4 \times (\text{Bid1Qty} + \text{Bid2Qty})$ | `ASK_WALL_DETECTED`: A massive institutional seller has placed a resting iceberg or sell wall directly overhead. |
+| **Spread Penalty** | Bid-Ask Spread | $\frac{\text{Ask1} - \text{Bid1}}{\text{LTP}} \le 0.10\%$ | `PENALTY_WIDE_SPREAD`: Spread is too wide; crossing the book incurs excessive immediate slippage. |
+| **Overextension** | Distance above VWAP | $\text{LTP} \le \text{ExchangeVWAP} + 1.50\text{ ATR}$ | `PENALTY_OVEREXTENDED`: Stock is overextended. Chasing here creates asymmetric downside risk. |
+| **Trend Exhaustion**| Total session range vs ATR | $\text{High} - \text{Low} \le 2.50 \times \text{ATR}_{14}$ | `PENALTY_EXHAUSTED_TREND`: Stock has already consumed $> 250\%$ of its normal daily volatility budget. |
+| **Iceberg Selling** | Hidden passive order dumping | No passive iceberg detected | `PENALTY_ICEBERG_SELL`: Large institutional participant is aggressively unloading inventory into retail bids. |
+| **Structural Setup**| Pattern matching logic | Matches Setup 1, 2, or 3 | `AWAITING_SETUP`: Price is floating in no-man's land; neither at VWAP pullback, bear trap, nor ORB retest. |
+| **Portfolio Heat** | Sum of all open positions' downside risk | $\sum \text{OpenRiskRupees} < 0.02 \times \text{NetEquity}$ | `HEAT_CAP_EXHAUSTED`: Maximum 2.0% portfolio heat capacity reached. Awaiting open positions to ratchet to Breakeven. |
+| **Margin Limit** | Free cash collateral vs margin | $0.95 \times \text{FreeMargin} \times \text{Leverage} \ge \text{Cost}$ | `INSUFFICIENT_MARGIN`: Brokerage margin account cannot safely accommodate the required position size. |
+| **Liquidity Cap** | Top-3 visible ask depth | $\text{OrderQty} \le 0.20 \times \sum_{i=1}^3 \text{AskQty}_i$ | Capped at $20\%$ of depth to guarantee zero market impact and near-zero slippage upon entry. |
+| **Chase Cap** | Distance from entry limit to raw stop | $\text{Entry} - \text{RawStop} \le 1.25 \times \Delta_{\max}$ | `STOP_DISTANCE_CHASE_CAP`: Stop loss would be too far away, degrading risk-to-reward geometry. |
+| **Net Profit Gate**| Projected net profit at $+1.0R$ vs statutory taxes | $\text{NetProfit}_{1R} \ge 1.50 \times \text{RoundTripTaxes}$ | `NET_PROFIT_UNVIABLE`: High government taxes (STT, GST, Stamp, SEBI) would eat more than $40\%$ of a $+1.0R$ gain. |
+
+---
+
 ## 📐 Mathematical Foundations & Formulas
 
 AlgoTrade does not use vague indicators. Everything is driven by closed-form quantitative mathematical formulas:
@@ -109,8 +271,8 @@ AlgoTrade does not use vague indicators. Everything is driven by closed-form qua
 A trade is rejected unless its statistical expectation is strongly positive after transaction friction:
 $$\text{EV} = \left( P_{\text{win}} \times R_{\text{win}} \right) - \left( (1.0 - P_{\text{win}}) \times 1.0 \right) - \text{Friction}_R$$
 
-- **Rule**: A setup must have $\text{EV} \ge +0.20R$ and $P_{\text{win}} \ge 55\%$.
-- A trade risking ₹1,000 must mathematically yield an average return of $\ge ₹200$ across hundreds of iterations.
+- **Rule**: A setup must have $\text{EV} \ge +0.25R$ and $P_{\text{win}} \ge 55\%$.
+- A trade risking ₹1,000 must mathematically yield an average return of $\ge ₹250$ across hundreds of iterations.
 
 ### 2. Relative Volume Pace ($\text{RVOL}_{\text{pace}}$)
 Instead of comparing total session volume to yesterday, AlgoTrade compares the current 5-minute bar to the exact time-matched historical average:
@@ -170,9 +332,10 @@ The execution engine incorporates multi-layered safety mechanisms to protect cap
 ### 1. Pre-Trade Gatekeeper Rules
 | Risk Gate | Threshold Limit | System Action on Violation |
 | :--- | :--- | :--- |
-| **Max Portfolio Heat** | $\sum \text{OpenRisk}_R \le 3.0R$ | Rejects all new trades; max simultaneous open risk is strictly capped at $3.0R$. |
+| **Max Portfolio Heat** | $\sum \text{OpenRiskRupees} \le 2.0\% \times \text{NetEquity}$ | Rejects all new trades; max simultaneous open risk is strictly capped at $2.0\%$ of capital. Open risk drops to ₹0 once stop reaches Breakeven. |
 | **Sector Exposure Cap**| Max $20\%$ of total capital | Prevents overconcentration in a single sector (e.g. Banking or IT). |
-| **Max Daily Loss Limit**| $-3.0\%$ of account equity | Hard breaker: disables all entry gates and halts new trading for the day. |
+| **Max Daily Loss Limit**| $-2.0\%$ of account equity | Hard breaker: disables all entry gates and halts new trading for the day. |
+| **Consecutive Losses** | $\ge 2$ consecutive losses | Daily circuit breaker: locks trading for the day. |
 | **Symbol Cooldown Lock**| 15 minutes post-exit | Algorithmic lock prevents emotional revenge-trading or churn on the same symbol. |
 
 ### 2. In-Trade Order Lifecycle & 5-Minute Timeout
@@ -199,18 +362,20 @@ stateDiagram-v2
 - **Partial Fill Promotion**: If $\ge 10$ shares filled, it recalculates risk for the exact filled size and places the stop loss at break-even.
 
 ### 3. The 4-Gear Dynamic Trailing Stop Ratchet
-As the trade moves in our favor, stop loss management shifts through four distinct algorithmic gears:
-- **Gear 1 (Agile Break-Even)**: Once trade reaches $+1.0R$, stop loss is moved to $P_{\text{entry}} + 0.05\%$ (breakeven including broker fees). Minimum 350ms cooldown prevents spamming exchange rate limits.
-- **Gear 2 (Locking First Profit)**: When $+1.5R$ is reached, scale out 50% position and lock in $+0.75R$ on the remaining runner.
-- **Gear 3 (Candle-Low Trail)**: Trails the runner along the lows of confirmed 5-minute candles with a 1500ms stabilization window.
-- **Gear 4 (Exchange Quota Guard)**: If modifications reach 24 (NSE order modification limit is 25), shifts to an in-memory **Shadow Stop** to protect order quota.
+As the trade moves in our favor, stop loss management shifts through four distinct algorithmic gears designed to respect the **NSE maximum 25 order modifications per day**:
+- **Gear 1 (Agile Dynamic Trail)**: Mods 1–18. Minimum advance $\ge \max(2\text{ ticks}, 0.12 \times \text{BaseBuffer})$ with a 350ms cooldown. Moves the stop quickly out of the initial danger zone based on real-time order flow $M_{\text{flow}}$.
+- **Early Breakeven Protection (+1.00R)**: Once the trade reaches $+1.00R$, the stop loss is automatically ratcheted to **Tax-Free Breakeven** ($P_{\text{entry}} + \text{Taxes} + 0.15\%$). Per Dr. Samir Varma & Rishi Narang, ratcheting at $+0.50R$ suffocates valid trends in normal Brownian noise; moving to BE at $+1.00R$ lets the trade breathe while locking in net profitability.
+- **Tranche 1 Asymmetric Scale-Out (+1.50R)**: When the trade reaches $+1.50R$, the worker executes a 3-step race-free scale-out: shrinks resting SL quantity, places a marketable limit sell for 50%, and raises the runner SL to Tax-Free Breakeven.
+- **Gear 3 (Coarse 5m Bar Trail)**: Mods 19–24. Minimum advance $\ge \max(0.40 \times \text{BaseBuffer}, 0.35 \times \text{ATR})$ with a 1500ms cooldown. Anchors trailing defense to completed 5-minute candle lows.
+- **Gear 4 (Virtual Shadow Stop in RAM)**: At modification 24, order modifications cease completely. The stop continues trailing virtually in RAM (`shadowStopBits`), strictly preserving **Modification #25** exclusively for emergency market exit.
+- **In-Trade Alpha Decay Stagnation Guard**: If a trade stays active for $\ge 45\text{ minutes}$ and its peak excursion has not even reached $+0.50R$, the information edge has decayed into random walk friction; the worker exits immediately at market.
 
-### 4. 3-Stage Bulletproof Emergency Flatten
+### 4. 4-Stage Bulletproof Emergency Flatten
 If an emergency exit is triggered (circuit limit hit, stop-loss breached, or manual override):
-1. **Stage A**: Mutate existing stop order directly to a `MARKET` order. Wait 900ms.
-2. **Stage B**: If unfilled, cancel stop order and place a protective limit sweep order (down to $-1.5\%$ slippage). Wait 900ms.
-3. **Stage C**: If still unfilled, place an aggressive deep limit order (down to $-3.5\%$ limit protection price) to guarantee execution without broker rejections.
-4. **15:14 IST Auto Square-off**: Automatically sweeps and flattens all intraday positions before Zerodha's RMS penalty square-off at 15:15 IST.
+1. **Stage A**: Mutate existing stop order directly to a `MARKET` order (consumes reserved Modification #25). Wait 900ms.
+2. **Stage B & C**: If unfilled, cancel stop order and execute a 4-attempt escalating Liquidity Protection Price (LPP) sweep sell ($0.75\% \to 1.50\% \to 2.50\% \to 3.50\%$ / Market). Wait 900ms per attempt.
+3. **Stage D (Persistent Anti-Orphan Recovery Loop)**: If the position remains open after 4 attempts (e.g., lower circuit freeze or network dropout), enters a persistent 2.0-second recovery loop retrying until `RemainingQty() == 0`.
+4. **15:14 IST Auto Square-off**: Automatically sweeps and flattens all intraday MIS positions before Zerodha's RMS penalty square-off at 15:20 IST.
 
 ---
 

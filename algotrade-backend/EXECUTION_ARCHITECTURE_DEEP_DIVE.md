@@ -13,7 +13,7 @@ Imagine a high-speed submarine navigating stormy seas:
 - **The Sonar Officer (Actor Ingestion)**: One person listens to the sonar pings (market ticks). Nobody interrupts or fights over the headphones. They write observations on a single giant board with zero delay.
 - **The Navigator (Quant Ranking & Breadth)**: Every second, the navigator looks at the entire fleet of 213 ships (F&O stocks) to check if the tide is rising or falling (market breadth) and picks the top 5 fastest ships.
 - **The Safety Officer (Gatekeeper & Portfolio Heat)**: Before firing a torpedo (placing a trade), the safety officer checks the sub's electrical circuit breakers. The boat can only handle $2.0\%$ total electrical load (Portfolio Heat) at any time. If a previous torpedo is already safely at target (trailing stop at Breakeven), its risk load drops to zero, allowing another torpedo to be fired.
-- **The Torpedo Guidance Computers (Position Workers)**: Each launched trade gets its own dedicated autonomous computer (`PositionWorker`). It watches the target every millisecond, ratchets its defense shield across 4 mechanical gears, takes $50\%$ profit off the table at $+0.65R$, and guarantees it never gets stuck (anti-orphan recovery loop).
+- **The Torpedo Guidance Computers (Position Workers)**: Each launched trade gets its own dedicated autonomous computer (`PositionWorker`). It watches the target every millisecond, ratchets its defense shield across 4 mechanical gears, locks in Tax-Free Breakeven at $+1.00R$, takes $50\%$ profit off the table at $+1.50R$, and guarantees it never gets stuck (anti-orphan recovery loop).
 - **The Black Box & Flight Recorder (EOD Optimization Engine)**: It records every single decision—including torpedoes we chose *not* to fire (shadow signals)—and at 3:45 PM automatically analyzes whether we were smart or just lucky, emailing an executive briefing to headquarters.
 
 #### 2. Senior Quant & Systems Engineering Pillars
@@ -52,7 +52,7 @@ flowchart TB
         PBK -->|Gate 1| G1["Granular Sector Circuit Breaker (Restricted Sector Check)"]
         PBK -->|Gate 2| G2["Bullish Score & Pre-Trade EV Gate (Score >= 75, EV >= +0.25R)"]
         PBK -->|Gate 3| G3["Order Book Microstructure & Ask Wall Filter (Ask1 <= 4x Top-2 Bid)"]
-        PBK -->|Gate 4| G4["Structural Setup: VWAP Pullback Reclaim OR 15m ORB Breakout"]
+        PBK -->|Gate 4| G4["Structural Setup: VWAP Pullback Reclaim, Bear Trap Spring, OR 15m ORB Retest"]
         PBK -->|Gate 5| G5["position_sizer.go: ComputePositionSize() (4 Constraints + Heat Cap)"]
         PBK -->|Gate 6| G6["Mandatory Net-Profitability Gate at +1.0R (Net >= 1.5x Taxes)"]
     end
@@ -70,7 +70,7 @@ flowchart TB
         WL -->|Gear 1: Mods 1–18| G1R["Agile Dynamic Trail (min 2 ticks / 0.12 BaseBuffer, cooldown 350ms)"]
         WL -->|Gear 3: Mods 19–24| G3R["Coarse 5m Bar Trail (min 0.40 BaseBuffer, cooldown 1500ms)"]
         WL -->|Gear 4: Mod >= 24| G4S["Virtual Shadow Stop in RAM (Mod 25 Reserved for Exit)"]
-        WL -->|+0.65R MFE| SO3["3-Step Race-Free Scale-Out (50% Banked + Tax-Free BE)"]
+        WL -->|+1.50R MFE| SO3["3-Step Race-Free Scale-Out (50% Banked + Tax-Free BE)"]
         WL -->|Breach / Shock / 15:14| FLT["position_exit.go: 4-Stage Bulletproof Exit Protocol"]
         FLT -->|Stage A| MA["Mutate SL to Market (Consumes Reserved Mod 25)"]
         FLT -->|Stage B & C| LPP["Cancel SL -> Escalating LPP Limit Sweeps (0.75% to 3.50%)"]
@@ -235,7 +235,7 @@ internal/trading/execution_manager.go: Manager.OnSecondTick()
 
 #### Mathematical Formulations
 1. **Strategy Setup 1: VWAP Pullback Reclaim (`VWAP_PULLBACK_RECLAIM`)**:
-   - Trend Confluence (Richie Naso Law): $\text{EMA}_9 \ge \text{ExchangeVWAP} \land \text{Slope}_{\text{EMA}_9} \ge -0.01$.
+   - Trend Confluence (Richie Naso Law): $\text{EMA}_9 > 0 \land \text{EMA}_9 \ge \text{ExchangeVWAP} \land \frac{\Delta\text{EMA}_9}{\text{ATR}_{\text{safe}}} \ge -0.05$.
    - Price Zone: $0.05 \le \frac{\text{LTP} - \text{ExchangeVWAP}}{\text{ATR}_{\text{safe}}} \le 0.55$.
    - Dip Depth: $\text{PreviousBar.Low} \le \text{ExchangeVWAP} + 0.35\text{ATR}_{\text{safe}}$ and $\ge \text{ExchangeVWAP} - 0.15\text{ATR}_{\text{safe}}$.
    - Reclaim Condition:
@@ -251,9 +251,9 @@ internal/trading/execution_manager.go: Manager.OnSecondTick()
    - Volatility-Buffered Stop: $\text{PreviousBar.Low} - (0.20 \times \text{ATR}_{\text{safe}})$.
 
 3. **Strategy Setup 3: 15-Minute Opening Range Retest Reclaim (`ORB_RETEST_RECLAIM`)**:
-   - Abolishes Naive 80%-Failure First Breakout: First poke beyond 15m range high is a retail trap. We wait for the retest to hold.
+   - Abolishes Naive 80%-Failure First Breakout: First poke beyond 15m range high is a retail trap. We require a completed 5-minute candle close above $\text{ORH}$, followed by a retest of the range high that holds as confirmed support before entry.
    - Range Compression: $\text{ORH} - \text{ORL} \le 1.8 \times \text{ATR}_{\text{safe}}$.
-   - Prior Breakout: $\text{Stock.High} > \text{ORH}$.
+   - Prior Confirmed Breakout Close: At least one completed 5m bar with $\text{Close} > \text{ORH}$.
    - Retest Support Hold: $\text{ORH} - 0.35\text{ATR}_{\text{safe}} \le \text{PreviousBar.Low} \le \text{ORH} + 0.25\text{ATR}_{\text{safe}}$.
    - Reclaim Extension: $\text{ORH} < \text{LTP} \le \text{ORH} + 0.45\text{ATR}_{\text{safe}} \land \text{LTP} > \text{CurrentBar.Open} + 1\text{ tick}$.
    - Volume & Aggression: $\text{CompositeRVOL} \ge 1.8$, $\text{CLV} \ge 0.62$, $\text{AggressorBuyRatio} \ge 0.58$, $\text{FastAggressorEMA} \ge 0.56$.
@@ -336,7 +336,8 @@ internal/trading/execution_manager.go: Manager.spawnCandidateWorker()
 | `ENTRY_PLACED` | `filledEntryQty` | `filled == 0` after cancel drain | Transition to `STATE_CLOSED` (`ENTRY_TIMEOUT_UNFILLED`) |
 | `ENTRY_PLACED` | `filledEntryQty` | $0 < \text{filled} < \text{DustFloorQty}$ | Transition to `STATE_EMERGENCY_FLATTEN` (`DUST_GUARD`) |
 | `ENTRY_PLACED` | `filledEntryQty` | $\text{filled} \ge \text{DustFloorQty}$ | **Promote partial fill!** Recalculate BE stop, place SL-L |
-| `PROTECTED_ACTIVE`| Realized R-Multiple | $\text{MFE} \ge +0.65R$ | Transition to `STATE_SCALE_OUT_PENDING` (Tranche 1) |
+| `PROTECTED_ACTIVE`| Realized R-Multiple | $\text{MFE} \ge +1.00R$ | **Ratchet stop to Tax-Free Breakeven** (avoids Brownian noise) |
+| `PROTECTED_ACTIVE`| Realized R-Multiple | $\text{MFE} \ge +1.50R$ | Transition to `STATE_SCALE_OUT_PENDING` (Tranche 1 50% harvest) |
 | `PROTECTED_ACTIVE`| Modification Count | `modCount >= 24` | Transition to `STATE_SHADOW_STOP_ACTIVE` (Gear 4) |
 
 #### Partial Fill Promotion & 500ms Drain Window
@@ -600,14 +601,14 @@ Every wait, pause, sleep, and timer in the engine is purpose-built to handle net
 | `internal/market/ranking_algorithm.go` | `CalculateBullishScore()` | `computeAndBroadcastSnapshot` | 10-factor quant scoring engine (Gaussian VWAP, Orderbook, Aggressors, Penalties). |
 | `internal/trading/execution_manager.go` | `OnSecondTick()` | `Actor.computeAndBroadcastSnapshot` | Evaluates session clock, checks portfolio heat, calls candidate picking, handles 15:14 square-off. |
 | `internal/trading/session_clock.go` | `EvaluateGlobalSessionClocks()` | `Manager.OnSecondTick` | Computes DST-aware global clocks and selects 1 of 6 NSE intraday phases. |
-| `internal/trading/entry_gatekeeper.go` | `PickBestLongCandidate()` | `Manager.OnSecondTick` | Executes Gates 0–5, evaluates VWAP Pullback Reclaim & 15m ORB, emits shadow signals. |
+| `internal/trading/entry_gatekeeper.go` | `PickBestLongCandidate()` | `Manager.OnSecondTick` | Executes Gates 0–5, evaluates VWAP Pullback Reclaim, Bear Trap Spring, & 15m ORB Retest, emits shadow signals. |
 | `internal/trading/position_sizer.go` | `ComputePositionSize()` | `PickBestLongCandidate` | Computes 4 constraints (Risk, Margin, Concentration, Liquidity) and enforces 1.5x tax net profit gate. |
 | `internal/trading/stoploss.go` | `ComputeStopAndBufferSpec()` | `ComputePositionSize` | Calculates non-inverting stop bounds [DeltaMin, DeltaMax], BaseBuffer, and checks No-Chase rule. |
 | `internal/trading/tax_calculator.go` | `CalculateRoundTripCharges()` | `position_sizer.go`, `trade_history.go` | Computes exact Indian Cash MIS statutory taxes (STT, Exch, SEBI, Stamp, GST, Brokerage). |
 | `internal/trading/position_worker.go` | `Start()` | `Manager.spawnCandidateWorker` | Places limit buy order via broker, sets 5m timeout, and starts `go workerLoop()`. |
 | `internal/trading/position_worker.go` | `handleEntryTimeout()` | `workerLoop` (at 5m) | Cancels unfilled entry, waits 500ms drain window, promotes partial fills $\ge$ DustFloorQty. |
 | `internal/trading/trailing_stop.go` | `OnTickHotPath()` | `Actor.processTick` | Lock-free HWM update, SL breach watchdog, Gear 4 shadow stop, ProposeStopRatchet. |
-| `internal/trading/position_exit.go` | `executeThreeStepScaleOut()` | `workerLoop` | Executes race-free 3-step scale-out at +0.65R with compensating rollback and 800ms timer. |
+| `internal/trading/position_exit.go` | `executeThreeStepScaleOut()` | `workerLoop` | Executes race-free 3-step scale-out at +1.50R with compensating rollback and 800ms timer. |
 | `internal/trading/position_exit.go` | `executeEmergencyFlatten()` | `workerLoop`, `TriggerEmergencyExit` | 4-stage exit protocol: Mutate to Market $\to$ Escalating LPP sweeps $\to$ 2s anti-orphan recovery. |
 | `internal/trading/order_reconciler.go` | `ProcessOrderEvent()` | Broker / WebSocket / Postback | Deduplicates fills, updates `lastFilledByOrd`, computes positive incremental fill deltas. |
 | `internal/trading/risk_manager.go` | `ComputeCapitalSummary()` | `Manager.OnSecondTick` | Computes NetEquity, FreeMargin, BuyingPower5x, DrawdownMult, and checks 3 circuit breakers. |
