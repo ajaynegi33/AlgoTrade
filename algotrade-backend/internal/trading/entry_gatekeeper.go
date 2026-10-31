@@ -15,7 +15,7 @@ type CandidateSignal struct {
 	StockIdx     uint16
 	Token        uint32
 	Symbol       string
-	PatternType  string // PatternVWAPPullbackReclaim | PatternORB15MBreakout
+	PatternType  string // PatternVWAPPullbackReclaim | PatternFailedBreakdownReclaim | PatternORBRetestReclaim
 	SignalBarLow float64
 	BullishScore float64
 	Sizing       SizingDecision
@@ -124,8 +124,14 @@ func PickBestLongCandidate(
 		var signalBarLow float64
 
 		// Strategy Setup 1: VWAP Pullback Reclaim (Aligned with CalculateBullishScore sVWAP)
+		// Richie Naso Confluence Law: 9 EMA must be strictly positive (warm), above or at VWAP,
+		// and ATR-normalized slope (ΔEMA9 / ATRsafe) must be flat or rising (>= -0.05 ATR).
+		// Volatility Buffer Law: Stop is placed below signal candle low minus 0.20 ATR buffer to avoid stop hunts.
 		distanceToVWAPInATR := (stock.LTP - stock.ExchangeVWAP) / atrSafe
 		previousBarMidpoint := (previousBar.Open + previousBar.Close) / 2.0
+		normalizedEMA9Slope := stock.EMA9Slope / atrSafe
+		isEMA9Confluence := stock.EMA9 > 0 && stock.EMA9 >= stock.ExchangeVWAP && normalizedEMA9Slope >= -0.05
+
 		if distanceToVWAPInATR >= 0.05 && distanceToVWAPInATR <= 0.55 &&
 			previousBar.Low > 0 &&
 			previousBar.Low <= stock.ExchangeVWAP+0.35*atrSafe &&
@@ -134,24 +140,60 @@ func PickBestLongCandidate(
 			closeLocationValue >= 0.58 &&
 			stock.AggressorBuyRatio >= 0.56 &&
 			stock.FastAggressorEMA >= 0.55 &&
-			stock.SmoothedBuyerRatio >= 0.55 {
+			stock.SmoothedBuyerRatio >= 0.55 &&
+			isEMA9Confluence {
 			matchedPattern = PatternVWAPPullbackReclaim
-			signalBarLow = math.Min(previousBar.Low, currentBar.Low)
+			signalBarLow = math.Min(previousBar.Low, currentBar.Low) - (0.20 * atrSafe)
 		}
 
-		// Strategy Setup 2: 15-Minute Opening Range Breakout (ORB 15M)
-		if matchedPattern == "" && isOpeningRangeBreakoutAllowed && stock.CurrentBarIdx >= 3 {
+		// Strategy Setup 2: Failed Breakdown Reclaim (Specialist Liquidity Sweep / Bear Trap Spring)
+		// Per Richie Naso & Rishi Narang: When market makers sweep below VWAP to trigger retail stops,
+		// and volume immediately reclaims VWAP with aggressive buyers, ride the trapped-short squeeze.
+		if matchedPattern == "" && stock.CurrentBarIdx >= 2 {
+			sweptBelowVWAP := previousBar.Low < stock.ExchangeVWAP-0.05*atrSafe &&
+				previousBar.Low >= stock.ExchangeVWAP-0.45*atrSafe
+			reclaimedVWAP := stock.LTP >= stock.ExchangeVWAP+0.05*atrSafe &&
+				stock.LTP > currentBar.Open+2.0*tickSize
+
+			if sweptBelowVWAP && reclaimedVWAP &&
+				closeLocationValue >= 0.60 &&
+				stock.AggressorBuyRatio >= 0.58 &&
+				stock.FastAggressorEMA >= 0.56 &&
+				stock.SmoothedBuyerRatio >= 0.56 &&
+				compositeRVOL >= 1.5 {
+				matchedPattern = PatternFailedBreakdownReclaim
+				signalBarLow = previousBar.Low - (0.20 * atrSafe)
+			}
+		}
+
+		// Strategy Setup 3: 15-Minute Opening Range Retest Reclaim (Abolishes Naive 80%-Failure First Breakout)
+		// Per Richie Naso: Never buy the initial breakout poke. Require a completed 5m bar close above ORH,
+		// followed by a retest of the range high that holds as confirmed support before entry.
+		if matchedPattern == "" && isOpeningRangeBreakoutAllowed && stock.CurrentBarIdx >= 4 {
 			openingRangeHigh, openingRangeLow, isORBReady := stock.OpeningRange15m()
-			if isORBReady && (openingRangeHigh-openingRangeLow) <= 1.8*atrSafe &&
-				stock.LTP > openingRangeHigh+tickSize &&
-				(stock.LTP-openingRangeHigh) <= 0.35*atrSafe &&
+			hasConfirmedBreakoutClose := false
+			if isORBReady {
+				for barIdx := uint8(3); barIdx < stock.CurrentBarIdx; barIdx++ {
+					if stock.SessionBars[barIdx].Close > openingRangeHigh {
+						hasConfirmedBreakoutClose = true
+						break
+					}
+				}
+			}
+
+			if isORBReady && hasConfirmedBreakoutClose && (openingRangeHigh-openingRangeLow) <= 1.8*atrSafe &&
+				previousBar.Low <= openingRangeHigh+0.25*atrSafe &&
+				previousBar.Low >= openingRangeHigh-0.35*atrSafe &&
+				stock.LTP > openingRangeHigh &&
+				stock.LTP > currentBar.Open+tickSize &&
+				(stock.LTP-openingRangeHigh) <= 0.45*atrSafe &&
 				compositeRVOL >= 1.8 &&
-				closeLocationValue >= 0.65 &&
-				stock.AggressorBuyRatio >= 0.60 &&
-				stock.FastAggressorEMA >= 0.58 &&
-				stock.SmoothedBuyerRatio >= 0.58 {
-				matchedPattern = PatternORB15MBreakout
-				signalBarLow = math.Max(currentBar.Low, openingRangeHigh-0.85*atrSafe)
+				closeLocationValue >= 0.62 &&
+				stock.AggressorBuyRatio >= 0.58 &&
+				stock.FastAggressorEMA >= 0.56 &&
+				stock.SmoothedBuyerRatio >= 0.56 {
+				matchedPattern = PatternORBRetestReclaim
+				signalBarLow = math.Min(previousBar.Low, currentBar.Low) - (0.20 * atrSafe)
 			}
 		}
 		candidateDiagnostic.PatternMatched = matchedPattern
@@ -181,7 +223,7 @@ func PickBestLongCandidate(
 			continue
 		}
 		if matchedPattern == "" {
-			candidateDiagnostic.BlockingReason = fmt.Sprintf("Awaiting VWAP Pullback Reclaim (0.05–0.55 ATR, cur %.2f) or 15m ORB Breakout", distanceToVWAPInATR)
+			candidateDiagnostic.BlockingReason = fmt.Sprintf("Awaiting VWAP Reclaim (cur %.2f ATR), Bear Trap Spring, or ORB Retest", distanceToVWAPInATR)
 			candidateDiagnostics = append(candidateDiagnostics, candidateDiagnostic)
 			continue
 		}

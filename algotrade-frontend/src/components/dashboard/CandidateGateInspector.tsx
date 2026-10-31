@@ -104,9 +104,13 @@ export const CandidateGateInspector = memo(function CandidateGateInspector({
                   label={
                     c.pattern_matched === "VWAP_PULLBACK_RECLAIM"
                       ? "5. VWAP Pullback"
+                      : c.pattern_matched === "FAILED_BREAKDOWN_SPRING"
+                      ? "5. Bear Trap Spring"
+                      : c.pattern_matched === "ORB_RETEST_RECLAIM"
+                      ? "5. ORB Retest"
                       : c.pattern_matched === "ORB_15M_BREAKOUT"
                       ? "5. 15m ORB"
-                      : "5. Setup (VWAP/ORB)"
+                      : "5. Setup (VWAP/Spring/ORB)"
                   }
                   ok={Boolean(c.pattern_matched)}
                 />

@@ -106,9 +106,21 @@ func (actor *Actor) processTick(tick *ParsedTick) {
 	if barIdx > int64(stock.CurrentBarIdx) && barIdx < 75 {
 		// Finalize old bar
 		oldIdx := stock.CurrentBarIdx
-		stock.SessionBars[oldIdx].Close = stock.LTP
+		closedPrice := stock.LTP
+		stock.SessionBars[oldIdx].Close = closedPrice
 		if stock.Volume >= stock.BarStartVolume {
 			stock.SessionBars[oldIdx].Volume = stock.Volume - stock.BarStartVolume
+		}
+
+		// Update 9-period Exponential Moving Average on completed 5-minute close
+		const alphaEMA9 = 2.0 / (9.0 + 1.0) // 0.20
+		previousEMA9 := stock.EMA9
+		if previousEMA9 <= 0 {
+			stock.EMA9 = closedPrice
+			stock.EMA9Slope = 0.0
+		} else {
+			stock.EMA9 = alphaEMA9*closedPrice + (1.0-alphaEMA9)*previousEMA9
+			stock.EMA9Slope = stock.EMA9 - previousEMA9
 		}
 
 		// Queue old bar for background SQLite flush

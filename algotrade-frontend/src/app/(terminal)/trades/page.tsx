@@ -1115,7 +1115,9 @@ export default function TradeHistoryAndTaxPage() {
             >
               <option value="ALL">All Patterns</option>
               <option value="VWAP_PULLBACK">VWAP Pullback Reclaim</option>
-              <option value="ORB_15M">15-Minute ORB Breakout</option>
+              <option value="FAILED_BREAKDOWN">Bear Trap Spring</option>
+              <option value="ORB_RETEST">15m ORB Retest</option>
+              <option value="ORB_15M">15m ORB Breakout (Legacy)</option>
             </select>
           </div>
 

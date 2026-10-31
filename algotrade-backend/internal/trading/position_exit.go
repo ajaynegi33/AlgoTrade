@@ -215,6 +215,32 @@ func (worker *PositionWorker) executeThreeStepScaleOut() {
 		}
 	}
 
+	if rem <= 1 {
+		// 1-share position cannot be halved (rem / 2 = 0).
+		// Mark Tranche 1 as completed so it does not loop, and let the 1 share ride with the runner trailing stop.
+		worker.hasTranche1Completed.Store(true)
+		worker.isTranche1Pending.Store(false)
+		worker.mu.Lock()
+		worker.state = StateProtectedActive
+		worker.mu.Unlock()
+
+		// Ensure stop is immediately ratcheted to Tax-Free Breakeven if not already higher
+		curStop := math.Float64frombits(worker.confirmedStopBits.Load())
+		beStop := worker.GetBreakevenStop()
+		ltp := worker.LatestLTP()
+		if beStop > curStop && worker.modCount.Load() < MaxSafetyModifications {
+			beLimit := ComputeSellSLLimitPrice(beStop, worker.TickSize)
+			if err := worker.broker.ModifySLOrder(worker.ctx, slOrdID, rem, beStop, beLimit, ltp, worker.TickSize); err == nil {
+				worker.modCount.Add(1)
+				worker.lastModUnixMs.Store(time.Now().UnixMilli())
+				worker.confirmedStopBits.Store(math.Float64bits(beStop))
+				worker.shadowStopBits.Store(math.Float64bits(beStop))
+			}
+		}
+		worker.persistPositionState()
+		return
+	}
+
 	scaleOutQty := rem / 2
 	runnerQty := rem - scaleOutQty
 	curStop := math.Float64frombits(worker.confirmedStopBits.Load())

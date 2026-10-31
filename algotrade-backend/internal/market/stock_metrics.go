@@ -73,6 +73,8 @@ type StockMetrics struct {
 	PrevClose         float64 // Previous Day Close
 	ATR14             float64 // 14-period Average True Range
 	ADX14             float64 // 14-period Trend Strength
+	EMA9              float64 // 9-period Exponential Moving Average on 5m candle close prices
+	EMA9Slope         float64 // Current bar EMA9 - Previous bar EMA9 (trend velocity)
 	BullishScore      float64 // Composite Bullish Rank (0 to 100)
 	BearishScore      float64 // Composite Bearish Rank (0 to 100)
 	CompositeRS       float64 // Timeframe-matched relative strength vs Nifty & Sector

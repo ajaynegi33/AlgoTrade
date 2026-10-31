@@ -454,6 +454,27 @@ func (worker *PositionWorker) workerLoop() {
 				worker.executeEmergencyFlatten("SL_STRANDED_OPEN_500MS")
 				return
 			}
+
+			// In-Trade Alpha Decay Stagnation Guard (Dr. Samir Varma & Rishi Narang quant law):
+			// If trade has been active for >= 45 minutes and peak favorable excursion hasn't even reached +0.50R,
+			// information edge has decayed into random walk friction. Exit cleanly at market.
+			worker.mu.RLock()
+			st := worker.state
+			openedAt := worker.OpenedAt
+			worker.mu.RUnlock()
+			if st == StateProtectedActive && !openedAt.IsZero() && time.Since(openedAt) >= 45*time.Minute {
+				hwm := math.Float64frombits(worker.highWaterMarkBits.Load())
+				entryPrice := worker.GetEntryPrice()
+				var maxFavR float64
+				if worker.OneR > 0 && hwm > 0 && entryPrice > 0 {
+					maxFavR = (hwm - entryPrice) / worker.OneR
+				}
+				if maxFavR < 0.50 {
+					worker.executeEmergencyFlatten("ALPHA_DECAY_45M_STAGNATION")
+					return
+				}
+			}
+
 			worker.processPendingWork()
 
 		case <-worker.wakeCh:

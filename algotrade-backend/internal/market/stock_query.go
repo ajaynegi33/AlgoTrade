@@ -243,6 +243,8 @@ func (actor *Actor) getStockDetailInternal(symbol string) (*StockDetailDTO, bool
 		Change:            chg,
 		ChangePercent:     chgPct,
 		VWAP:              stockMetrics.ExchangeVWAP,
+		EMA9:              stockMetrics.EMA9,
+		EMA9Slope:         stockMetrics.EMA9Slope,
 		VWAPDistance:      vwapDist,
 		VWAPDistancePct:   vwapDistPct,
 		ORH:               openingRangeHigh,

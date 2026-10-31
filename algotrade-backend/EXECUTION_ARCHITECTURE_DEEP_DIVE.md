@@ -231,23 +231,33 @@ internal/trading/execution_manager.go: Manager.OnSecondTick()
 | **Gate 2: Score** | `stock.BullishScore`, `stock.EV` | `Score >= minScore && EV >= +0.25R` | `Score < threshold or EV < 0.25R` |
 | **Gate 2: RVOL** | `stock.CompositeRVOL` | `CompositeRVOL >= minRVOL` | `Composite RVOL < threshold` |
 | **Gate 3: Ask Wall**| `Ask1Qty` vs `(Bid1Qty + Bid2Qty)`| $\text{Ask1Qty} \le 4 \times (\text{Bid1} + \text{Bid2})$| `Ask1 Wall > 4x Top-2 Bid Depth` |
-| **Gate 4: Pattern**| `PatternMatched` | `!= ""` (Must match Setup 1 or 2) | `Awaiting VWAP Reclaim or 15m ORB` |
+| **Gate 4: Pattern**| `PatternMatched` | `!= ""` (Must match Setup 1, 2, or 3) | `Awaiting VWAP Reclaim, Bear Trap Spring, or ORB Retest` |
 
 #### Mathematical Formulations
 1. **Strategy Setup 1: VWAP Pullback Reclaim (`VWAP_PULLBACK_RECLAIM`)**:
+   - Trend Confluence (Richie Naso Law): $\text{EMA}_9 \ge \text{ExchangeVWAP} \land \text{Slope}_{\text{EMA}_9} \ge -0.01$.
    - Price Zone: $0.05 \le \frac{\text{LTP} - \text{ExchangeVWAP}}{\text{ATR}_{\text{safe}}} \le 0.55$.
    - Dip Depth: $\text{PreviousBar.Low} \le \text{ExchangeVWAP} + 0.35\text{ATR}_{\text{safe}}$ and $\ge \text{ExchangeVWAP} - 0.15\text{ATR}_{\text{safe}}$.
    - Reclaim Condition:
      $$\text{LTP} > \max\left(\text{CurrentBar.Open} + 2\text{ ticks}, \frac{\text{PreviousBar.Open} + \text{PreviousBar.Close}}{2.0}\right)$$
    - Flow Confirmation: $\text{CLV} \ge 0.58$, $\text{AggressorBuyRatio} \ge 0.56$, $\text{FastAggressorEMA} \ge 0.55$, $\text{SmoothedBuyerRatio} \ge 0.55$.
-   - Signal Bar Low: $\min(\text{PreviousBar.Low}, \text{CurrentBar.Low})$.
+   - Volatility-Buffered Stop: $\min(\text{PreviousBar.Low}, \text{CurrentBar.Low}) - (0.20 \times \text{ATR}_{\text{safe}})$.
 
-2. **Strategy Setup 2: 15-Minute Opening Range Breakout (`ORB_15M_BREAKOUT`)**:
-   - Time Requirement: $\text{CurrentBarIdx} \ge 3$ ($\ge 09:30\text{ IST}$).
+2. **Strategy Setup 2: Failed Breakdown Reclaim / Bear Trap Spring (`FAILED_BREAKDOWN_SPRING`)**:
+   - Specialist Liquidity Sweep (Richie Naso & Rishi Narang Law): Institutional market makers flush stops below VWAP before surging back into value.
+   - Dip Sweep: $\text{ExchangeVWAP} - 0.45\text{ATR}_{\text{safe}} \le \text{PreviousBar.Low} < \text{ExchangeVWAP} - 0.05\text{ATR}_{\text{safe}}$.
+   - Rapid Snapback Reclaim: $\text{LTP} \ge \text{ExchangeVWAP} + 0.05\text{ATR}_{\text{safe}} \land \text{LTP} > \text{CurrentBar.Open} + 2\text{ ticks}$.
+   - Aggression & Absorption: $\text{CompositeRVOL} \ge 1.5$, $\text{CLV} \ge 0.60$, $\text{AggressorBuyRatio} \ge 0.58$, $\text{FastAggressorEMA} \ge 0.56$.
+   - Volatility-Buffered Stop: $\text{PreviousBar.Low} - (0.20 \times \text{ATR}_{\text{safe}})$.
+
+3. **Strategy Setup 3: 15-Minute Opening Range Retest Reclaim (`ORB_RETEST_RECLAIM`)**:
+   - Abolishes Naive 80%-Failure First Breakout: First poke beyond 15m range high is a retail trap. We wait for the retest to hold.
    - Range Compression: $\text{ORH} - \text{ORL} \le 1.8 \times \text{ATR}_{\text{safe}}$.
-   - Breakout Extension: $\text{ORH} + 1\text{ tick} < \text{LTP} \le \text{ORH} + 0.35\text{ATR}_{\text{safe}}$.
-   - Volume & Aggression: $\text{CompositeRVOL} \ge 1.8$, $\text{CLV} \ge 0.65$, $\text{AggressorBuyRatio} \ge 0.60$, $\text{FastAggressorEMA} \ge 0.58$.
-   - Signal Bar Low: $\max(\text{CurrentBar.Low}, \text{ORH} - 0.85\text{ATR}_{\text{safe}})$.
+   - Prior Breakout: $\text{Stock.High} > \text{ORH}$.
+   - Retest Support Hold: $\text{ORH} - 0.35\text{ATR}_{\text{safe}} \le \text{PreviousBar.Low} \le \text{ORH} + 0.25\text{ATR}_{\text{safe}}$.
+   - Reclaim Extension: $\text{ORH} < \text{LTP} \le \text{ORH} + 0.45\text{ATR}_{\text{safe}} \land \text{LTP} > \text{CurrentBar.Open} + 1\text{ tick}$.
+   - Volume & Aggression: $\text{CompositeRVOL} \ge 1.8$, $\text{CLV} \ge 0.62$, $\text{AggressorBuyRatio} \ge 0.58$, $\text{FastAggressorEMA} \ge 0.56$.
+   - Volatility-Buffered Stop: $\min(\text{PreviousBar.Low}, \text{CurrentBar.Low}) - (0.20 \times \text{ATR}_{\text{safe}})$.
 
 ---
 
@@ -377,7 +387,9 @@ internal/market/tick_ingestion.go: Actor.processTick()
     ├── Update High-Water Mark (HWM) & Low-Water Mark (LWM) via atomic CAS
     ├── Guard A: 200ms SL breach latency watchdog
     ├── Guard B: Gear 4 Virtual Shadow Stop check (modCount >= 24)
-    ├── Guard C: +0.65R Scale-out trigger (isTranche1Pending = true)
+    ├── Guard C: +1.50R Scale-out trigger (isTranche1Pending = true)
+    ├── Guard D: Breakeven Ratchet at +1.00R (avoids Brownian noise stop-out)
+    ├── Guard E: 45-Minute In-Trade Alpha Decay Stagnation Watchdog (HWM < +0.50R)
     ├── Compute Dynamic Multipliers (M_flow, C_climax)
     └── Call ProposeStopRatchet() ──[wakeWorker()]──> workerLoop
           └── internal/trading/position_exit.go: executeThreeStepScaleOut()
@@ -391,12 +403,16 @@ internal/market/tick_ingestion.go: Actor.processTick()
 | **Gear 4: Shadow**| Mod $\ge 24$| Virtual in RAM (`shadowStopBits`) | **0 ms (In-Memory)**| **Preserves Modification #25** exclusively for emergency market exit |
 
 #### Race-Free 3-Step Scale-Out Protocol (`executeThreeStepScaleOut`)
-Triggered when trade reaches $+0.65R$ (Target R1):
+Triggered when trade reaches $+1.50R$ (Tranche 1 Asymmetric Profit Harvest per Dr. Samir Varma):
 1. **Step 1 (Shrink SL)**: Shrink resting SL order quantity from $Q \to Q_{\text{runner}}$ while keeping trigger price unchanged.
 2. **Step 2 (Marketable Sell)**: Place marketable limit sell for $Q_{\text{scale}} = Q / 2$.
    - **Compensating Rollback**: If Step 2 fails, immediately re-expands resting SL quantity back to $Q$.
 3. **Step 3 (Raise to Tax-Free Breakeven)**: Awaits fill confirmation for up to **800ms**. Cancels any unfilled remainder, reconciles, and raises runner SL trigger to **Tax-Free Breakeven**:
    $$\text{BreakevenStop} = \text{EntryPrice} + \frac{\text{TotalTaxesEntireTrade}}{Q_{\text{runner}}} + \max(2\text{ ticks}, 0.15\% \times \text{EntryPrice})$$
+
+#### In-Trade Alpha Decay Stagnation Guard
+- **Dr. Samir Varma & Rishi Narang Quant Law**: Intraday momentum signals have an information half-life $\lambda$ of 15–25 minutes. If a position has been active for $\ge 45\text{ minutes}$ and its peak favorable excursion has not even reached $+0.50R$, the edge has decayed into random walk transaction friction.
+- **Action**: Flatten immediately at market with exit reason `ALPHA_DECAY_45M_STAGNATION`, reclaiming margin and risk budget for fresh institutional setups.
 
 #### 4-Stage Bulletproof Exit Protocol (`executeEmergencyFlatten`)
 - **Stage A (Mutate to Market)**: Mutate resting SL order directly into `MARKET` (consumes reserved Modification #25). Awaits fill for up to **900ms**.

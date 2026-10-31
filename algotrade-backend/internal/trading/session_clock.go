@@ -122,16 +122,16 @@ func EvaluateGlobalSessionClocks(now time.Time, breadthPct float64, topBullishRV
 	}
 
 	switch {
-	case istMin < 9*60+20:
+	case istMin < 9*60+30:
 		dto.Phase = "OPENING_NOISE_BLACKOUT"
-		dto.PhaseLabel = "09:15–09:20 Opening Noise Blackout"
-		dto.PlaybookNote = "Absorbing opening auction imbalances and building first 5-minute structural candle."
+		dto.PhaseLabel = "09:15–09:30 Opening Noise Blackout"
+		dto.PlaybookNote = "Absorbing opening auction imbalances, retail fakeouts, and establishing opening 15m structural range."
 		dto.IsNewEntryAllowed = false
 
 	case istMin < 11*60+30:
 		dto.Phase = "MORNING_DISCOVERY_DRIVE"
 		dto.PhaseLabel = "Morning Institutional Discovery Drive"
-		dto.PlaybookNote = "Peak domestic & Asia overlap liquidity. VWAP Pullback Reclaim & 15m Opening Range Breakout active."
+		dto.PlaybookNote = "Peak domestic & Asia overlap liquidity. VWAP Pullback Reclaim, Bear Trap Spring, & ORB Retest active."
 		dto.IsNewEntryAllowed = true
 		dto.MinBullishScore = 75.0
 		dto.MinRVOL = 1.5
@@ -139,21 +139,22 @@ func EvaluateGlobalSessionClocks(now time.Time, breadthPct float64, topBullishRV
 
 	case !isFrankfurtOpen && !isLondonOpen && istMin < 13*60+30:
 		dto.Phase = "MIDDAY_COMPRESSION"
-		dto.IsNewEntryAllowed = true
-		// Check Live NSE Domestic Tape Override:
-		if breadthPct >= 60.0 && topBullishRVOL >= 2.2 {
+		// Check Live NSE Domestic Tape Override (Richie Naso & Dr. Samir Varma: lock midday chop unless extreme domestic breadth & surge):
+		if breadthPct >= 70.0 && topBullishRVOL >= 2.5 {
+			dto.IsNewEntryAllowed = true
 			dto.IsTapeOverrideActive = true
 			dto.PhaseLabel = "Midday Window • Domestic Tape Override Active"
-			dto.PlaybookNote = fmt.Sprintf("Breadth %.0f%% & RVOL %.1fx overriding midday lull (Europe opens in %s).", breadthPct, topBullishRVOL, formatDurationMin(minutesToEuropeOpen))
-			dto.MinBullishScore = 78.0
-			dto.MinRVOL = 1.8
-			dto.SizeMultiplier = 0.90
+			dto.PlaybookNote = fmt.Sprintf("Breadth %.0f%% & RVOL %.1fx overriding midday lull (Europe opens in %s). High barrier entry.", breadthPct, topBullishRVOL, formatDurationMin(minutesToEuropeOpen))
+			dto.MinBullishScore = 80.0
+			dto.MinRVOL = 2.0
+			dto.SizeMultiplier = 0.50
 		} else {
+			dto.IsNewEntryAllowed = false
 			dto.PhaseLabel = "Midday Compression Guard"
-			dto.PlaybookNote = fmt.Sprintf("Awaiting Frankfurt/London desk flow (%s). Strict Score ≥ 82 & VWAP Pullback Reclaim only.", formatDurationMin(minutesToEuropeOpen))
-			dto.MinBullishScore = 82.0
-			dto.MinRVOL = 1.8
-			dto.SizeMultiplier = 0.65
+			dto.PlaybookNote = fmt.Sprintf("Midday Brownian noise chop. New entries locked awaiting European desk flow (%s).", formatDurationMin(minutesToEuropeOpen))
+			dto.MinBullishScore = 85.0
+			dto.MinRVOL = 2.0
+			dto.SizeMultiplier = 0.50
 		}
 
 	case istMin < 14*60+45:

@@ -53,6 +53,8 @@ type StockRankDTO struct {
 	LTP               float64 `json:"ltp"`
 	ChangePercent     float64 `json:"change_percent"`
 	VWAP              float64 `json:"vwap"`
+	EMA9              float64 `json:"ema9"`
+	EMA9Slope         float64 `json:"ema9_slope"`
 	BullishScore      float64 `json:"bullish_score"`
 	BearishScore      float64 `json:"bearish_score"`
 	RVOLSession       float64 `json:"rvol_session"`
@@ -103,6 +105,8 @@ type StockDetailDTO struct {
 	Change            float64         `json:"change"`
 	ChangePercent     float64         `json:"change_percent"`
 	VWAP              float64         `json:"vwap"`
+	EMA9              float64         `json:"ema9"`
+	EMA9Slope         float64         `json:"ema9_slope"`
 	VWAPDistance      float64         `json:"vwap_distance"`
 	VWAPDistancePct   float64         `json:"vwap_distance_pct"`
 	ORH               float64         `json:"orh"`

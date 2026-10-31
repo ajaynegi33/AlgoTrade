@@ -255,6 +255,8 @@ func (actor *Actor) ConvertStockToDTO(stockMetrics *StockMetrics, rank int) Stoc
 		LTP:               stockMetrics.LTP,
 		ChangePercent:     math.Round(chgPercent*100.0) / 100.0,
 		VWAP:              stockMetrics.ExchangeVWAP,
+		EMA9:              math.Round(stockMetrics.EMA9*100.0) / 100.0,
+		EMA9Slope:         math.Round(stockMetrics.EMA9Slope*1000.0) / 1000.0,
 		BullishScore:      math.Round(stockMetrics.BullishScore*10.0) / 10.0,
 		BearishScore:      math.Round(stockMetrics.BearishScore*10.0) / 10.0,
 		RVOLSession:       math.Round(stockMetrics.RVOLSession*10.0) / 10.0,

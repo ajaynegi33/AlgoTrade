@@ -431,6 +431,32 @@ func (actor *Actor) applyBaselineProfile(profile *kite.StockBaselineProfile) {
 				s.ExchangeVWAP = weightedPriceVol / float64(cumVol)
 			}
 		}
+
+		// Compute initial 9 EMA across today's seeded 5m bars
+		const alphaEMA9 = 2.0 / (9.0 + 1.0)
+		var runningEMA float64
+		var prevEMA float64
+		var completedBarCount int
+		for barIdx := 0; barIdx <= maxSlot && barIdx < 75; barIdx++ {
+			closePx := s.SessionBars[barIdx].Close
+			if closePx > 0 {
+				completedBarCount++
+				if runningEMA <= 0 {
+					runningEMA = closePx
+				} else {
+					prevEMA = runningEMA
+					runningEMA = alphaEMA9*closePx + (1.0-alphaEMA9)*runningEMA
+				}
+			}
+		}
+		if runningEMA > 0 {
+			s.EMA9 = runningEMA
+			if completedBarCount >= 2 && prevEMA > 0 {
+				s.EMA9Slope = runningEMA - prevEMA
+			} else {
+				s.EMA9Slope = 0.0
+			}
+		}
 	}
 
 	curSlot := s.CurrentBarIdx

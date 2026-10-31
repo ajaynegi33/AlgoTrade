@@ -20,8 +20,8 @@ func TestStockMetricsAlignmentAndPhase2Math(t *testing.T) {
 	if sz%8 != 0 {
 		t.Fatalf("StockMetrics size %d is not a multiple of 8 bytes", sz)
 	}
-	if sz != 3992 {
-		t.Fatalf("expected StockMetrics size 3992 bytes, got %d", sz)
+	if sz != 4008 {
+		t.Fatalf("expected StockMetrics size 4008 bytes, got %d", sz)
 	}
 
 	// 2. Verify non-inverting DeltaMin < DeltaMax across all price tiers & extreme ATRs
@@ -144,15 +144,15 @@ func TestPositionWorkerThreeStepScaleOutAndShadowStopMod25(t *testing.T) {
 		t.Fatalf("expected RemainingQty=%d, got %d", sizing.Quantity, worker.RemainingQty())
 	}
 
-	// Simulate rally to +1.15R -> triggers 3-Step Scale-Out (50% sold, runner SL moved to Breakeven)
-	stock.LTP = worker.GetEntryPrice() + 1.15*worker.OneR
+	// Simulate rally to +1.60R -> triggers 3-Step Scale-Out (50% sold, runner SL moved to Breakeven)
+	stock.LTP = worker.GetEntryPrice() + 1.60*worker.OneR
 	stock.RollingPeak = stock.LTP
 	stock.LastUpdatedUnix += 5
 	worker.OnTickHotPath(&stock, false)
 
 	time.Sleep(120 * time.Millisecond)
 	if !worker.hasTranche1Completed.Load() {
-		t.Fatalf("expected hasTranche1Completed == true after +1.15R")
+		t.Fatalf("expected hasTranche1Completed == true after +1.60R")
 	}
 	expectedRunner := sizing.Quantity - (sizing.Quantity / 2)
 	if worker.RemainingQty() != expectedRunner {
@@ -822,19 +822,27 @@ func TestPositionWorker_EarlyHarvestAt065RAnd5mClose(t *testing.T) {
 	worker.filledEntryQty.Store(50)
 	worker.confirmedStopBits.Store(math.Float64bits(795.00))
 
-	// 1. Tick at 802.60 (+0.52R): verify stop ratchets to Breakeven (800.80)
+	// 1. Tick at 802.60 (+0.52R): verify stop does NOT ratchet to Breakeven yet (Breakeven triggers at >= +1.0R per Quant Laws)
 	stock.LTP = 802.60
 	worker.OnTickHotPath(stock, false)
 	shadow := math.Float64frombits(worker.shadowStopBits.Load())
-	if shadow < 800.80 {
-		t.Fatalf("expected shadow stop to ratchet to Breakeven 800.80 at +0.52R, got %.2f", shadow)
+	if shadow >= 800.80 {
+		t.Fatalf("expected shadow stop to NOT ratchet to Breakeven 800.80 at +0.52R, got %.2f", shadow)
 	}
 
-	// 2. Tick at 803.30 (+0.66R): verify Tranche 1 50% scale-out is triggered
-	stock.LTP = 803.30
+	// 2. Tick at 805.20 (+1.04R): verify stop ratchets to Breakeven (800.80)
+	stock.LTP = 805.20
+	worker.OnTickHotPath(stock, false)
+	shadow = math.Float64frombits(worker.shadowStopBits.Load())
+	if shadow < 800.80 {
+		t.Fatalf("expected shadow stop to ratchet to Breakeven 800.80 at +1.04R, got %.2f", shadow)
+	}
+
+	// 3. Tick at 807.60 (+1.52R): verify Tranche 1 50% scale-out is triggered
+	stock.LTP = 807.60
 	worker.OnTickHotPath(stock, false)
 	if !worker.isTranche1Pending.Load() {
-		t.Fatalf("expected isTranche1Pending to be TRUE at +0.66R for early profit harvest, got false")
+		t.Fatalf("expected isTranche1Pending to be TRUE at +1.52R for profit harvest, got false")
 	}
 
 	// 3. Intra-candle dip does NOT panic-dump if 5m bar hasn't closed below InitialStop
@@ -1531,6 +1539,380 @@ func TestContinuousPortfolioHeatEngine(t *testing.T) {
 	sizingFull := ComputePositionSize(candStock, 49.30, capDTO.NetEquity, capDTO.FreeMargin, 0.005, 1.0, 1.0, newRemBudget)
 	if !sizingFull.IsApproved || sizingFull.Quantity <= 0 {
 		t.Fatalf("Expected Candidate 3 to be approved after heat release, got: %+v", sizingFull)
+	}
+}
+
+func TestGlobalSessionClock_BlackoutAndMiddayLock(t *testing.T) {
+	loc := market.ISTLocation
+	testDate := time.Date(2026, 10, 26, 0, 0, 0, 0, loc) // Monday
+
+	// 1. 09:25 IST - Must be OPENING_NOISE_BLACKOUT, no new entries
+	t0925 := testDate.Add(9*time.Hour + 25*time.Minute)
+	clock0925 := EvaluateGlobalSessionClocks(t0925, 50.0, 1.0)
+	if clock0925.Phase != "OPENING_NOISE_BLACKOUT" || clock0925.IsNewEntryAllowed {
+		t.Fatalf("expected 09:25 to be OPENING_NOISE_BLACKOUT with entries locked, got phase=%s allowed=%v",
+			clock0925.Phase, clock0925.IsNewEntryAllowed)
+	}
+
+	// 2. 09:35 IST - Must be MORNING_DISCOVERY_DRIVE, entries allowed
+	t0935 := testDate.Add(9*time.Hour + 35*time.Minute)
+	clock0935 := EvaluateGlobalSessionClocks(t0935, 50.0, 1.0)
+	if clock0935.Phase != "MORNING_DISCOVERY_DRIVE" || !clock0935.IsNewEntryAllowed {
+		t.Fatalf("expected 09:35 to be MORNING_DISCOVERY_DRIVE with entries allowed, got phase=%s allowed=%v",
+			clock0935.Phase, clock0935.IsNewEntryAllowed)
+	}
+
+	// 3. 12:00 IST - Midday compression without tape override: entries locked
+	t1200 := testDate.Add(12 * time.Hour)
+	clock1200Norm := EvaluateGlobalSessionClocks(t1200, 50.0, 1.0)
+	if clock1200Norm.Phase != "MIDDAY_COMPRESSION" || clock1200Norm.IsNewEntryAllowed {
+		t.Fatalf("expected 12:00 normal to be MIDDAY_COMPRESSION with entries locked, got phase=%s allowed=%v",
+			clock1200Norm.Phase, clock1200Norm.IsNewEntryAllowed)
+	}
+
+	// 4. 12:00 IST - Midday compression WITH tape override: entries allowed, sizeMult = 0.50
+	clock1200Override := EvaluateGlobalSessionClocks(t1200, 75.0, 2.8)
+	if clock1200Override.Phase != "MIDDAY_COMPRESSION" || !clock1200Override.IsNewEntryAllowed || !clock1200Override.IsTapeOverrideActive || clock1200Override.SizeMultiplier != 0.50 {
+		t.Fatalf("expected 12:00 override to allow entries with 0.50x size, got: %+v", clock1200Override)
+	}
+}
+
+func TestEntryGatekeeper_NewQuantPatternsAndEMAConfluence(t *testing.T) {
+	var stocks [512]market.StockMetrics
+	secMap := make(map[uint8]market.SectorHealth)
+
+	sessionClock := market.GlobalSessionClockDTO{
+		Phase:             "MORNING_DISCOVERY_DRIVE",
+		IsNewEntryAllowed: true,
+		MinBullishScore:   75.0,
+		MinRVOL:           1.5,
+		SizeMultiplier:    1.0,
+	}
+
+	// 1. Test PatternFailedBreakdownReclaim (Bear Trap Spring)
+	stockSpring := &stocks[0]
+	stockSpring.InstrumentToken = 1001
+	stockSpring.SetSymbol("SPRING")
+	stockSpring.IsTradeable = true
+	stockSpring.IsWarm = true
+	stockSpring.LTP = 502.0
+	stockSpring.ExchangeVWAP = 500.0
+	stockSpring.ATR14 = 5.0 // atrSafe = 5.0
+	stockSpring.TickSize = 0.05
+	stockSpring.CurrentBarIdx = 2
+	stockSpring.BullishScore = 82.0
+	stockSpring.EV = 0.40
+	stockSpring.RVOLSession = 2.0
+	stockSpring.RVOLPace5m = 2.0
+	stockSpring.AggressorBuyRatio = 0.65
+	stockSpring.FastAggressorEMA = 0.62
+	stockSpring.SmoothedBuyerRatio = 0.60
+	for i := 0; i < 5; i++ {
+		stockSpring.AskLevels[i] = market.DepthLevel{Price: float32(502.05 + float64(i)*0.05), Qty: 10000}
+		stockSpring.BidLevels[i] = market.DepthLevel{Price: float32(501.95 - float64(i)*0.05), Qty: 10000}
+	}
+	// Previous bar swept below VWAP (500 - 0.20*5 = 499.0, within [500 - 0.45*5, 500 - 0.05*5] = [497.75, 499.75])
+	stockSpring.SessionBars[1] = market.OHLCVBar{Open: 501.0, High: 502.0, Low: 499.0, Close: 500.0}
+	// Current bar reclaims VWAP with authority: LTP 502.0 >= 500 + 0.05*5 = 500.25, Open 500.0
+	stockSpring.SessionBars[2] = market.OHLCVBar{Open: 500.0, High: 502.5, Low: 499.8, Close: 502.0}
+
+	sig, _, _, _ := PickBestLongCandidate(&stocks, []uint16{0}, secMap, sessionClock, 200000.0, 200000.0, 0.005, 1.0, 4000.0, nil)
+	if sig == nil || sig.PatternType != PatternFailedBreakdownReclaim {
+		t.Fatalf("expected PatternFailedBreakdownReclaim, got sig: %+v", sig)
+	}
+	expectedStop := 499.0 - (0.20 * 5.0) // previousBar.Low - 0.20*ATR = 498.0
+	if math.Abs(sig.SignalBarLow-expectedStop) > 1e-4 {
+		t.Fatalf("expected signalBarLow=%.2f, got %.2f", expectedStop, sig.SignalBarLow)
+	}
+
+	// 2. Test PatternORBRetestReclaim
+	stockORB := &stocks[1]
+	stockORB.InstrumentToken = 1002
+	stockORB.SetSymbol("ORBRETEST")
+	stockORB.IsTradeable = true
+	stockORB.IsWarm = true
+	stockORB.ExchangeVWAP = 200.0
+	stockORB.ATR14 = 4.0 // atrSafe = 4.0
+	stockORB.TickSize = 0.05
+	stockORB.CurrentBarIdx = 4
+	stockORB.BullishScore = 80.0
+	stockORB.EV = 0.35
+	stockORB.RVOLSession = 2.2
+	stockORB.RVOLPace5m = 2.0
+	stockORB.AggressorBuyRatio = 0.62
+	stockORB.FastAggressorEMA = 0.60
+	stockORB.SmoothedBuyerRatio = 0.58
+	for i := 0; i < 5; i++ {
+		stockORB.AskLevels[i] = market.DepthLevel{Price: float32(206.05 + float64(i)*0.05), Qty: 10000}
+		stockORB.BidLevels[i] = market.DepthLevel{Price: float32(205.95 - float64(i)*0.05), Qty: 10000}
+	}
+	// 15m range (bars 0, 1, 2): High = 205.0, Low = 200.0, range = 5.0 <= 1.8*4 (7.2)
+	stockORB.SessionBars[0] = market.OHLCVBar{Open: 200.0, High: 204.0, Low: 200.0, Close: 203.0}
+	stockORB.SessionBars[1] = market.OHLCVBar{Open: 203.0, High: 205.0, Low: 202.0, Close: 204.0}
+	stockORB.SessionBars[2] = market.OHLCVBar{Open: 204.0, High: 204.5, Low: 204.0, Close: 204.0}
+
+	// 2a. Unconfirmed ORB: Bar 3 only wicked to 207.0 but CLOSED at 204.0 (inside range!) -> MUST be blocked!
+	stockORB.SessionBars[3] = market.OHLCVBar{Open: 204.0, High: 207.0, Low: 203.5, Close: 204.0}
+	stockORB.LTP = 206.0
+	stockORB.SessionBars[4] = market.OHLCVBar{Open: 204.5, High: 206.5, Low: 204.2, Close: 206.0}
+	sigORBBlocked, _, _, _ := PickBestLongCandidate(&stocks, []uint16{1}, secMap, sessionClock, 200000.0, 200000.0, 0.005, 1.0, 4000.0, nil)
+	if sigORBBlocked != nil {
+		t.Fatalf("expected unconfirmed ORB wick to be blocked, got: %+v", sigORBBlocked)
+	}
+
+	// 2b. Confirmed ORB: Bar 3 actually CLOSED above ORH at 206.0 -> MUST qualify!
+	stockORB.SessionBars[3] = market.OHLCVBar{Open: 204.0, High: 206.5, Low: 204.2, Close: 206.0}
+	sigORB, _, _, _ := PickBestLongCandidate(&stocks, []uint16{1}, secMap, sessionClock, 200000.0, 200000.0, 0.005, 1.0, 4000.0, nil)
+	if sigORB == nil || sigORB.PatternType != PatternORBRetestReclaim {
+		t.Fatalf("expected PatternORBRetestReclaim, got sig: %+v", sigORB)
+	}
+
+	// 3. Test VWAP Pullback Reclaim EMA9 Confluence rejection
+	stockVWAP := &stocks[2]
+	stockVWAP.InstrumentToken = 1003
+	stockVWAP.SetSymbol("VWAPCONFL")
+	stockVWAP.IsTradeable = true
+	stockVWAP.IsWarm = true
+	stockVWAP.ExchangeVWAP = 1000.0
+	stockVWAP.ATR14 = 10.0 // atrSafe = 10.0
+	stockVWAP.TickSize = 0.05
+	stockVWAP.CurrentBarIdx = 2
+	stockVWAP.BullishScore = 80.0
+	stockVWAP.EV = 0.35
+	stockVWAP.RVOLSession = 2.0
+	stockVWAP.RVOLPace5m = 2.0
+	stockVWAP.AggressorBuyRatio = 0.60
+	stockVWAP.FastAggressorEMA = 0.58
+	stockVWAP.SmoothedBuyerRatio = 0.58
+	stockVWAP.LTP = 1002.0 // 0.2 ATR above VWAP
+	for i := 0; i < 5; i++ {
+		stockVWAP.AskLevels[i] = market.DepthLevel{Price: float32(1002.05 + float64(i)*0.05), Qty: 10000}
+		stockVWAP.BidLevels[i] = market.DepthLevel{Price: float32(1001.95 - float64(i)*0.05), Qty: 10000}
+	}
+	stockVWAP.SessionBars[1] = market.OHLCVBar{Open: 1001.0, High: 1003.0, Low: 1000.5, Close: 1001.0}
+	stockVWAP.SessionBars[2] = market.OHLCVBar{Open: 1000.5, High: 1003.0, Low: 1000.2, Close: 1002.0}
+
+	// 3a. Fail-closed: EMA9 <= 0 (uninitialized) -> MUST be blocked!
+	stockVWAP.EMA9 = 0.0
+	stockVWAP.EMA9Slope = 0.0
+	sigUninit, _, _, _ := PickBestLongCandidate(&stocks, []uint16{2}, secMap, sessionClock, 200000.0, 200000.0, 0.005, 1.0, 4000.0, nil)
+	if sigUninit != nil {
+		t.Fatalf("expected candidate to be blocked when EMA9 is uninitialized (<= 0), got: %+v", sigUninit)
+	}
+
+	// 3b. EMA9 is below VWAP (995.0 < 1000.0) -> MUST be blocked by Richie Naso Confluence rule!
+	stockVWAP.EMA9 = 995.0
+	stockVWAP.EMA9Slope = 0.2
+	sigBelowVWAP, _, _, _ := PickBestLongCandidate(&stocks, []uint16{2}, secMap, sessionClock, 200000.0, 200000.0, 0.005, 1.0, 4000.0, nil)
+	if sigBelowVWAP != nil {
+		t.Fatalf("expected candidate to be blocked when EMA9 < VWAP, got: %+v", sigBelowVWAP)
+	}
+
+	// 3c. EMA9 above VWAP but steep negative slope (-0.80 / 10.0 = -0.08 < -0.05 ATR) -> MUST be blocked!
+	stockVWAP.EMA9 = 1002.0
+	stockVWAP.EMA9Slope = -0.80
+	sigSteepSlope, _, _, _ := PickBestLongCandidate(&stocks, []uint16{2}, secMap, sessionClock, 200000.0, 200000.0, 0.005, 1.0, 4000.0, nil)
+	if sigSteepSlope != nil {
+		t.Fatalf("expected candidate to be blocked when normalized slope < -0.05 ATR, got: %+v", sigSteepSlope)
+	}
+
+	// 3d. EMA9 is above VWAP (1002.0 >= 1000.0) and slope is gentle/positive (-0.20 / 10.0 = -0.02 >= -0.05 ATR) -> MUST pass!
+	stockVWAP.EMA9 = 1002.0
+	stockVWAP.EMA9Slope = -0.20
+	sigPass, _, _, _ := PickBestLongCandidate(&stocks, []uint16{2}, secMap, sessionClock, 200000.0, 200000.0, 0.005, 1.0, 4000.0, nil)
+	if sigPass == nil || sigPass.PatternType != PatternVWAPPullbackReclaim {
+		t.Fatalf("expected PatternVWAPPullbackReclaim when EMA9 >= VWAP and slope valid, got: %+v", sigPass)
+	}
+	// Verify stop includes 0.20 ATR buffer: min(1000.5, 1000.2) - 0.20*10 = 1000.2 - 2.0 = 998.2
+	expectedVWAPStop := 1000.2 - (0.20 * 10.0)
+	if math.Abs(sigPass.SignalBarLow-expectedVWAPStop) > 1e-4 {
+		t.Fatalf("expected VWAP signalBarLow=%.2f, got %.2f", expectedVWAPStop, sigPass.SignalBarLow)
+	}
+}
+
+func TestPositionWorker_AlphaDecayStagnation45m(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var worker *PositionWorker
+	reconciler := NewOrderReconciler(nil, func(posID, legType string, ev OrderUpdateEvent, delta int) {
+		if worker != nil {
+			worker.OnOrderDelta(legType, ev, delta)
+		}
+	})
+	paper := NewPaperBroker(func(ev OrderUpdateEvent) {
+		reconciler.ProcessOrderEvent(ev)
+	})
+
+	stock := &market.StockMetrics{
+		InstrumentToken: 99999,
+		LTP:             100.0,
+		Ask1Price:       100.0,
+		Bid1Price:       99.95,
+		TickSize:        0.05,
+	}
+	for i := 0; i < 5; i++ {
+		stock.AskLevels[i] = market.DepthLevel{Price: float32(100.00 + float64(i)*0.05), Qty: 10000}
+		stock.BidLevels[i] = market.DepthLevel{Price: float32(99.95 - float64(i)*0.05), Qty: 10000}
+	}
+
+	sizing := SizingDecision{
+		IsApproved:      true,
+		Quantity:        100,
+		DustFloorQty:    5,
+		EntryLimitPrice: 100.0,
+		BreakevenStop:   100.30,
+		StopSpec: StopAndBufferSpec{
+			InitialStop:  98.0,
+			OneR:         2.0,
+			BaseBuffer:   0.5,
+			SignalBarLow: 98.2,
+		},
+	}
+
+	closedCh := make(chan struct{}, 1)
+	worker = NewPositionWorker(ctx, WorkerConfig{
+		PositionID:           "POS-DECAY-TEST-1",
+		TradingDate:          "2026-10-30",
+		Mode:                 "PAPER",
+		Symbol:               "DECAYTEST",
+		Token:                99999,
+		TickSize:             0.05,
+		MISLeverage:          5.0,
+		Sizing:               sizing,
+		EntryTimeoutDuration: 5 * time.Minute,
+		Broker:               paper,
+		PaperBroker:          paper,
+		Reconciler:           reconciler,
+		GetStockPtr:          func() *market.StockMetrics { return stock },
+		OnClosed: func(w *PositionWorker) {
+			select {
+			case closedCh <- struct{}{}:
+			default:
+			}
+		},
+	})
+
+	if err := worker.Start(); err != nil {
+		t.Fatalf("worker.Start failed: %v", err)
+	}
+
+	// Wait for entry fill & state to reach StateProtectedActive
+	time.Sleep(80 * time.Millisecond)
+	if worker.RemainingQty() != 100 {
+		t.Fatalf("expected RemainingQty=100, got %d", worker.RemainingQty())
+	}
+
+	// Backdate OpenedAt by 46 minutes
+	worker.mu.Lock()
+	worker.OpenedAt = time.Now().Add(-46 * time.Minute)
+	worker.mu.Unlock()
+
+	// High-water mark peaked at +0.20R (100.40) - below the +0.50R momentum threshold
+	worker.highWaterMarkBits.Store(math.Float64bits(100.40))
+
+	// Watchdog ticker fires every 500ms -> should detect alpha decay stagnation and trigger emergency flatten
+	select {
+	case <-closedCh:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for ALPHA_DECAY_45M_STAGNATION flatten")
+	}
+
+	worker.mu.RLock()
+	reason := worker.exitReason
+	st := worker.state
+	worker.mu.RUnlock()
+
+	if st != StateClosed {
+		t.Fatalf("expected worker state CLOSED, got %s", st)
+	}
+	if reason != "ALPHA_DECAY_45M_STAGNATION" {
+		t.Fatalf("expected exitReason ALPHA_DECAY_45M_STAGNATION, got %s", reason)
+	}
+}
+
+func TestPositionWorker_SingleShareScaleOutProtection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var worker *PositionWorker
+	reconciler := NewOrderReconciler(nil, func(posID, legType string, ev OrderUpdateEvent, delta int) {
+		if worker != nil {
+			worker.OnOrderDelta(legType, ev, delta)
+		}
+	})
+	paper := NewPaperBroker(func(ev OrderUpdateEvent) {
+		reconciler.ProcessOrderEvent(ev)
+	})
+
+	stock := &market.StockMetrics{
+		InstrumentToken: 77777,
+		LTP:             1000.0,
+		Ask1Price:       1000.0,
+		Bid1Price:       999.5,
+		TickSize:        0.05,
+	}
+	for i := 0; i < 5; i++ {
+		stock.AskLevels[i] = market.DepthLevel{Price: float32(1000.00 + float64(i)*0.05), Qty: 1000}
+		stock.BidLevels[i] = market.DepthLevel{Price: float32(999.50 - float64(i)*0.05), Qty: 1000}
+	}
+
+	sizing := SizingDecision{
+		IsApproved:      true,
+		Quantity:        1, // Exact 1-share position!
+		DustFloorQty:    1,
+		EntryLimitPrice: 1000.0,
+		BreakevenStop:   1001.50,
+		StopSpec: StopAndBufferSpec{
+			InitialStop:  980.0,
+			OneR:         20.0,
+			BaseBuffer:   5.0,
+			SignalBarLow: 982.0,
+		},
+	}
+
+	worker = NewPositionWorker(ctx, WorkerConfig{
+		PositionID:           "POS-1SHARE-TEST",
+		TradingDate:          "2026-10-31",
+		Mode:                 "PAPER",
+		Symbol:               "1SHARETEST",
+		Token:                77777,
+		TickSize:             0.05,
+		MISLeverage:          5.0,
+		Sizing:               sizing,
+		EntryTimeoutDuration: 5 * time.Minute,
+		Broker:               paper,
+		PaperBroker:          paper,
+		Reconciler:           reconciler,
+		GetStockPtr:          func() *market.StockMetrics { return stock },
+	})
+
+	if err := worker.Start(); err != nil {
+		t.Fatalf("worker.Start failed: %v", err)
+	}
+
+	time.Sleep(80 * time.Millisecond)
+	if worker.RemainingQty() != 1 {
+		t.Fatalf("expected RemainingQty=1, got %d", worker.RemainingQty())
+	}
+
+	// Rally to +1.60R (1032.0) -> triggers Tranche 1 harvest
+	stock.LTP = worker.GetEntryPrice() + 1.60*worker.OneR
+	stock.RollingPeak = stock.LTP
+	stock.LastUpdatedUnix += 5
+	worker.OnTickHotPath(stock, false)
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Since remaining qty is 1, Tranche 1 must be marked completed WITHOUT placing an invalid 0-qty order
+	if !worker.hasTranche1Completed.Load() {
+		t.Fatalf("expected hasTranche1Completed to be true for 1-share position")
+	}
+	if worker.RemainingQty() != 1 {
+		t.Fatalf("expected 1 share to remain intact, got %d", worker.RemainingQty())
+	}
+	if worker.confirmedStopBits.Load() == 0 {
+		t.Fatalf("expected confirmed stop to exist")
 	}
 }
 

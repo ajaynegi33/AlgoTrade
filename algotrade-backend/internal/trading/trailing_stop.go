@@ -105,8 +105,10 @@ func (worker *PositionWorker) OnTickHotPath(stockMetrics *market.StockMetrics, i
 		effectiveAggressorBuy = stockMetrics.FastAggressorEMA
 	}
 
-	// 5. GUARD D: +0.65R High-Frequency Minimum Profit Scale-Out Trigger (Early Harvest at R1)
-	if !worker.hasTranche1Completed.Load() && !worker.isTranche1Pending.Load() && currentRMultiple >= 0.65 {
+	// 5. GUARD D: +1.50R Asymmetric Profit Scale-Out Trigger (Tranche 1 Early Harvest)
+	// Per Dr. Samir Varma ("You can go broke taking a profit"): premature scale-out at +0.65R destroys expected value.
+	// We allow winners to breathe through noise and harvest 50% only when the trade reaches >= +1.50R.
+	if !worker.hasTranche1Completed.Load() && !worker.isTranche1Pending.Load() && currentRMultiple >= 1.50 {
 		worker.isTranche1Pending.Store(true)
 		worker.wakeWorker()
 		return
@@ -147,8 +149,10 @@ func (worker *PositionWorker) OnTickHotPath(stockMetrics *market.StockMetrics, i
 	dynamicBreathingBuffer := effectiveBaseBuffer * orderFlowMultiplier * parabolicClimaxFactor
 	unclampedCandidateStop := RoundToTick(highWaterMark-dynamicBreathingBuffer, worker.TickSize)
 
-	// Early Profit Protection: Once trade reaches +0.50R, lock Tax-Free Breakeven immediately!
-	if maxFavorableRMultiple >= 0.50 {
+	// Early Profit Protection: Once trade reaches +1.00R, lock Tax-Free Breakeven immediately!
+	// Per Rishi Narang & Dr. Samir Varma: Ratcheting to breakeven at +0.50R suffocated trades in normal Brownian noise.
+	// Moving to BE at +1.00R guarantees market noise cannot stop out valid trending moves prematurely.
+	if maxFavorableRMultiple >= 1.00 {
 		unclampedCandidateStop = math.Max(unclampedCandidateStop, breakevenStop)
 	}
 	if worker.hasTranche1Completed.Load() && stockMetrics.CurrentBarIdx > worker.EntryBarIdx && stockMetrics.CurrentBarIdx >= 1 {

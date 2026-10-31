@@ -7,8 +7,10 @@ var ist = market.ISTLocation
 
 // Standardized Structural Setup Patterns
 const (
-	PatternVWAPPullbackReclaim = "VWAP_PULLBACK_RECLAIM"
-	PatternORB15MBreakout      = "ORB_15M_BREAKOUT"
+	PatternVWAPPullbackReclaim    = "VWAP_PULLBACK_RECLAIM"
+	PatternORB15MBreakout         = "ORB_15M_BREAKOUT" // legacy alias
+	PatternORBRetestReclaim       = "ORB_RETEST_RECLAIM"
+	PatternFailedBreakdownReclaim = "FAILED_BREAKDOWN_SPRING"
 )
 
 // Trailing Stop Loss Gears
