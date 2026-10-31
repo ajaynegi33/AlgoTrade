@@ -194,12 +194,12 @@ func TestPositionWorkerThreeStepScaleOutAndShadowStopMod25(t *testing.T) {
 
 func TestReconcilerEarlyEventAndCrashRehydrationIdempotency(t *testing.T) {
 	var totalDeltas int
-	r := NewOrderReconciler(nil, func(posID, legType string, ev OrderUpdateEvent, delta int) {
+	orderReconciler := NewOrderReconciler(nil, func(posID, legType string, ev OrderUpdateEvent, delta int) {
 		totalDeltas += delta
 	})
 
 	// 1. Falsification Bug #10: WebSocket/Paper COMPLETE event arrives BEFORE RegisterOrder is called
-	r.ProcessOrderEvent(OrderUpdateEvent{
+	orderReconciler.ProcessOrderEvent(OrderUpdateEvent{
 		OrderID:        "ORD-EARLY-1",
 		Status:         OrderStatusComplete,
 		Quantity:       100,
@@ -211,15 +211,15 @@ func TestReconcilerEarlyEventAndCrashRehydrationIdempotency(t *testing.T) {
 	}
 
 	// RegisterOrder must replay the buffered early event immediately
-	r.RegisterOrder("ORD-EARLY-1", "POS-1", "ENTRY", "BEL", "BUY", "LIMIT", 100, 220.10, 0, OrderStatusOpen)
+	orderReconciler.RegisterOrder("ORD-EARLY-1", "POS-1", "ENTRY", "BEL", "BUY", "LIMIT", 100, 220.10, 0, OrderStatusOpen)
 	if totalDeltas != 100 {
 		t.Fatalf("expected 100 filled shares replayed upon RegisterOrder, got %d", totalDeltas)
 	}
 
 	// 2. Falsification Bug #11: Crash-recovery SeedOrderFilled must prevent duplicate fill counting on subsequent sync
-	r.SeedOrderFilled("ORD-CRASH-2", 250)
-	r.RegisterOrder("ORD-CRASH-2", "POS-2", "ENTRY", "SBIN", "BUY", "LIMIT", 250, 780.00, 0, OrderStatusComplete)
-	r.ProcessOrderEvent(OrderUpdateEvent{
+	orderReconciler.SeedOrderFilled("ORD-CRASH-2", 250)
+	orderReconciler.RegisterOrder("ORD-CRASH-2", "POS-2", "ENTRY", "SBIN", "BUY", "LIMIT", 250, 780.00, 0, OrderStatusComplete)
+	orderReconciler.ProcessOrderEvent(OrderUpdateEvent{
 		OrderID:        "ORD-CRASH-2",
 		Status:         OrderStatusComplete,
 		Quantity:       250,
@@ -864,14 +864,14 @@ func TestPositionWorker_EarlyHarvestAt065RAnd5mClose(t *testing.T) {
 
 func TestPositionWorker_NotifyClosedIdempotent(t *testing.T) {
 	callCount := 0
-	w := &PositionWorker{
+	worker := &PositionWorker{
 		onClosed: func(pw *PositionWorker) {
 			callCount++
 		},
 	}
 
 	for i := 0; i < 10; i++ {
-		w.notifyClosed()
+		worker.notifyClosed()
 	}
 
 	if callCount != 1 {
@@ -916,20 +916,20 @@ func TestDecoupledStopLossAndSizing(t *testing.T) {
 	}
 
 	// 2. Verify Sizer Calculations & Risk Curve
-	if r := EffectiveRiskPerTradePct(10000.0, 0.005); r != 0.0125 {
-		t.Fatalf("expected 1.25%% risk for 10k account, got %.4f", r)
+	if riskPct := EffectiveRiskPerTradePct(10000.0, 0.005); riskPct != 0.0125 {
+		t.Fatalf("expected 1.25%% risk for 10k account, got %.4f", riskPct)
 	}
-	if r := EffectiveRiskPerTradePct(40000.0, 0.005); r != 0.0100 {
-		t.Fatalf("expected 1.00%% risk for 40k account, got %.4f", r)
+	if riskPct := EffectiveRiskPerTradePct(40000.0, 0.005); riskPct != 0.0100 {
+		t.Fatalf("expected 1.00%% risk for 40k account, got %.4f", riskPct)
 	}
-	if r := EffectiveRiskPerTradePct(150000.0, 0.005); r != 0.0075 {
-		t.Fatalf("expected 0.75%% risk for 150k account, got %.4f", r)
+	if riskPct := EffectiveRiskPerTradePct(150000.0, 0.005); riskPct != 0.0075 {
+		t.Fatalf("expected 0.75%% risk for 150k account, got %.4f", riskPct)
 	}
-	if r := EffectiveRiskPerTradePct(1000000.0, 0.005); r != 0.0050 {
-		t.Fatalf("expected 0.50%% risk for 10L account, got %.4f", r)
+	if riskPct := EffectiveRiskPerTradePct(1000000.0, 0.005); riskPct != 0.0050 {
+		t.Fatalf("expected 0.50%% risk for 10L account, got %.4f", riskPct)
 	}
-	if r := EffectiveRiskPerTradePct(10000000.0, 0.005); r != 0.035/10.0 {
-		t.Fatalf("expected 0.35%% risk for 1Cr account, got %.4f", r)
+	if riskPct := EffectiveRiskPerTradePct(10000000.0, 0.005); riskPct != 0.035/10.0 {
+		t.Fatalf("expected 0.35%% risk for 1Cr account, got %.4f", riskPct)
 	}
 }
 

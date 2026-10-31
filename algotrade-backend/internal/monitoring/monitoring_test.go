@@ -127,8 +127,8 @@ func setupTestDB(t *testing.T) *sql.DB {
 		);`,
 	}
 
-	for _, q := range queries {
-		if _, err := db.Exec(q); err != nil {
+	for _, migrationQuery := range queries {
+		if _, err := db.Exec(migrationQuery); err != nil {
 			t.Fatalf("Migration query failed: %v", err)
 		}
 	}

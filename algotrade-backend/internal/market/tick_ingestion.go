@@ -17,22 +17,22 @@ func (actor *Actor) processTick(tick *ParsedTick) {
 
 	// Ensure today0915Epoch rolls over cleanly if server stays up across calendar days
 	if tick.ExchangeTime > actor.today0915Epoch+64800 {
-		tIST := time.Unix(tick.ExchangeTime, 0).In(istZone)
-		y, m, d := tIST.Date()
-		newEpoch := time.Date(y, m, d, 9, 15, 0, 0, istZone).Unix()
+		timeIST := time.Unix(tick.ExchangeTime, 0).In(istZone)
+		year, month, day := timeIST.Date()
+		newEpoch := time.Date(year, month, day, 9, 15, 0, 0, istZone).Unix()
 		if newEpoch > actor.today0915Epoch {
 			actor.today0915Epoch = newEpoch
 			// Reset all tracked stocks' intraday session state for the new trading day
-			for _, sIdx := range actor.activeStockIndices {
-				st := &actor.stocks[sIdx]
-				st.LastUpdatedUnix = 0
-				st.CurrentBarIdx = 0
-				st.PullbackCount = 0
-				st.WasExtended = false
-				st.BarStartVolume = 0
-				st.BarBuyVolume = 0
-				st.BarSellVolume = 0
-				st.SessionBars = [75]OHLCVBar{}
+			for _, activeIndex := range actor.activeStockIndices {
+				stockItem := &actor.stocks[activeIndex]
+				stockItem.LastUpdatedUnix = 0
+				stockItem.CurrentBarIdx = 0
+				stockItem.PullbackCount = 0
+				stockItem.WasExtended = false
+				stockItem.BarStartVolume = 0
+				stockItem.BarBuyVolume = 0
+				stockItem.BarSellVolume = 0
+				stockItem.SessionBars = [75]OHLCVBar{}
 			}
 		}
 	}
@@ -84,14 +84,14 @@ func (actor *Actor) processTick(tick *ParsedTick) {
 	}
 
 	// Update continuous time-decaying RollingPeak (tau = 20s) before overwriting LastUpdatedUnix
-	dt := float64(tick.ExchangeTime - stock.LastUpdatedUnix)
-	if dt < 0 {
-		dt = 0
+	deltaTimeSeconds := float64(tick.ExchangeTime - stock.LastUpdatedUnix)
+	if deltaTimeSeconds < 0 {
+		deltaTimeSeconds = 0
 	}
 	if tick.LTP >= stock.RollingPeak || stock.RollingPeak <= 0 {
 		stock.RollingPeak = tick.LTP
-	} else if dt > 0 {
-		decay := math.Exp(-dt / 20.0)
+	} else if deltaTimeSeconds > 0 {
+		decay := math.Exp(-deltaTimeSeconds / 20.0)
 		stock.RollingPeak = tick.LTP + (stock.RollingPeak-tick.LTP)*decay
 	}
 

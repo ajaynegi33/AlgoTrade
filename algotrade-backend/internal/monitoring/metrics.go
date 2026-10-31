@@ -61,8 +61,8 @@ func ComputeEODMetrics(db *sql.DB, tradingDate string) (*EODReportSummary, error
 		count int
 		pnl   float64
 	})
-	for g := 1; g <= 4; g++ {
-		gearMap[g] = &struct {
+	for gearNumber := 1; gearNumber <= 4; gearNumber++ {
+		gearMap[gearNumber] = &struct {
 			count int
 			pnl   float64
 		}{}
@@ -281,24 +281,24 @@ func ComputeEODMetrics(db *sql.DB, tradingDate string) (*EODReportSummary, error
 	}
 
 	// 4. Slippage Audit Records
-	for sym, s := range slippageMap {
-		if s.count == 0 {
+	for symbol, slippageStat := range slippageMap {
+		if slippageStat.count == 0 {
 			continue
 		}
-		avgSlip := s.sumSlippage / float64(s.count)
-		isToxic := avgSlip > 0.15 || s.maxSlippage > 0.30
+		avgSlip := slippageStat.sumSlippage / float64(slippageStat.count)
+		isToxic := avgSlip > 0.15 || slippageStat.maxSlippage > 0.30
 		rec := SlippageAuditRecord{
-			Symbol:           sym,
-			TradeCount:       s.count,
-			AvgIntendedPrice: math.Round((s.sumIntended/float64(s.count))*100.0) / 100.0,
-			AvgFillPrice:     math.Round((s.sumActual/float64(s.count))*100.0) / 100.0,
+			Symbol:           symbol,
+			TradeCount:       slippageStat.count,
+			AvgIntendedPrice: math.Round((slippageStat.sumIntended/float64(slippageStat.count))*100.0) / 100.0,
+			AvgFillPrice:     math.Round((slippageStat.sumActual/float64(slippageStat.count))*100.0) / 100.0,
 			AvgSlippagePct:   math.Round(avgSlip*1000.0) / 1000.0,
-			MaxSlippagePct:   math.Round(s.maxSlippage*1000.0) / 1000.0,
+			MaxSlippagePct:   math.Round(slippageStat.maxSlippage*1000.0) / 1000.0,
 			IsToxicLiquidity: isToxic,
 		}
 		if isToxic {
 			rec.BlacklistReason = fmt.Sprintf("Average slippage (%.2f%%) exceeds toxic illiquidity ceiling (0.15%%)", avgSlip)
-			report.ToxicSymbols = append(report.ToxicSymbols, sym)
+			report.ToxicSymbols = append(report.ToxicSymbols, symbol)
 		}
 		report.SlippageRecords = append(report.SlippageRecords, rec)
 	}
@@ -313,25 +313,25 @@ func ComputeEODMetrics(db *sql.DB, tradingDate string) (*EODReportSummary, error
 		3: "Gear 3: Coarse 5M Trail",
 		4: "Gear 4: Shadow SL Guard",
 	}
-	for g := 1; g <= 4; g++ {
+	for gearNumber := 1; gearNumber <= 4; gearNumber++ {
 		report.GearAttributions = append(report.GearAttributions, GearAttributionRecord{
-			Gear:        g,
-			GearLabel:   gearLabels[g],
-			TradesCount: gearMap[g].count,
-			BankedPnL:   math.Round(gearMap[g].pnl*100.0) / 100.0,
+			Gear:        gearNumber,
+			GearLabel:   gearLabels[gearNumber],
+			TradesCount: gearMap[gearNumber].count,
+			BankedPnL:   math.Round(gearMap[gearNumber].pnl*100.0) / 100.0,
 		})
 	}
 
 	// 6. Time of Day Breakdowns
 	for _, key := range []string{"OPENING_DRIVE", "MID_MORNING", "MIDDAY_LULL", "CLOSING_SESSION"} {
-		b := todMap[key]
-		if b.TradeCount > 0 {
-			b.WinRatePct = math.Round((float64(b.WinningCount)/float64(b.TradeCount))*1000.0) / 10.0
-			b.AverageR = math.Round((b.AverageR/float64(b.TradeCount))*100.0) / 100.0
+		timeOfDayBucket := todMap[key]
+		if timeOfDayBucket.TradeCount > 0 {
+			timeOfDayBucket.WinRatePct = math.Round((float64(timeOfDayBucket.WinningCount)/float64(timeOfDayBucket.TradeCount))*1000.0) / 10.0
+			timeOfDayBucket.AverageR = math.Round((timeOfDayBucket.AverageR/float64(timeOfDayBucket.TradeCount))*100.0) / 100.0
 		}
-		b.GrossPnL = math.Round(b.GrossPnL*100.0) / 100.0
-		b.NetPnL = math.Round(b.NetPnL*100.0) / 100.0
-		report.SessionBreakdowns = append(report.SessionBreakdowns, *b)
+		timeOfDayBucket.GrossPnL = math.Round(timeOfDayBucket.GrossPnL*100.0) / 100.0
+		timeOfDayBucket.NetPnL = math.Round(timeOfDayBucket.NetPnL*100.0) / 100.0
+		report.SessionBreakdowns = append(report.SessionBreakdowns, *timeOfDayBucket)
 	}
 
 	// 7. Probability Calibration Buckets
@@ -345,11 +345,11 @@ func ComputeEODMetrics(db *sql.DB, tradingDate string) (*EODReportSummary, error
 		{"75–85% High Confluence", 75.0, 85.0},
 		{"85%+ Prime Outlier", 85.0, 100.0},
 	}
-	for _, pb := range probBuckets {
+	for _, probBucket := range probBuckets {
 		bucket := ProbabilityBucket{
-			BucketName: pb.name,
-			MinScore:   pb.min,
-			MaxScore:   pb.max,
+			BucketName: probBucket.name,
+			MinScore:   probBucket.min,
+			MaxScore:   probBucket.max,
 		}
 
 		// Query positions that match this score range from engine_signals
@@ -358,7 +358,7 @@ func ComputeEODMetrics(db *sql.DB, tradingDate string) (*EODReportSummary, error
 			FROM positions p
 			INNER JOIN engine_signals s ON p.symbol = s.tradingsymbol AND date(p.opened_at) = date(s.signal_time)
 			WHERE p.trading_date = ? AND s.score >= ? AND s.score < ?
-		`, tradingDate, pb.min, pb.max)
+		`, tradingDate, probBucket.min, probBucket.max)
 		if pErr == nil {
 			var sumR float64
 			for pRows.Next() {

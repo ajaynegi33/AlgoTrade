@@ -228,17 +228,17 @@ func (actor *Actor) GetStats() (trackedCount int, ticksProcessed uint64) {
 }
 
 // GetStockPtrByIndex returns a pointer to the pre-allocated StockMetrics slot for crash-recovery rehydration
-func (actor *Actor) GetStockPtrByIndex(idx uint16) *StockMetrics {
-	if int(idx) >= len(actor.stocks) {
+func (actor *Actor) GetStockPtrByIndex(stockIndex uint16) *StockMetrics {
+	if int(stockIndex) >= len(actor.stocks) {
 		return nil
 	}
-	return &actor.stocks[idx]
+	return &actor.stocks[stockIndex]
 }
 
 func (actor *Actor) initializeTodayEpoch() {
 	now := time.Now().In(istZone)
-	y, m, d := now.Date()
-	today0915 := time.Date(y, m, d, 9, 15, 0, 0, istZone)
+	year, month, day := now.Date()
+	today0915 := time.Date(year, month, day, 9, 15, 0, 0, istZone)
 	actor.today0915Epoch = today0915.Unix()
 }
 
@@ -248,21 +248,21 @@ func (actor *Actor) seedUniverseFromScreener() error {
 		todayStr := TodayDateIST()
 		universe, err := actor.scannerService.GetUniverse(todayStr)
 		if err == nil && universe != nil && len(universe.Stocks) > 0 {
-			for _, st := range universe.Stocks {
-				secID, _, _ := screener.ResolveSector(actor.db, st.Tradingsymbol)
-				tickSize := float32(st.TickSize)
+			for _, scannedStock := range universe.Stocks {
+				secID, _, _ := screener.ResolveSector(actor.db, scannedStock.Tradingsymbol)
+				tickSize := float32(scannedStock.TickSize)
 				if tickSize <= 0 {
 					tickSize = 0.05
 				}
-				idx := actor.registerTrackedStock(uint32(st.InstrumentToken), st.Tradingsymbol, secID, tickSize)
-				actor.stocks[idx].LotSize = uint32(st.LotSize)
-				actor.stocks[idx].PrevClose = st.LastPrice
-				if st.MISLeverage > 0 {
-					actor.stocks[idx].MISLeverage = float32(st.MISLeverage)
-					if st.MISMarginPct > 0 {
-						actor.stocks[idx].MISMarginFraction = float32(st.MISMarginPct)
+				idx := actor.registerTrackedStock(uint32(scannedStock.InstrumentToken), scannedStock.Tradingsymbol, secID, tickSize)
+				actor.stocks[idx].LotSize = uint32(scannedStock.LotSize)
+				actor.stocks[idx].PrevClose = scannedStock.LastPrice
+				if scannedStock.MISLeverage > 0 {
+					actor.stocks[idx].MISLeverage = float32(scannedStock.MISLeverage)
+					if scannedStock.MISMarginPct > 0 {
+						actor.stocks[idx].MISMarginFraction = float32(scannedStock.MISMarginPct)
 					} else {
-						actor.stocks[idx].MISMarginFraction = float32(1.0 / st.MISLeverage)
+						actor.stocks[idx].MISMarginFraction = float32(1.0 / scannedStock.MISLeverage)
 					}
 				} else {
 					actor.stocks[idx].MISLeverage = 0.0
@@ -299,21 +299,21 @@ func (actor *Actor) registerTrackedStock(token uint32, symbol string, sectorID u
 
 	actor.stockIndexByToken[token] = nextIdx
 	actor.stockIndexBySymbol[upper] = nextIdx
-	s := &actor.stocks[nextIdx]
-	s.InstrumentToken = token
-	s.SetSymbol(symbol)
-	s.SectorID = sectorID
-	s.TickSize = tickSize
-	s.ActiveIndex = nextIdx
-	s.SmoothedBuyerRatio = 0.50
-	s.AggressorBuyRatio = 0.50
-	s.FastAggressorEMA = 0.50
-	if s.MISLeverage <= 0 {
-		s.MISLeverage = 5.0
+	stockMetrics := &actor.stocks[nextIdx]
+	stockMetrics.InstrumentToken = token
+	stockMetrics.SetSymbol(symbol)
+	stockMetrics.SectorID = sectorID
+	stockMetrics.TickSize = tickSize
+	stockMetrics.ActiveIndex = nextIdx
+	stockMetrics.SmoothedBuyerRatio = 0.50
+	stockMetrics.AggressorBuyRatio = 0.50
+	stockMetrics.FastAggressorEMA = 0.50
+	if stockMetrics.MISLeverage <= 0 {
+		stockMetrics.MISLeverage = 5.0
 	}
 
 	// Initialize bar 0
-	s.SessionBars[0] = OHLCVBar{Timestamp: actor.today0915Epoch}
+	stockMetrics.SessionBars[0] = OHLCVBar{Timestamp: actor.today0915Epoch}
 
 	actor.activeStockIndices = append(actor.activeStockIndices, nextIdx)
 
@@ -341,20 +341,20 @@ func (actor *Actor) seedBaselinesAsynchronously() {
 		}
 	} else {
 		for _, idx := range actor.activeStockIndices {
-			s := &actor.stocks[idx]
-			if !s.IsWarm {
-				targets = append(targets, seedTarget{token: s.InstrumentToken, prevClose: s.PrevClose})
+			stockMetrics := &actor.stocks[idx]
+			if !stockMetrics.IsWarm {
+				targets = append(targets, seedTarget{token: stockMetrics.InstrumentToken, prevClose: stockMetrics.PrevClose})
 			}
 		}
 	}
 
-	for _, t := range targets {
+	for _, targetStock := range targets {
 		select {
 		case <-actor.ctx.Done():
 			return
 		default:
 		}
-		profile, err := actor.histClient.SeedStockBaselines(t.token, t.prevClose)
+		profile, err := actor.histClient.SeedStockBaselines(targetStock.token, targetStock.prevClose)
 		if err == nil && profile != nil {
 			if actor.isRunning.Load() {
 				select {
@@ -378,63 +378,63 @@ func (actor *Actor) applyBaselineProfile(profile *kite.StockBaselineProfile) {
 	if !exists || int(idx) >= maxTrackedStocks {
 		return
 	}
-	s := &actor.stocks[idx]
+	stockMetrics := &actor.stocks[idx]
 	actor.slotBaselines[idx] = profile.Slots
 
 	// Backfill today's completed 5m intraday bars (09:15 AM onwards, including 15m ORH/ORL slots 0,1,2)
 	if len(profile.TodayBars) > 0 {
 		var cumVol uint64
 		var weightedPriceVol float64
-		maxSlot := int(s.CurrentBarIdx)
-		for _, tb := range profile.TodayBars {
-			if tb.SlotIdx < 0 || tb.SlotIdx >= 75 {
+		maxSlot := int(stockMetrics.CurrentBarIdx)
+		for _, todayBar := range profile.TodayBars {
+			if todayBar.SlotIdx < 0 || todayBar.SlotIdx >= 75 {
 				continue
 			}
-			existing := &s.SessionBars[tb.SlotIdx]
-			if existing.Open == 0 || tb.Volume > existing.Volume {
+			existing := &stockMetrics.SessionBars[todayBar.SlotIdx]
+			if existing.Open == 0 || todayBar.Volume > existing.Volume {
 				*existing = OHLCVBar{
-					Open:      tb.Open,
-					High:      tb.High,
-					Low:       tb.Low,
-					Close:     tb.Close,
-					Volume:    tb.Volume,
-					Timestamp: actor.today0915Epoch + int64(tb.SlotIdx)*300,
+					Open:      todayBar.Open,
+					High:      todayBar.High,
+					Low:       todayBar.Low,
+					Close:     todayBar.Close,
+					Volume:    todayBar.Volume,
+					Timestamp: actor.today0915Epoch + int64(todayBar.SlotIdx)*300,
 				}
 			}
-			if tb.SlotIdx > maxSlot {
-				maxSlot = tb.SlotIdx
+			if todayBar.SlotIdx > maxSlot {
+				maxSlot = todayBar.SlotIdx
 			}
-			if s.Open == 0 && tb.Open > 0 {
-				s.Open = tb.Open
+			if stockMetrics.Open == 0 && todayBar.Open > 0 {
+				stockMetrics.Open = todayBar.Open
 			}
-			if tb.High > s.High {
-				s.High = tb.High
+			if todayBar.High > stockMetrics.High {
+				stockMetrics.High = todayBar.High
 			}
-			if (s.Low == 0 || tb.Low < s.Low) && tb.Low > 0 {
-				s.Low = tb.Low
+			if (stockMetrics.Low == 0 || todayBar.Low < stockMetrics.Low) && todayBar.Low > 0 {
+				stockMetrics.Low = todayBar.Low
 			}
-			cumVol += tb.Volume
-			typPx := (tb.High + tb.Low + tb.Close) / 3.0
-			weightedPriceVol += typPx * float64(tb.Volume)
+			cumVol += todayBar.Volume
+			typPx := (todayBar.High + todayBar.Low + todayBar.Close) / 3.0
+			weightedPriceVol += typPx * float64(todayBar.Volume)
 		}
-		if maxSlot > int(s.CurrentBarIdx) && maxSlot < 75 {
-			s.CurrentBarIdx = uint8(maxSlot)
+		if maxSlot > int(stockMetrics.CurrentBarIdx) && maxSlot < 75 {
+			stockMetrics.CurrentBarIdx = uint8(maxSlot)
 		}
 		// If no live tick has arrived yet, seed LTP, Volume, and ExchangeVWAP from today's bars
-		if s.LastUpdatedUnix == 0 && len(profile.TodayBars) > 0 {
+		if stockMetrics.LastUpdatedUnix == 0 && len(profile.TodayBars) > 0 {
 			lastBar := profile.TodayBars[len(profile.TodayBars)-1]
-			if s.LTP == 0 && lastBar.Close > 0 {
-				s.LTP = lastBar.Close
-				s.RollingPeak = lastBar.Close
+			if stockMetrics.LTP == 0 && lastBar.Close > 0 {
+				stockMetrics.LTP = lastBar.Close
+				stockMetrics.RollingPeak = lastBar.Close
 			}
-			if s.Volume == 0 && cumVol > 0 {
-				s.Volume = cumVol
+			if stockMetrics.Volume == 0 && cumVol > 0 {
+				stockMetrics.Volume = cumVol
 				if cumVol >= lastBar.Volume {
-					s.BarStartVolume = cumVol - lastBar.Volume
+					stockMetrics.BarStartVolume = cumVol - lastBar.Volume
 				}
 			}
-			if s.ExchangeVWAP == 0 && cumVol > 0 {
-				s.ExchangeVWAP = weightedPriceVol / float64(cumVol)
+			if stockMetrics.ExchangeVWAP == 0 && cumVol > 0 {
+				stockMetrics.ExchangeVWAP = weightedPriceVol / float64(cumVol)
 			}
 		}
 
@@ -460,7 +460,7 @@ func (actor *Actor) applyBaselineProfile(profile *kite.StockBaselineProfile) {
 		}
 
 		for barIndex := 0; barIndex <= completedBarLimit && barIndex < 75; barIndex++ {
-			closingPrice := s.SessionBars[barIndex].Close
+			closingPrice := stockMetrics.SessionBars[barIndex].Close
 			if closingPrice > 0 {
 				completedBarCount++
 				if runningEMA <= 0 {
@@ -472,24 +472,24 @@ func (actor *Actor) applyBaselineProfile(profile *kite.StockBaselineProfile) {
 			}
 		}
 		if runningEMA > 0 {
-			s.EMA9 = runningEMA
+			stockMetrics.EMA9 = runningEMA
 			if completedBarCount >= 2 && previousEMA > 0 {
-				s.EMA9Slope = runningEMA - previousEMA
+				stockMetrics.EMA9Slope = runningEMA - previousEMA
 			} else {
-				s.EMA9Slope = 0.0
+				stockMetrics.EMA9Slope = 0.0
 			}
 		}
 	}
 
-	curSlot := s.CurrentBarIdx
+	curSlot := stockMetrics.CurrentBarIdx
 	if curSlot >= 75 {
 		curSlot = 74
 	}
-	s.ATR14 = profile.ATR14
-	s.BaselineSlotVolume = profile.Slots[curSlot].MedianVolume
-	s.BaselineCumVolume = profile.Slots[curSlot].MedianCumVol
+	stockMetrics.ATR14 = profile.ATR14
+	stockMetrics.BaselineSlotVolume = profile.Slots[curSlot].MedianVolume
+	stockMetrics.BaselineCumVolume = profile.Slots[curSlot].MedianCumVol
 	// Only mark IsWarm = true when seeded with real historical data (not synthetic fallback)
-	s.IsWarm = !profile.IsFallback
+	stockMetrics.IsWarm = !profile.IsFallback
 }
 
 func (actor *Actor) runLoop() {
@@ -510,8 +510,8 @@ func (actor *Actor) runLoop() {
 				return
 			}
 			ticks := ParseBinaryFrame(rawBytes)
-			for i := range ticks {
-				actor.processTick(&ticks[i])
+			for tickIndex := range ticks {
+				actor.processTick(&ticks[tickIndex])
 			}
 
 		case profile := <-actor.baselineSeedChan:
@@ -520,12 +520,12 @@ func (actor *Actor) runLoop() {
 		case reply := <-actor.seedTargetReqChan:
 			targets := make([]seedTarget, 0, len(actor.activeStockIndices))
 			for _, idx := range actor.activeStockIndices {
-				s := &actor.stocks[idx]
-				// Re-seed if still on synthetic fallback (!s.IsWarm) or if today's 15m ORB bars (slots 0..2) are missing
-				if !s.IsWarm || s.SessionBars[0].Open == 0 {
+				targetMetrics := &actor.stocks[idx]
+				// Re-seed if still on synthetic fallback (!targetMetrics.IsWarm) or if today's 15m ORB bars (slots 0..2) are missing
+				if !targetMetrics.IsWarm || targetMetrics.SessionBars[0].Open == 0 {
 					targets = append(targets, seedTarget{
-						token:     s.InstrumentToken,
-						prevClose: s.PrevClose,
+						token:     targetMetrics.InstrumentToken,
+						prevClose: targetMetrics.PrevClose,
 					})
 				}
 			}
@@ -533,25 +533,25 @@ func (actor *Actor) runLoop() {
 
 		case scannedStocks := <-actor.universeSyncChan:
 			var newTokens []uint32
-			for _, st := range scannedStocks {
-				tok := uint32(st.InstrumentToken)
+			for _, scannedStock := range scannedStocks {
+				tok := uint32(scannedStock.InstrumentToken)
 				_, existed := actor.stockIndexByToken[tok]
-				secID, _, _ := screener.ResolveSector(actor.db, st.Tradingsymbol)
-				tickSize := float32(st.TickSize)
+				secID, _, _ := screener.ResolveSector(actor.db, scannedStock.Tradingsymbol)
+				tickSize := float32(scannedStock.TickSize)
 				if tickSize <= 0 {
 					tickSize = 0.05
 				}
-				idx := actor.registerTrackedStock(tok, st.Tradingsymbol, secID, tickSize)
-				actor.stocks[idx].LotSize = uint32(st.LotSize)
-				if actor.stocks[idx].PrevClose <= 0 && st.LastPrice > 0 {
-					actor.stocks[idx].PrevClose = st.LastPrice
+				idx := actor.registerTrackedStock(tok, scannedStock.Tradingsymbol, secID, tickSize)
+				actor.stocks[idx].LotSize = uint32(scannedStock.LotSize)
+				if actor.stocks[idx].PrevClose <= 0 && scannedStock.LastPrice > 0 {
+					actor.stocks[idx].PrevClose = scannedStock.LastPrice
 				}
-				if st.MISLeverage > 0 {
-					actor.stocks[idx].MISLeverage = float32(st.MISLeverage)
-					if st.MISMarginPct > 0 {
-						actor.stocks[idx].MISMarginFraction = float32(st.MISMarginPct)
+				if scannedStock.MISLeverage > 0 {
+					actor.stocks[idx].MISLeverage = float32(scannedStock.MISLeverage)
+					if scannedStock.MISMarginPct > 0 {
+						actor.stocks[idx].MISMarginFraction = float32(scannedStock.MISMarginPct)
 					} else {
-						actor.stocks[idx].MISMarginFraction = float32(1.0 / st.MISLeverage)
+						actor.stocks[idx].MISMarginFraction = float32(1.0 / scannedStock.MISLeverage)
 					}
 				} else if actor.stocks[idx].MISLeverage <= 0 {
 					actor.stocks[idx].MISLeverage = 0.0
@@ -573,20 +573,20 @@ func (actor *Actor) runLoop() {
 			dto, found := actor.getStockDetailInternal(req.symbol)
 			req.reply <- detailResp{dto: dto, found: found}
 
-		case wReq := <-actor.workerReqChan:
-			idx, exists := actor.stockIndexByToken[wReq.token]
-			if !exists && wReq.worker != nil {
-				secID, _, _ := screener.ResolveSector(actor.db, wReq.symbol)
-				idx = actor.registerTrackedStock(wReq.token, wReq.symbol, secID, 0.05)
+		case workerReq := <-actor.workerReqChan:
+			idx, exists := actor.stockIndexByToken[workerReq.token]
+			if !exists && workerReq.worker != nil {
+				secID, _, _ := screener.ResolveSector(actor.db, workerReq.symbol)
+				idx = actor.registerTrackedStock(workerReq.token, workerReq.symbol, secID, 0.05)
 				actor.stocks[idx].IsTradeable = true
 				if actor.tickerClient != nil {
-					_ = actor.tickerClient.Subscribe([]uint32{wReq.token})
+					_ = actor.tickerClient.Subscribe([]uint32{workerReq.token})
 				}
 			}
 			if int(idx) < maxTrackedStocks {
-				actor.positionTickListeners[idx] = wReq.worker
+				actor.positionTickListeners[idx] = workerReq.worker
 			}
-			wReq.reply <- idx
+			workerReq.reply <- idx
 		}
 	}
 }

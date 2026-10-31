@@ -158,12 +158,12 @@ func TestSectorRestriction(t *testing.T) {
 func TestGetStockDetail_ETERNAL(t *testing.T) {
 	actor := NewActor(nil, nil, nil, nil, nil)
 	idx := actor.registerTrackedStock(1304833, "ETERNAL", 1, 0.05)
-	s := &actor.stocks[idx]
-	s.LTP = 316.60
-	s.PrevClose = 304.45
-	s.ExchangeVWAP = 311.20
-	s.BidLevels[0] = DepthLevel{Price: 325.80, Qty: 184583, Orders: 20}
-	s.AskLevels[0] = DepthLevel{Price: 306.90, Qty: 4547, Orders: 2}
+	stock := &actor.stocks[idx]
+	stock.LTP = 316.60
+	stock.PrevClose = 304.45
+	stock.ExchangeVWAP = 311.20
+	stock.BidLevels[0] = DepthLevel{Price: 325.80, Qty: 184583, Orders: 20}
+	stock.AskLevels[0] = DepthLevel{Price: 306.90, Qty: 4547, Orders: 2}
 
 	// 1. Exact match lookup
 	detail, found := actor.GetStockDetail("ETERNAL")
@@ -219,11 +219,11 @@ func TestApplyBaselineProfileBackfillsTodayBarsAndOR15m(t *testing.T) {
 
 	actor.applyBaselineProfile(profile)
 
-	s := &actor.stocks[idx]
-	if !s.IsWarm {
-		t.Fatalf("expected s.IsWarm=true after applying non-fallback profile")
+	stock := &actor.stocks[idx]
+	if !stock.IsWarm {
+		t.Fatalf("expected stock.IsWarm=true after applying non-fallback profile")
 	}
-	orh, orl, ready := s.OpeningRange15m()
+	orh, orl, ready := stock.OpeningRange15m()
 	if !ready || orh != 806.5 || orl != 798.5 {
 		t.Fatalf("expected 15m ORB backfilled (ready=true, ORH=806.5, ORL=798.5), got ready=%v ORH=%.2f ORL=%.2f", ready, orh, orl)
 	}
@@ -236,13 +236,13 @@ func TestSnapshotPublisher_FlashShockRegime(t *testing.T) {
 	// Register 10 stocks: 1 above VWAP (10% breadth <= 20%)
 	for i := 0; i < 10; i++ {
 		idx := actor.registerTrackedStock(uint32(10000+i), "TEST", screener.SectorNifty50, 0.05)
-		s := &actor.stocks[idx]
-		s.IsTradeable = true
-		s.ExchangeVWAP = 100.0
+		stock := &actor.stocks[idx]
+		stock.IsTradeable = true
+		stock.ExchangeVWAP = 100.0
 		if i == 0 {
-			s.LTP = 105.0 // Above VWAP
+			stock.LTP = 105.0 // Above VWAP
 		} else {
-			s.LTP = 95.0 // Below VWAP
+			stock.LTP = 95.0 // Below VWAP
 		}
 	}
 

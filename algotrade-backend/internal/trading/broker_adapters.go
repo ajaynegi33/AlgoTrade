@@ -358,26 +358,26 @@ func (broker *ZerodhaLiveBroker) FetchOrders(ctx context.Context) ([]OrderUpdate
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch orders from kite: %w", err)
 	}
-	events := make([]OrderUpdateEvent, 0, len(orders))
-	for _, o := range orders {
-		events = append(events, OrderUpdateEvent{
-			OrderID:         o.OrderID,
-			Symbol:          o.TradingSymbol,
-			InstrumentToken: o.InstrumentToken,
-			TransactionType: o.TransactionType,
-			OrderType:       o.OrderType,
-			Status:          o.Status,
-			StatusMessage:   o.StatusMessage,
-			Quantity:        int(o.Quantity),
-			FilledQuantity:  int(o.FilledQuantity),
-			PendingQuantity: int(o.PendingQuantity),
-			Price:           o.Price,
-			TriggerPrice:    o.TriggerPrice,
-			AveragePrice:    o.AveragePrice,
-			Tag:             o.Tag,
+	orderEvents := make([]OrderUpdateEvent, 0, len(orders))
+	for _, order := range orders {
+		orderEvents = append(orderEvents, OrderUpdateEvent{
+			OrderID:         order.OrderID,
+			Symbol:          order.TradingSymbol,
+			InstrumentToken: order.InstrumentToken,
+			TransactionType: order.TransactionType,
+			OrderType:       order.OrderType,
+			Status:          order.Status,
+			StatusMessage:   order.StatusMessage,
+			Quantity:        int(order.Quantity),
+			FilledQuantity:  int(order.FilledQuantity),
+			PendingQuantity: int(order.PendingQuantity),
+			Price:           order.Price,
+			TriggerPrice:    order.TriggerPrice,
+			AveragePrice:    order.AveragePrice,
+			Tag:             order.Tag,
 		})
 	}
-	return events, nil
+	return orderEvents, nil
 }
 
 // =========================================================================
@@ -409,13 +409,13 @@ type PaperBroker struct {
 }
 
 func NewPaperBroker(onEvent func(OrderUpdateEvent)) *PaperBroker {
-	p := &PaperBroker{
+	paperBroker := &PaperBroker{
 		orders:  make(map[string]*paperRestingOrder),
 		byToken: make(map[uint32][]*paperRestingOrder),
 		onEvent: onEvent,
 	}
-	p.seq.Store(uint64(time.Now().UnixMilli() % 1000000))
-	return p
+	paperBroker.seq.Store(uint64(time.Now().UnixMilli() % 1000000))
+	return paperBroker
 }
 
 func (broker *PaperBroker) Mode() string {
@@ -441,7 +441,7 @@ func (broker *PaperBroker) SeedRestingOrder(
 	}
 	broker.mu.Lock()
 	defer broker.mu.Unlock()
-	ord := &paperRestingOrder{
+	restingOrder := &paperRestingOrder{
 		OrderID:         orderID,
 		Symbol:          symbol,
 		InstrumentToken: token,
@@ -455,16 +455,16 @@ func (broker *PaperBroker) SeedRestingOrder(
 		ModCount:        modCount,
 		UpdatedAt:       time.Now(),
 	}
-	broker.orders[orderID] = ord
+	broker.orders[orderID] = restingOrder
 
 	// Prevent duplicate entries in byToken slice
-	existing := broker.byToken[token]
-	for _, o := range existing {
-		if o.OrderID == orderID {
+	existingOrders := broker.byToken[token]
+	for _, existingOrder := range existingOrders {
+		if existingOrder.OrderID == orderID {
 			return
 		}
 	}
-	broker.byToken[token] = append(existing, ord)
+	broker.byToken[token] = append(existingOrders, restingOrder)
 }
 
 // walkBook computes the realistic volume-weighted average fill price across 5 visible book levels
@@ -617,7 +617,7 @@ func (broker *PaperBroker) PlaceLimitBuy(
 	// When stock depth is not available (e.g. mock tests without depth), fill immediately
 	if stock == nil || stock.LTP <= 0 || (stock.Ask1Price <= 0 && stock.AskLevels[0].Price <= 0) {
 		avgFill := walkAskBook(qty, limitPrice, stock)
-		ord := &paperRestingOrder{
+		restingOrder := &paperRestingOrder{
 			OrderID:         orderID,
 			Symbol:          symbol,
 			InstrumentToken: token,
@@ -631,17 +631,17 @@ func (broker *PaperBroker) PlaceLimitBuy(
 			UpdatedAt:       time.Now(),
 		}
 		broker.mu.Lock()
-		broker.orders[orderID] = ord
-		cp := *ord
+		broker.orders[orderID] = restingOrder
+		orderCopy := *restingOrder
 		broker.mu.Unlock()
 
-		broker.emit(&cp)
+		broker.emit(&orderCopy)
 		return orderID, nil
 	}
 
 	// If stock metrics Ask1 is above limit price, limit order cannot immediately fill; keep OPEN
 	if stock.Ask1Price > 0 && limitPrice < float64(stock.Ask1Price) {
-		ord := &paperRestingOrder{
+		restingOrder := &paperRestingOrder{
 			OrderID:         orderID,
 			Symbol:          symbol,
 			InstrumentToken: token,
@@ -654,28 +654,28 @@ func (broker *PaperBroker) PlaceLimitBuy(
 			UpdatedAt:       time.Now(),
 		}
 		broker.mu.Lock()
-		broker.orders[orderID] = ord
-		broker.byToken[token] = append(broker.byToken[token], ord)
-		cp := *ord
+		broker.orders[orderID] = restingOrder
+		broker.byToken[token] = append(broker.byToken[token], restingOrder)
+		orderCopy := *restingOrder
 		broker.mu.Unlock()
 
-		broker.emit(&cp)
+		broker.emit(&orderCopy)
 		return orderID, nil
 	}
 
 	// Calculate visible ask depth available at or below limitPrice
-	availShares := 0
+	availableShares := 0
 	for i := 0; i < 5; i++ {
-		p := float64(stock.AskLevels[i].Price)
-		q := int(stock.AskLevels[i].Qty)
-		if p > 0 && q > 0 && (limitPrice <= 0 || p <= limitPrice+1e-6) {
-			availShares += q
+		levelPrice := float64(stock.AskLevels[i].Price)
+		levelQuantity := int(stock.AskLevels[i].Qty)
+		if levelPrice > 0 && levelQuantity > 0 && (limitPrice <= 0 || levelPrice <= limitPrice+1e-6) {
+			availableShares += levelQuantity
 		}
 	}
 
-	if availShares <= 0 && stock.LTP > limitPrice {
+	if availableShares <= 0 && stock.LTP > limitPrice {
 		// No ask depth at or below limit price; rest OPEN
-		ord := &paperRestingOrder{
+		restingOrder := &paperRestingOrder{
 			OrderID:         orderID,
 			Symbol:          symbol,
 			InstrumentToken: token,
@@ -688,19 +688,19 @@ func (broker *PaperBroker) PlaceLimitBuy(
 			UpdatedAt:       time.Now(),
 		}
 		broker.mu.Lock()
-		broker.orders[orderID] = ord
-		broker.byToken[token] = append(broker.byToken[token], ord)
-		cp := *ord
+		broker.orders[orderID] = restingOrder
+		broker.byToken[token] = append(broker.byToken[token], restingOrder)
+		orderCopy := *restingOrder
 		broker.mu.Unlock()
 
-		broker.emit(&cp)
+		broker.emit(&orderCopy)
 		return orderID, nil
 	}
 
-	if availShares < qty && availShares > 0 {
+	if availableShares < qty && availableShares > 0 {
 		// Partial fill based on available liquidity at or below limit price
-		avgFill := walkAskBook(availShares, limitPrice, stock)
-		ord := &paperRestingOrder{
+		averageFillPrice := walkAskBook(availableShares, limitPrice, stock)
+		restingOrder := &paperRestingOrder{
 			OrderID:         orderID,
 			Symbol:          symbol,
 			InstrumentToken: token,
@@ -708,24 +708,24 @@ func (broker *PaperBroker) PlaceLimitBuy(
 			OrderType:       "LIMIT",
 			Status:          OrderStatusOpen,
 			Quantity:        qty,
-			FilledQuantity:  availShares,
+			FilledQuantity:  availableShares,
 			Price:           limitPrice,
-			AveragePrice:    avgFill,
+			AveragePrice:    averageFillPrice,
 			UpdatedAt:       time.Now(),
 		}
 		broker.mu.Lock()
-		broker.orders[orderID] = ord
-		broker.byToken[token] = append(broker.byToken[token], ord)
-		cp := *ord
+		broker.orders[orderID] = restingOrder
+		broker.byToken[token] = append(broker.byToken[token], restingOrder)
+		orderCopy := *restingOrder
 		broker.mu.Unlock()
 
-		broker.emit(&cp)
+		broker.emit(&orderCopy)
 		return orderID, nil
 	}
 
 	// Full immediate fill
-	avgFill := walkAskBook(qty, limitPrice, stock)
-	ord := &paperRestingOrder{
+	averageFillPrice := walkAskBook(qty, limitPrice, stock)
+	restingOrder := &paperRestingOrder{
 		OrderID:         orderID,
 		Symbol:          symbol,
 		InstrumentToken: token,
@@ -735,16 +735,16 @@ func (broker *PaperBroker) PlaceLimitBuy(
 		Quantity:        qty,
 		FilledQuantity:  qty,
 		Price:           limitPrice,
-		AveragePrice:    avgFill,
+		AveragePrice:    averageFillPrice,
 		UpdatedAt:       time.Now(),
 	}
 
 	broker.mu.Lock()
-	broker.orders[orderID] = ord
-	cp := *ord
+	broker.orders[orderID] = restingOrder
+	orderCopy := *restingOrder
 	broker.mu.Unlock()
 
-	broker.emit(&cp)
+	broker.emit(&orderCopy)
 	return orderID, nil
 }
 
@@ -785,12 +785,12 @@ func (broker *PaperBroker) PlaceEmergencySweepSell(
 	}
 	orderID := broker.generateNextOrderID()
 	protectiveLimit := RoundDownToTick(math.Max(tickSize, refPrice*(1.0-maxSlippagePct)), tickSize)
-	avgFill := walkBidBook(qty, protectiveLimit, stock)
-	if avgFill <= 0 {
-		avgFill = math.Max(tickSize, refPrice-tickSize)
+	averageFillPrice := walkBidBook(qty, protectiveLimit, stock)
+	if averageFillPrice <= 0 {
+		averageFillPrice = math.Max(tickSize, refPrice-tickSize)
 	}
 
-	ord := &paperRestingOrder{
+	restingOrder := &paperRestingOrder{
 		OrderID:         orderID,
 		Symbol:          symbol,
 		InstrumentToken: token,
@@ -800,16 +800,16 @@ func (broker *PaperBroker) PlaceEmergencySweepSell(
 		Quantity:        qty,
 		FilledQuantity:  qty,
 		Price:           protectiveLimit,
-		AveragePrice:    avgFill,
+		AveragePrice:    averageFillPrice,
 		UpdatedAt:       time.Now(),
 	}
 
 	broker.mu.Lock()
-	broker.orders[orderID] = ord
-	cp := *ord
+	broker.orders[orderID] = restingOrder
+	orderCopy := *restingOrder
 	broker.mu.Unlock()
 
-	broker.emit(&cp)
+	broker.emit(&orderCopy)
 	return orderID, nil
 }
 
@@ -834,7 +834,7 @@ func (broker *PaperBroker) PlaceSLOrder(
 	}
 
 	orderID := broker.generateNextOrderID()
-	ord := &paperRestingOrder{
+	restingOrder := &paperRestingOrder{
 		OrderID:         orderID,
 		Symbol:          symbol,
 		InstrumentToken: token,
@@ -849,12 +849,12 @@ func (broker *PaperBroker) PlaceSLOrder(
 	}
 
 	broker.mu.Lock()
-	broker.orders[orderID] = ord
-	broker.byToken[token] = append(broker.byToken[token], ord)
-	cp := *ord
+	broker.orders[orderID] = restingOrder
+	broker.byToken[token] = append(broker.byToken[token], restingOrder)
+	orderCopy := *restingOrder
 	broker.mu.Unlock()
 
-	broker.emit(&cp)
+	broker.emit(&orderCopy)
 	return orderID, nil
 }
 
@@ -878,29 +878,29 @@ func (broker *PaperBroker) ModifySLOrder(
 	}
 
 	broker.mu.Lock()
-	ord, exists := broker.orders[orderID]
+	restingOrder, exists := broker.orders[orderID]
 	if !exists {
 		broker.mu.Unlock()
 		return fmt.Errorf("paper order %s not found", orderID)
 	}
-	if ord.Status == OrderStatusComplete || ord.Status == OrderStatusCancelled || ord.Status == OrderStatusRejected {
+	if restingOrder.Status == OrderStatusComplete || restingOrder.Status == OrderStatusCancelled || restingOrder.Status == OrderStatusRejected {
 		broker.mu.Unlock()
-		return fmt.Errorf("cannot modify paper order %s in terminal status %s", orderID, ord.Status)
+		return fmt.Errorf("cannot modify paper order %s in terminal status %s", orderID, restingOrder.Status)
 	}
-	if ord.ModCount >= MaxExchangeOrderMods {
+	if restingOrder.ModCount >= MaxExchangeOrderMods {
 		broker.mu.Unlock()
 		return ErrMaxModificationsReached
 	}
 
-	ord.ModCount++
-	ord.Quantity = newQty
-	ord.TriggerPrice = newTrigger
-	ord.Price = newLimit
-	ord.UpdatedAt = time.Now()
-	cp := *ord
+	restingOrder.ModCount++
+	restingOrder.Quantity = newQty
+	restingOrder.TriggerPrice = newTrigger
+	restingOrder.Price = newLimit
+	restingOrder.UpdatedAt = time.Now()
+	orderCopy := *restingOrder
 	broker.mu.Unlock()
 
-	broker.emit(&cp)
+	broker.emit(&orderCopy)
 	return nil
 }
 
@@ -915,58 +915,58 @@ func (broker *PaperBroker) MutateSLToMarket(
 	}
 
 	broker.mu.Lock()
-	ord, exists := broker.orders[orderID]
+	restingOrder, exists := broker.orders[orderID]
 	if !exists {
 		broker.mu.Unlock()
 		return fmt.Errorf("paper order %s not found", orderID)
 	}
-	if ord.Status == OrderStatusComplete {
+	if restingOrder.Status == OrderStatusComplete {
 		broker.mu.Unlock()
 		return nil
 	}
-	if ord.ModCount >= MaxExchangeOrderMods {
+	if restingOrder.ModCount >= MaxExchangeOrderMods {
 		broker.mu.Unlock()
 		return ErrMaxModificationsReached
 	}
 
-	fillPrice := ord.TriggerPrice
+	fillPrice := restingOrder.TriggerPrice
 	if stock != nil && stock.LTP > 0 {
 		fillPrice = walkBidBook(qty, 0, stock)
 	}
 
-	ord.ModCount++
-	ord.OrderType = "MARKET"
-	ord.Quantity = qty
-	ord.FilledQuantity = qty
-	ord.Price = 0
-	ord.TriggerPrice = 0
-	ord.AveragePrice = fillPrice
-	ord.Status = OrderStatusComplete
-	ord.UpdatedAt = time.Now()
-	cp := *ord
+	restingOrder.ModCount++
+	restingOrder.OrderType = "MARKET"
+	restingOrder.Quantity = qty
+	restingOrder.FilledQuantity = qty
+	restingOrder.Price = 0
+	restingOrder.TriggerPrice = 0
+	restingOrder.AveragePrice = fillPrice
+	restingOrder.Status = OrderStatusComplete
+	restingOrder.UpdatedAt = time.Now()
+	orderCopy := *restingOrder
 	broker.mu.Unlock()
 
-	broker.emit(&cp)
+	broker.emit(&orderCopy)
 	return nil
 }
 
 func (broker *PaperBroker) CancelOrder(_ context.Context, orderID string) error {
 	broker.mu.Lock()
-	ord, exists := broker.orders[orderID]
+	restingOrder, exists := broker.orders[orderID]
 	if !exists {
 		broker.mu.Unlock()
 		return fmt.Errorf("paper order %s not found", orderID)
 	}
-	if ord.Status == OrderStatusComplete || ord.Status == OrderStatusCancelled || ord.Status == OrderStatusRejected {
+	if restingOrder.Status == OrderStatusComplete || restingOrder.Status == OrderStatusCancelled || restingOrder.Status == OrderStatusRejected {
 		broker.mu.Unlock()
-		return fmt.Errorf("paper order %s already %s", orderID, ord.Status)
+		return fmt.Errorf("paper order %s already %s", orderID, restingOrder.Status)
 	}
-	ord.Status = OrderStatusCancelled
-	ord.UpdatedAt = time.Now()
-	cp := *ord
+	restingOrder.Status = OrderStatusCancelled
+	restingOrder.UpdatedAt = time.Now()
+	orderCopy := *restingOrder
 	broker.mu.Unlock()
 
-	broker.emit(&cp)
+	broker.emit(&orderCopy)
 	return nil
 }
 
@@ -983,7 +983,7 @@ func (broker *PaperBroker) SeedRestingBuyOrder(
 	}
 	broker.mu.Lock()
 	defer broker.mu.Unlock()
-	ord := &paperRestingOrder{
+	restingOrder := &paperRestingOrder{
 		OrderID:         orderID,
 		Symbol:          symbol,
 		InstrumentToken: token,
@@ -995,39 +995,39 @@ func (broker *PaperBroker) SeedRestingBuyOrder(
 		Price:           limitPrice,
 		UpdatedAt:       time.Now(),
 	}
-	broker.orders[orderID] = ord
+	broker.orders[orderID] = restingOrder
 
-	for _, o := range broker.byToken[token] {
-		if o.OrderID == orderID {
+	for _, existingOrder := range broker.byToken[token] {
+		if existingOrder.OrderID == orderID {
 			return
 		}
 	}
-	broker.byToken[token] = append(broker.byToken[token], ord)
+	broker.byToken[token] = append(broker.byToken[token], restingOrder)
 }
 
 func (broker *PaperBroker) FetchOrders(_ context.Context) ([]OrderUpdateEvent, error) {
 	broker.mu.RLock()
 	defer broker.mu.RUnlock()
-	out := make([]OrderUpdateEvent, 0, len(broker.orders))
-	for _, o := range broker.orders {
-		out = append(out, OrderUpdateEvent{
-			OrderID:         o.OrderID,
-			Symbol:          o.Symbol,
-			InstrumentToken: o.InstrumentToken,
-			TransactionType: o.TransactionType,
-			OrderType:       o.OrderType,
-			Status:          o.Status,
-			Quantity:        o.Quantity,
-			FilledQuantity:  o.FilledQuantity,
-			PendingQuantity: max(0, o.Quantity-o.FilledQuantity),
-			Price:           o.Price,
-			TriggerPrice:    o.TriggerPrice,
-			AveragePrice:    o.AveragePrice,
+	orderEvents := make([]OrderUpdateEvent, 0, len(broker.orders))
+	for _, order := range broker.orders {
+		orderEvents = append(orderEvents, OrderUpdateEvent{
+			OrderID:         order.OrderID,
+			Symbol:          order.Symbol,
+			InstrumentToken: order.InstrumentToken,
+			TransactionType: order.TransactionType,
+			OrderType:       order.OrderType,
+			Status:          order.Status,
+			Quantity:        order.Quantity,
+			FilledQuantity:  order.FilledQuantity,
+			PendingQuantity: max(0, order.Quantity-order.FilledQuantity),
+			Price:           order.Price,
+			TriggerPrice:    order.TriggerPrice,
+			AveragePrice:    order.AveragePrice,
 			Tag:             OrderTag,
-			OrderTimestamp:  o.UpdatedAt.Format("2006-01-02 15:04:05"),
+			OrderTimestamp:  order.UpdatedAt.Format("2006-01-02 15:04:05"),
 		})
 	}
-	return out, nil
+	return orderEvents, nil
 }
 
 // EvaluateTickForToken checks resting Paper SL orders and BUY limit orders against live tick LTP and 5-level depth
@@ -1038,8 +1038,8 @@ func (broker *PaperBroker) EvaluateTickForToken(stockMetrics *market.StockMetric
 
 	// Phase 1: Fast read check under RLock (99.99% of incoming ticks exit here in < 20ns)
 	broker.mu.RLock()
-	list := broker.byToken[stockMetrics.InstrumentToken]
-	if len(list) == 0 {
+	restingOrders := broker.byToken[stockMetrics.InstrumentToken]
+	if len(restingOrders) == 0 {
 		broker.mu.RUnlock()
 		return
 	}
@@ -1047,17 +1047,17 @@ func (broker *PaperBroker) EvaluateTickForToken(stockMetrics *market.StockMetric
 	hasPotentialTrigger := false
 	ltp := stockMetrics.LTP
 	ask1 := float64(stockMetrics.Ask1Price)
-	for _, ord := range list {
-		if ord.TransactionType == "BUY" {
-			if ord.Status == OrderStatusOpen && (ltp <= ord.Price || (ask1 > 0 && ask1 <= ord.Price)) {
+	for _, restingOrder := range restingOrders {
+		if restingOrder.TransactionType == "BUY" {
+			if restingOrder.Status == OrderStatusOpen && (ltp <= restingOrder.Price || (ask1 > 0 && ask1 <= restingOrder.Price)) {
 				hasPotentialTrigger = true
 				break
 			}
 		} else { // SELL
-			if ord.Status == OrderStatusTrigPending && ord.TriggerPrice > 0 && ltp <= ord.TriggerPrice {
+			if restingOrder.Status == OrderStatusTrigPending && restingOrder.TriggerPrice > 0 && ltp <= restingOrder.TriggerPrice {
 				hasPotentialTrigger = true
 				break
-			} else if ord.Status == OrderStatusOpen && (ord.Price == 0 || ltp >= ord.Price) {
+			} else if restingOrder.Status == OrderStatusOpen && (restingOrder.Price == 0 || ltp >= restingOrder.Price) {
 				hasPotentialTrigger = true
 				break
 			}
@@ -1071,70 +1071,70 @@ func (broker *PaperBroker) EvaluateTickForToken(stockMetrics *market.StockMetric
 
 	// Phase 2: Escalate to write lock only to fill genuinely triggered orders
 	broker.mu.Lock()
-	list = broker.byToken[stockMetrics.InstrumentToken]
-	var triggered []paperRestingOrder
-	for _, ord := range list {
-		if ord.TransactionType == "BUY" {
-			if ord.Status == OrderStatusOpen {
+	restingOrders = broker.byToken[stockMetrics.InstrumentToken]
+	var triggeredOrders []paperRestingOrder
+	for _, restingOrder := range restingOrders {
+		if restingOrder.TransactionType == "BUY" {
+			if restingOrder.Status == OrderStatusOpen {
 				ask1 := float64(stockMetrics.Ask1Price)
-				if stockMetrics.LTP <= ord.Price || (ask1 > 0 && ask1 <= ord.Price) {
-					remToFill := ord.Quantity - ord.FilledQuantity
-					if remToFill > 0 {
-						availAtOrBelow := 0
-						for i := 0; i < 5; i++ {
-							p := float64(stockMetrics.AskLevels[i].Price)
-							q := int(stockMetrics.AskLevels[i].Qty)
-							if p > 0 && q > 0 && p <= ord.Price+1e-6 {
-								availAtOrBelow += q
+				if stockMetrics.LTP <= restingOrder.Price || (ask1 > 0 && ask1 <= restingOrder.Price) {
+					remainingToFill := restingOrder.Quantity - restingOrder.FilledQuantity
+					if remainingToFill > 0 {
+						availableAtOrBelow := 0
+						for index := 0; index < 5; index++ {
+							levelPrice := float64(stockMetrics.AskLevels[index].Price)
+							levelQuantity := int(stockMetrics.AskLevels[index].Qty)
+							if levelPrice > 0 && levelQuantity > 0 && levelPrice <= restingOrder.Price+1e-6 {
+								availableAtOrBelow += levelQuantity
 							}
 						}
-						if availAtOrBelow == 0 && stockMetrics.LTP <= ord.Price {
-							availAtOrBelow = remToFill
+						if availableAtOrBelow == 0 && stockMetrics.LTP <= restingOrder.Price {
+							availableAtOrBelow = remainingToFill
 						}
-						fillQty := min(remToFill, availAtOrBelow)
+						fillQty := min(remainingToFill, availableAtOrBelow)
 						if fillQty > 0 {
-							chunkAvg := walkAskBook(fillQty, ord.Price, stockMetrics)
-							prevVal := float64(ord.FilledQuantity) * ord.AveragePrice
-							newFilled := ord.FilledQuantity + fillQty
-							ord.AveragePrice = (prevVal + float64(fillQty)*chunkAvg) / float64(newFilled)
-							ord.FilledQuantity = newFilled
-							if ord.FilledQuantity >= ord.Quantity {
-								ord.Status = OrderStatusComplete
+							chunkAveragePrice := walkAskBook(fillQty, restingOrder.Price, stockMetrics)
+							previousTotalValue := float64(restingOrder.FilledQuantity) * restingOrder.AveragePrice
+							newFilledQuantity := restingOrder.FilledQuantity + fillQty
+							restingOrder.AveragePrice = (previousTotalValue + float64(fillQty)*chunkAveragePrice) / float64(newFilledQuantity)
+							restingOrder.FilledQuantity = newFilledQuantity
+							if restingOrder.FilledQuantity >= restingOrder.Quantity {
+								restingOrder.Status = OrderStatusComplete
 							}
-							ord.UpdatedAt = time.Now()
-							triggered = append(triggered, *ord)
+							restingOrder.UpdatedAt = time.Now()
+							triggeredOrders = append(triggeredOrders, *restingOrder)
 						}
 					}
 				}
 			}
 		} else { // SELL (SL or LIMIT)
-			if ord.Status == OrderStatusTrigPending && stockMetrics.LTP <= ord.TriggerPrice {
+			if restingOrder.Status == OrderStatusTrigPending && stockMetrics.LTP <= restingOrder.TriggerPrice {
 				// Check if current LTP gapped below the protective limit price
-				if ord.Price > 0 && stockMetrics.LTP < ord.Price {
-					ord.Status = OrderStatusOpen
-					ord.UpdatedAt = time.Now()
-					triggered = append(triggered, *ord)
+				if restingOrder.Price > 0 && stockMetrics.LTP < restingOrder.Price {
+					restingOrder.Status = OrderStatusOpen
+					restingOrder.UpdatedAt = time.Now()
+					triggeredOrders = append(triggeredOrders, *restingOrder)
 					continue
 				}
-				fillPrice := walkBidBook(ord.Quantity, ord.Price, stockMetrics)
-				ord.Status = OrderStatusComplete
-				ord.FilledQuantity = ord.Quantity
-				ord.AveragePrice = fillPrice
-				ord.UpdatedAt = time.Now()
-				triggered = append(triggered, *ord)
-			} else if ord.Status == OrderStatusOpen && (ord.Price == 0 || stockMetrics.LTP >= ord.Price) {
-				fillPrice := walkBidBook(ord.Quantity, ord.Price, stockMetrics)
-				ord.Status = OrderStatusComplete
-				ord.FilledQuantity = ord.Quantity
-				ord.AveragePrice = fillPrice
-				ord.UpdatedAt = time.Now()
-				triggered = append(triggered, *ord)
+				fillPrice := walkBidBook(restingOrder.Quantity, restingOrder.Price, stockMetrics)
+				restingOrder.Status = OrderStatusComplete
+				restingOrder.FilledQuantity = restingOrder.Quantity
+				restingOrder.AveragePrice = fillPrice
+				restingOrder.UpdatedAt = time.Now()
+				triggeredOrders = append(triggeredOrders, *restingOrder)
+			} else if restingOrder.Status == OrderStatusOpen && (restingOrder.Price == 0 || stockMetrics.LTP >= restingOrder.Price) {
+				fillPrice := walkBidBook(restingOrder.Quantity, restingOrder.Price, stockMetrics)
+				restingOrder.Status = OrderStatusComplete
+				restingOrder.FilledQuantity = restingOrder.Quantity
+				restingOrder.AveragePrice = fillPrice
+				restingOrder.UpdatedAt = time.Now()
+				triggeredOrders = append(triggeredOrders, *restingOrder)
 			}
 		}
 	}
 	broker.mu.Unlock()
 
-	for i := range triggered {
-		broker.emit(&triggered[i])
+	for index := range triggeredOrders {
+		broker.emit(&triggeredOrders[index])
 	}
 }

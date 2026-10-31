@@ -222,8 +222,8 @@ func (manager *Manager) GetTradeHistory(modeFilter, fromDate, toDate string, lim
 		appendActivePosition(act)
 	}
 
-	for _, cp := range memClosed {
-		appendActivePosition(cp)
+	for _, closedPosition := range memClosed {
+		appendActivePosition(closedPosition)
 	}
 
 	summary := computeTradeAnalyticsSummary(tradeHistoryItems)
@@ -409,102 +409,102 @@ func computeTradeAnalyticsSummary(trades []market.TradeHistoryItemDTO) market.Tr
 		captureSum                            float64
 	)
 
-	for _, t := range trades {
-		if t.Quantity <= 0 {
+	for _, trade := range trades {
+		if trade.Quantity <= 0 {
 			continue
 		}
 		sum.TotalTrades++
-		sum.TotalInvestedTurnover += t.TotalInvested
-		sum.TotalSellTurnover += t.TotalSellValue
-		sum.TotalMarginDeployed += t.MarginBlocked
-		sum.RealisedGrossPnL += t.GrossPnL
-		sum.RealisedNetPnL += t.NetPnLAfterTax
+		sum.TotalInvestedTurnover += trade.TotalInvested
+		sum.TotalSellTurnover += trade.TotalSellValue
+		sum.TotalMarginDeployed += trade.MarginBlocked
+		sum.RealisedGrossPnL += trade.GrossPnL
+		sum.RealisedNetPnL += trade.NetPnLAfterTax
 
-		if t.GrossPnL >= 0 {
-			sum.GrossProfitRupees += t.GrossPnL
+		if trade.GrossPnL >= 0 {
+			sum.GrossProfitRupees += trade.GrossPnL
 		} else {
-			sum.GrossLossRupees += t.GrossPnL
+			sum.GrossLossRupees += trade.GrossPnL
 		}
 
 		// Accumulate 6-part statutory tax breakdown
-		sum.Taxes.BuyBrokerage += t.Taxes.BuyBrokerage
-		sum.Taxes.SellBrokerage += t.Taxes.SellBrokerage
-		sum.Taxes.Brokerage += t.Taxes.Brokerage
-		sum.Taxes.STT += t.Taxes.STT
-		sum.Taxes.ExchangeTxn += t.Taxes.ExchangeTxn
-		sum.Taxes.SEBICharges += t.Taxes.SEBICharges
-		sum.Taxes.StampDuty += t.Taxes.StampDuty
-		sum.Taxes.GST += t.Taxes.GST
-		sum.Taxes.TotalCharges += t.Taxes.TotalCharges
+		sum.Taxes.BuyBrokerage += trade.Taxes.BuyBrokerage
+		sum.Taxes.SellBrokerage += trade.Taxes.SellBrokerage
+		sum.Taxes.Brokerage += trade.Taxes.Brokerage
+		sum.Taxes.STT += trade.Taxes.STT
+		sum.Taxes.ExchangeTxn += trade.Taxes.ExchangeTxn
+		sum.Taxes.SEBICharges += trade.Taxes.SEBICharges
+		sum.Taxes.StampDuty += trade.Taxes.StampDuty
+		sum.Taxes.GST += trade.Taxes.GST
+		sum.Taxes.TotalCharges += trade.Taxes.TotalCharges
 
-		if t.NetPnLAfterTax > 0.50 {
+		if trade.NetPnLAfterTax > 0.50 {
 			sum.Wins++
-			winRSum += t.RealisedRMultiple
-			winRupeeSum += t.NetPnLAfterTax
-			if t.NetPnLAfterTax > sum.MaxWinRupees {
-				sum.MaxWinRupees = t.NetPnLAfterTax
+			winRSum += trade.RealisedRMultiple
+			winRupeeSum += trade.NetPnLAfterTax
+			if trade.NetPnLAfterTax > sum.MaxWinRupees {
+				sum.MaxWinRupees = trade.NetPnLAfterTax
 			}
-		} else if t.NetPnLAfterTax < -0.50 {
+		} else if trade.NetPnLAfterTax < -0.50 {
 			sum.Losses++
-			lossRSum += t.RealisedRMultiple
-			lossRupeeSum += t.NetPnLAfterTax
-			if t.NetPnLAfterTax < sum.MaxLossRupees {
-				sum.MaxLossRupees = t.NetPnLAfterTax
+			lossRSum += trade.RealisedRMultiple
+			lossRupeeSum += trade.NetPnLAfterTax
+			if trade.NetPnLAfterTax < sum.MaxLossRupees {
+				sum.MaxLossRupees = trade.NetPnLAfterTax
 			}
 		} else {
 			sum.BreakevenTrades++
 		}
 
-		totalR += t.RealisedRMultiple
-		totalHoldSec += t.HoldDurationSec
-		if t.HasTranche1Completed {
+		totalR += trade.RealisedRMultiple
+		totalHoldSec += trade.HoldDurationSec
+		if trade.HasTranche1Completed {
 			t1Count++
 		}
-		if t.RCaptureEfficiencyPct > 0 {
+		if trade.RCaptureEfficiencyPct > 0 {
 			captureCount++
-			captureSum += t.RCaptureEfficiencyPct
+			captureSum += trade.RCaptureEfficiencyPct
 		}
 
 		// Pattern attribution
-		pat := t.PatternType
-		if pat == "" {
-			pat = "VWAP_PULLBACK_RECLAIM"
+		patternType := trade.PatternType
+		if patternType == "" {
+			patternType = "VWAP_PULLBACK_RECLAIM"
 		}
-		pStat, ok := patternMap[pat]
-		if !ok {
-			pStat = &market.PatternPerformanceDTO{PatternType: pat}
-			patternMap[pat] = pStat
+		patternStat, exists := patternMap[patternType]
+		if !exists {
+			patternStat = &market.PatternPerformanceDTO{PatternType: patternType}
+			patternMap[patternType] = patternStat
 		}
-		pStat.Trades++
-		if t.NetPnLAfterTax > 0 {
-			pStat.Wins++
+		patternStat.Trades++
+		if trade.NetPnLAfterTax > 0 {
+			patternStat.Wins++
 		}
-		pStat.AvgRMultiple += t.RealisedRMultiple
-		pStat.GrossPnL += t.GrossPnL
-		pStat.TotalTaxes += t.Taxes.TotalCharges
-		pStat.NetPnLAfterTax += t.NetPnLAfterTax
+		patternStat.AvgRMultiple += trade.RealisedRMultiple
+		patternStat.GrossPnL += trade.GrossPnL
+		patternStat.TotalTaxes += trade.Taxes.TotalCharges
+		patternStat.NetPnLAfterTax += trade.NetPnLAfterTax
 
 		// Exit Reason attribution
-		rsn := t.ExitReason
-		rStat, ok := reasonMap[rsn]
-		if !ok {
-			rStat = &market.ExitReasonStatDTO{ExitReason: rsn}
-			reasonMap[rsn] = rStat
+		exitReason := trade.ExitReason
+		reasonStat, exists := reasonMap[exitReason]
+		if !exists {
+			reasonStat = &market.ExitReasonStatDTO{ExitReason: exitReason}
+			reasonMap[exitReason] = reasonStat
 		}
-		rStat.Count++
-		rStat.AvgRMultiple += t.RealisedRMultiple
-		rStat.GrossPnL += t.GrossPnL
-		rStat.TotalTaxes += t.Taxes.TotalCharges
-		rStat.NetPnLAfterTax += t.NetPnLAfterTax
+		reasonStat.Count++
+		reasonStat.AvgRMultiple += trade.RealisedRMultiple
+		reasonStat.GrossPnL += trade.GrossPnL
+		reasonStat.TotalTaxes += trade.Taxes.TotalCharges
+		reasonStat.NetPnLAfterTax += trade.NetPnLAfterTax
 	}
 
 	if sum.TotalTrades > 0 {
-		n := float64(sum.TotalTrades)
-		sum.WinRatePct = round2((float64(sum.Wins) / n) * 100.0)
-		sum.ExpectancyPerTrade = round2(sum.RealisedNetPnL / n)
-		sum.AvgRMultiple = round2(totalR / n)
+		totalTradeCount := float64(sum.TotalTrades)
+		sum.WinRatePct = round2((float64(sum.Wins) / totalTradeCount) * 100.0)
+		sum.ExpectancyPerTrade = round2(sum.RealisedNetPnL / totalTradeCount)
+		sum.AvgRMultiple = round2(totalR / totalTradeCount)
 		sum.AvgHoldDurationSec = totalHoldSec / int64(sum.TotalTrades)
-		sum.Tranche1ScaleOutRate = round2((float64(t1Count) / n) * 100.0)
+		sum.Tranche1ScaleOutRate = round2((float64(t1Count) / totalTradeCount) * 100.0)
 	}
 	if sum.Wins > 0 {
 		sum.AvgWinR = round2(winRSum / float64(sum.Wins))
@@ -546,37 +546,37 @@ func computeTradeAnalyticsSummary(trades []market.TradeHistoryItemDTO) market.Tr
 	sum.Taxes.GST = round2(sum.Taxes.GST)
 	sum.Taxes.TotalCharges = round2(sum.Taxes.TotalCharges)
 
-	for _, p := range patternMap {
-		if p.Trades > 0 {
-			p.WinRatePct = round2((float64(p.Wins) / float64(p.Trades)) * 100.0)
-			p.AvgRMultiple = round2(p.AvgRMultiple / float64(p.Trades))
+	for _, patternBreakdown := range patternMap {
+		if patternBreakdown.Trades > 0 {
+			patternBreakdown.WinRatePct = round2((float64(patternBreakdown.Wins) / float64(patternBreakdown.Trades)) * 100.0)
+			patternBreakdown.AvgRMultiple = round2(patternBreakdown.AvgRMultiple / float64(patternBreakdown.Trades))
 		}
-		p.GrossPnL = round2(p.GrossPnL)
-		p.TotalTaxes = round2(p.TotalTaxes)
-		p.NetPnLAfterTax = round2(p.NetPnLAfterTax)
-		sum.ByPattern = append(sum.ByPattern, *p)
+		patternBreakdown.GrossPnL = round2(patternBreakdown.GrossPnL)
+		patternBreakdown.TotalTaxes = round2(patternBreakdown.TotalTaxes)
+		patternBreakdown.NetPnLAfterTax = round2(patternBreakdown.NetPnLAfterTax)
+		sum.ByPattern = append(sum.ByPattern, *patternBreakdown)
 	}
-	slices.SortFunc(sum.ByPattern, func(a, b market.PatternPerformanceDTO) int {
-		if a.Trades != b.Trades {
-			return b.Trades - a.Trades
+	slices.SortFunc(sum.ByPattern, func(statA, statB market.PatternPerformanceDTO) int {
+		if statA.Trades != statB.Trades {
+			return statB.Trades - statA.Trades
 		}
-		return strings.Compare(a.PatternType, b.PatternType)
+		return strings.Compare(statA.PatternType, statB.PatternType)
 	})
 
-	for _, r := range reasonMap {
-		if r.Count > 0 {
-			r.AvgRMultiple = round2(r.AvgRMultiple / float64(r.Count))
+	for _, reasonBreakdown := range reasonMap {
+		if reasonBreakdown.Count > 0 {
+			reasonBreakdown.AvgRMultiple = round2(reasonBreakdown.AvgRMultiple / float64(reasonBreakdown.Count))
 		}
-		r.GrossPnL = round2(r.GrossPnL)
-		r.TotalTaxes = round2(r.TotalTaxes)
-		r.NetPnLAfterTax = round2(r.NetPnLAfterTax)
-		sum.ByExitReason = append(sum.ByExitReason, *r)
+		reasonBreakdown.GrossPnL = round2(reasonBreakdown.GrossPnL)
+		reasonBreakdown.TotalTaxes = round2(reasonBreakdown.TotalTaxes)
+		reasonBreakdown.NetPnLAfterTax = round2(reasonBreakdown.NetPnLAfterTax)
+		sum.ByExitReason = append(sum.ByExitReason, *reasonBreakdown)
 	}
-	slices.SortFunc(sum.ByExitReason, func(a, b market.ExitReasonStatDTO) int {
-		if a.Count != b.Count {
-			return b.Count - a.Count
+	slices.SortFunc(sum.ByExitReason, func(statA, statB market.ExitReasonStatDTO) int {
+		if statA.Count != statB.Count {
+			return statB.Count - statA.Count
 		}
-		return strings.Compare(a.ExitReason, b.ExitReason)
+		return strings.Compare(statA.ExitReason, statB.ExitReason)
 	})
 
 	return sum

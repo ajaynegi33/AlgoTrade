@@ -10,51 +10,51 @@ import (
 type TaxBreakdown = market.TaxBreakdownDTO
 
 // CalculateRoundTripCharges computes the exact Zerodha + NSE Cash MIS round-trip charges in ₹
-func CalculateRoundTripCharges(buyPrice, sellPrice float64, qty int) TaxBreakdown {
-	return CalculatePositionTaxBreakdown(buyPrice, sellPrice, qty, false)
+func CalculateRoundTripCharges(buyPrice, sellPrice float64, orderQuantity int) TaxBreakdown {
+	return CalculatePositionTaxBreakdown(buyPrice, sellPrice, orderQuantity, false)
 }
 
 // CalculatePositionTaxBreakdown computes the exact Zerodha + NSE Cash MIS round-trip charges in ₹,
 // accounting for 2 sell order legs when isSplitExit (Tranche 1 +1R 50% scale-out + Runner exit) is true.
-func CalculatePositionTaxBreakdown(buyPrice, sellPrice float64, qty int, isSplitExit bool) TaxBreakdown {
-	if qty <= 0 || buyPrice <= 0 || sellPrice <= 0 {
+func CalculatePositionTaxBreakdown(buyPrice, sellPrice float64, orderQuantity int, isSplitExit bool) TaxBreakdown {
+	if orderQuantity <= 0 || buyPrice <= 0 || sellPrice <= 0 {
 		return TaxBreakdown{}
 	}
-	sharesCount := float64(qty)
+	sharesCount := float64(orderQuantity)
 	buyTurnover := buyPrice * sharesCount
 	sellTurnover := sellPrice * sharesCount
 	totalTurnover := buyTurnover + sellTurnover
 
 	buyBrokerageFee := math.Min(20.0, 0.0003*buyTurnover)
 	var sellBrokerageFee float64
-	if isSplitExit && qty >= 2 {
-		tranche1Quantity := float64(qty / 2)
-		runnerQuantity := float64(qty - (qty / 2))
+	if isSplitExit && orderQuantity >= 2 {
+		tranche1Quantity := float64(orderQuantity / 2)
+		runnerQuantity := float64(orderQuantity - (orderQuantity / 2))
 		sellBrokerageFee = math.Min(20.0, 0.0003*(sellPrice*tranche1Quantity)) + math.Min(20.0, 0.0003*(sellPrice*runnerQuantity))
 	} else {
 		sellBrokerageFee = math.Min(20.0, 0.0003*sellTurnover)
 	}
 
-	stt := math.Round(0.00025 * sellTurnover)
-	exch := math.Round(0.0000297*totalTurnover*100.0) / 100.0
-	sebi := math.Round(0.000001*totalTurnover*100.0) / 100.0
-	stamp := math.Round(0.00003 * buyTurnover)
-	gst := math.Round(0.18*(buyBrokerageFee+sellBrokerageFee+exch+sebi)*100.0) / 100.0
+	securitiesTransactionTax := math.Round(0.00025 * sellTurnover)
+	exchangeTurnoverCharge := math.Round(0.0000297*totalTurnover*100.0) / 100.0
+	sebiTurnoverCharge := math.Round(0.000001*totalTurnover*100.0) / 100.0
+	stampDutyCharge := math.Round(0.00003 * buyTurnover)
+	goodsAndServicesTax := math.Round(0.18*(buyBrokerageFee+sellBrokerageFee+exchangeTurnoverCharge+sebiTurnoverCharge)*100.0) / 100.0
 	buyBrokerageFee = math.Round(buyBrokerageFee*100.0) / 100.0
 	sellBrokerageFee = math.Round(sellBrokerageFee*100.0) / 100.0
-	brokerage := math.Round((buyBrokerageFee+sellBrokerageFee)*100.0) / 100.0
-	total := math.Round((buyBrokerageFee+sellBrokerageFee+stt+exch+sebi+stamp+gst)*100.0) / 100.0
+	totalBrokerageFee := math.Round((buyBrokerageFee+sellBrokerageFee)*100.0) / 100.0
+	totalStatutoryCharges := math.Round((buyBrokerageFee+sellBrokerageFee+securitiesTransactionTax+exchangeTurnoverCharge+sebiTurnoverCharge+stampDutyCharge+goodsAndServicesTax)*100.0) / 100.0
 
 	return TaxBreakdown{
 		BuyBrokerage:  buyBrokerageFee,
 		SellBrokerage: sellBrokerageFee,
-		Brokerage:     brokerage,
-		STT:           stt,
-		ExchangeTxn:   exch,
-		SEBICharges:   sebi,
-		StampDuty:     stamp,
-		GST:           gst,
-		TotalCharges:  total,
+		Brokerage:     totalBrokerageFee,
+		STT:           securitiesTransactionTax,
+		ExchangeTxn:   exchangeTurnoverCharge,
+		SEBICharges:   sebiTurnoverCharge,
+		StampDuty:     stampDutyCharge,
+		GST:           goodsAndServicesTax,
+		TotalCharges:  totalStatutoryCharges,
 	}
 }
 

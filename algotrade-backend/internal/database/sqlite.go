@@ -172,13 +172,13 @@ func runMigrations(db *sql.DB) error {
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			mode TEXT NOT NULL DEFAULT 'PAPER',
 			auto_execute INTEGER NOT NULL DEFAULT 0,
-			paper_capital REAL NOT NULL DEFAULT 100000.0,
+			paper_capital REAL NOT NULL DEFAULT 10000.0,
 			risk_per_trade_pct REAL NOT NULL DEFAULT 0.005,
 			max_open_positions INTEGER NOT NULL DEFAULT 4,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);`,
 		`INSERT OR IGNORE INTO execution_settings (id, mode, auto_execute, paper_capital, risk_per_trade_pct, max_open_positions)
-		 VALUES (1, 'PAPER', 0, 100000.0, 0.005, 4);`,
+		 VALUES (1, 'PAPER', 0, 10000.0, 0.005, 4);`,
 		`CREATE TABLE IF NOT EXISTS positions (
 			position_id TEXT PRIMARY KEY,
 			trading_date TEXT NOT NULL,

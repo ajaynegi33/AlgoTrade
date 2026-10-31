@@ -43,7 +43,7 @@ type Manager struct {
 func NewManager( db *sql.DB, actor *market.Actor, kiteService *kite.Service, tickerClient *kite.TickerClient ) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	m := &Manager{
+	manager := &Manager{
 		db:              db,
 		actor:           actor,
 		kiteService:     kiteService,
@@ -56,42 +56,42 @@ func NewManager( db *sql.DB, actor *market.Actor, kiteService *kite.Service, tic
 		ctx:             ctx,
 		cancel:          cancel,
 	}
-	m.posSeq.Store(uint64(time.Now().Unix() % 100000))
+	manager.posSeq.Store(uint64(time.Now().Unix() % 100000))
 
-	m.reconciler = NewOrderReconciler(db, m.handleOrderDelta)
-	m.liveBroker = NewZerodhaLiveBroker(kiteService)
-	m.paperBroker = NewPaperBroker(func(ev OrderUpdateEvent) {
-		m.reconciler.ProcessOrderEvent(ev)
+	manager.reconciler = NewOrderReconciler(db, manager.handleOrderDelta)
+	manager.liveBroker = NewZerodhaLiveBroker(kiteService)
+	manager.paperBroker = NewPaperBroker(func(orderEvent OrderUpdateEvent) {
+		manager.reconciler.ProcessOrderEvent(orderEvent)
 	})
 
 	// Wire WebSocket order postbacks and reconnect sync
 	if tickerClient != nil {
-		tickerClient.SetOrderUpdateHandler(m.reconciler.HandleWebSocketTextFrame)
+		tickerClient.SetOrderUpdateHandler(manager.reconciler.HandleWebSocketTextFrame)
 		tickerClient.SetReconnectHandler(func() {
 			slog.Info("Kite Ticker reconnected: running immediate REST order reconciliation")
-			_, _ = m.reconciler.SyncOrdersCoalesced(m.ctx, m.getActiveBroker())
+			_, _ = manager.reconciler.SyncOrdersCoalesced(manager.ctx, manager.getActiveBroker())
 		})
 	}
 
 	// Wire Kite OAuth authentication hook for MIS Leverage sync & Live Margin refresh
 	if kiteService != nil {
 		kiteService.RegisterOnAuthenticated(func() {
-			_ = m.capitalMgr.RefreshLiveMargins()
-			m.capitalMgr.SyncUniverseLeverages(m.ctx)
+			_ = manager.capitalMgr.RefreshLiveMargins()
+			manager.capitalMgr.SyncUniverseLeverages(manager.ctx)
 		})
 	}
 
 	// Load today's closed & open positions from SQLite for crash-recovery continuity across restarts
-	m.loadClosedPositionsFromDB()
-	m.rehydrateOpenPositionsFromDB()
+	manager.loadClosedPositionsFromDB()
+	manager.rehydrateOpenPositionsFromDB()
 
 	// Wire 1-second hook into Single-Writer Actor
 	if actor != nil {
-		actor.SetExecutionHook(m)
+		actor.SetExecutionHook(manager)
 	}
 
-	go m.backgroundMaintenanceLoop()
-	return m
+	go manager.backgroundMaintenanceLoop()
+	return manager
 }
 
 func (manager *Manager) Stop() {

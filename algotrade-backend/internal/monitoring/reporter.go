@@ -10,9 +10,9 @@ import (
 )
 
 // GenerateHTMLReport produces an email-friendly, responsive HTML report
-func GenerateHTMLReport(s *EODReportSummary) string {
+func GenerateHTMLReport(summary *EODReportSummary) string {
 	pnlColor := "#10b981"
-	if s.RealisedNetPnL < 0 {
+	if summary.RealisedNetPnL < 0 {
 		pnlColor = "#ef4444"
 	}
 
@@ -84,27 +84,27 @@ func GenerateHTMLReport(s *EODReportSummary) string {
     </div>
   </div>
 `,
-		s.TradingDate,
-		s.GeneratedAt.Format("15:04:05 IST"),
-		pnlColor, s.RealisedNetPnL,
-		s.RealisedGrossPnL, s.TotalCharges,
-		s.WinRatePct,
-		s.WinningTrades, s.LosingTrades, s.BreakevenTrades,
-		s.ProfitFactor,
-		s.AverageRMultiple,
-		s.ExcursionSummary.EdgeRatio,
-		s.ExcursionSummary.CaptureEfficiency,
+		summary.TradingDate,
+		summary.GeneratedAt.Format("15:04:05 IST"),
+		pnlColor, summary.RealisedNetPnL,
+		summary.RealisedGrossPnL, summary.TotalCharges,
+		summary.WinRatePct,
+		summary.WinningTrades, summary.LosingTrades, summary.BreakevenTrades,
+		summary.ProfitFactor,
+		summary.AverageRMultiple,
+		summary.ExcursionSummary.EdgeRatio,
+		summary.ExcursionSummary.CaptureEfficiency,
 	)
 
 	// 2. Stop Loss & Trailing Optimization Alerts
-	if s.ExcursionSummary.StopLossAlert != "" {
-		fmt.Fprintf(&sb, `<div class="alert-box alert-warning"><strong>Stop Loss Width Optimization:</strong> %s</div>`, s.ExcursionSummary.StopLossAlert)
+	if summary.ExcursionSummary.StopLossAlert != "" {
+		fmt.Fprintf(&sb, `<div class="alert-box alert-warning"><strong>Stop Loss Width Optimization:</strong> %s</div>`, summary.ExcursionSummary.StopLossAlert)
 	}
-	if s.ExcursionSummary.TrailingStopAlert != "" {
-		fmt.Fprintf(&sb, `<div class="alert-box alert-warning"><strong>Trailing Stop Optimization:</strong> %s</div>`, s.ExcursionSummary.TrailingStopAlert)
+	if summary.ExcursionSummary.TrailingStopAlert != "" {
+		fmt.Fprintf(&sb, `<div class="alert-box alert-warning"><strong>Trailing Stop Optimization:</strong> %s</div>`, summary.ExcursionSummary.TrailingStopAlert)
 	}
-	if s.ShadowSummary.FilterEfficiencyAlert != "" {
-		fmt.Fprintf(&sb, `<div class="alert-box alert-danger"><strong>Shadow Signals Warning:</strong> %s</div>`, s.ShadowSummary.FilterEfficiencyAlert)
+	if summary.ShadowSummary.FilterEfficiencyAlert != "" {
+		fmt.Fprintf(&sb, `<div class="alert-box alert-danger"><strong>Shadow Signals Warning:</strong> %s</div>`, summary.ShadowSummary.FilterEfficiencyAlert)
 	}
 
 	// 3. MFE vs MAE Diagnostic Table
@@ -147,11 +147,11 @@ func GenerateHTMLReport(s *EODReportSummary) string {
     </tbody>
   </table>
 `,
-		s.ExcursionSummary.AverageMFE,
-		s.ExcursionSummary.AverageMAE,
-		s.ExcursionSummary.MedianMAEWinners,
-		s.ExcursionSummary.PctWinnersUnder06R,
-		s.ExcursionSummary.CaptureEfficiency,
+		summary.ExcursionSummary.AverageMFE,
+		summary.ExcursionSummary.AverageMAE,
+		summary.ExcursionSummary.MedianMAEWinners,
+		summary.ExcursionSummary.PctWinnersUnder06R,
+		summary.ExcursionSummary.CaptureEfficiency,
 	)
 
 	// 4. Shadow Tracking of Rejected Trades
@@ -185,21 +185,21 @@ func GenerateHTMLReport(s *EODReportSummary) string {
     </tbody>
   </table>
 `,
-		s.ShadowSummary.ActualTradeCount,
-		s.ShadowSummary.ActualWinRatePct,
-		s.ShadowSummary.ActualAverageR,
-		pnlColor, s.ShadowSummary.ActualTotalNetPnL,
-		s.ShadowSummary.ShadowSignalCount,
-		s.ShadowSummary.ShadowWinRatePct,
-		s.ShadowSummary.ShadowAverageR,
+		summary.ShadowSummary.ActualTradeCount,
+		summary.ShadowSummary.ActualWinRatePct,
+		summary.ShadowSummary.ActualAverageR,
+		pnlColor, summary.ShadowSummary.ActualTotalNetPnL,
+		summary.ShadowSummary.ShadowSignalCount,
+		summary.ShadowSummary.ShadowWinRatePct,
+		summary.ShadowSummary.ShadowAverageR,
 	)
 
 	// 5. Slippage & Friction Audit
 	sb.WriteString(`
   <div class="section-title">3. Slippage & Friction Audit</div>
 `)
-	if len(s.ToxicSymbols) > 0 {
-		fmt.Fprintf(&sb, `<div class="alert-box alert-danger"><strong>Toxic Illiquidity Detected:</strong> %s exceeded the 0.15%% average slippage limit. Immediate blacklisting recommended.</div>`, strings.Join(s.ToxicSymbols, ", "))
+	if len(summary.ToxicSymbols) > 0 {
+		fmt.Fprintf(&sb, `<div class="alert-box alert-danger"><strong>Toxic Illiquidity Detected:</strong> %s exceeded the 0.15%% average slippage limit. Immediate blacklisting recommended.</div>`, strings.Join(summary.ToxicSymbols, ", "))
 	}
 	sb.WriteString(`
   <table>
@@ -216,12 +216,12 @@ func GenerateHTMLReport(s *EODReportSummary) string {
     </thead>
     <tbody>
 `)
-	if len(s.SlippageRecords) == 0 {
+	if len(summary.SlippageRecords) == 0 {
 		sb.WriteString(`<tr><td colspan="7" class="text-center" style="color: #64748b;">No trades executed today</td></tr>`)
 	} else {
-		for _, slip := range s.SlippageRecords {
+		for _, slippageRecord := range summary.SlippageRecords {
 			statusPill := `<span class="pill-win">Clean</span>`
-			if slip.IsToxicLiquidity {
+			if slippageRecord.IsToxicLiquidity {
 				statusPill = `<span class="pill-toxic">TOXIC ILLIQUID</span>`
 			}
 			fmt.Fprintf(&sb, `
@@ -234,8 +234,8 @@ func GenerateHTMLReport(s *EODReportSummary) string {
         <td class="text-right">%+.3f%%</td>
         <td class="text-center">%s</td>
       </tr>`,
-				slip.Symbol, slip.TradeCount, slip.AvgIntendedPrice, slip.AvgFillPrice,
-				slip.AvgSlippagePct, slip.MaxSlippagePct, statusPill,
+				slippageRecord.Symbol, slippageRecord.TradeCount, slippageRecord.AvgIntendedPrice, slippageRecord.AvgFillPrice,
+				slippageRecord.AvgSlippagePct, slippageRecord.MaxSlippagePct, statusPill,
 			)
 		}
 	}
@@ -259,11 +259,11 @@ func GenerateHTMLReport(s *EODReportSummary) string {
     </thead>
     <tbody>
 `)
-	for _, pb := range s.ProbabilityBuckets {
+	for _, probabilityBucket := range summary.ProbabilityBuckets {
 		pColor := "#94a3b8"
-		if pb.NetPnL > 0 {
+		if probabilityBucket.NetPnL > 0 {
 			pColor = "#10b981"
-		} else if pb.NetPnL < 0 {
+		} else if probabilityBucket.NetPnL < 0 {
 			pColor = "#ef4444"
 		}
 		fmt.Fprintf(&sb, `
@@ -274,7 +274,7 @@ func GenerateHTMLReport(s *EODReportSummary) string {
         <td class="text-right">%+.2fR</td>
         <td class="text-right" style="color: %s">₹%.2f</td>
       </tr>`,
-			pb.BucketName, pb.TradeCount, pb.WinRatePct, pb.AverageR, pColor, pb.NetPnL,
+			probabilityBucket.BucketName, probabilityBucket.TradeCount, probabilityBucket.WinRatePct, probabilityBucket.AverageR, pColor, probabilityBucket.NetPnL,
 		)
 	}
 	sb.WriteString(`
@@ -298,11 +298,11 @@ func GenerateHTMLReport(s *EODReportSummary) string {
     </thead>
     <tbody>
 `)
-	for _, sess := range s.SessionBreakdowns {
+	for _, sessionBreakdown := range summary.SessionBreakdowns {
 		sColor := "#94a3b8"
-		if sess.NetPnL > 0 {
+		if sessionBreakdown.NetPnL > 0 {
 			sColor = "#10b981"
-		} else if sess.NetPnL < 0 {
+		} else if sessionBreakdown.NetPnL < 0 {
 			sColor = "#ef4444"
 		}
 		fmt.Fprintf(&sb, `
@@ -314,7 +314,7 @@ func GenerateHTMLReport(s *EODReportSummary) string {
         <td class="text-right">%+.2fR</td>
         <td class="text-right" style="color: %s">₹%.2f</td>
       </tr>`,
-			sess.SessionName, sess.TimeWindow, sess.TradeCount, sess.WinRatePct, sess.AverageR, sColor, sess.NetPnL,
+			sessionBreakdown.SessionName, sessionBreakdown.TimeWindow, sessionBreakdown.TradeCount, sessionBreakdown.WinRatePct, sessionBreakdown.AverageR, sColor, sessionBreakdown.NetPnL,
 		)
 	}
 	sb.WriteString(`
@@ -335,11 +335,11 @@ func GenerateHTMLReport(s *EODReportSummary) string {
     </thead>
     <tbody>
 `)
-	for _, gear := range s.GearAttributions {
+	for _, gearAttribution := range summary.GearAttributions {
 		gColor := "#94a3b8"
-		if gear.BankedPnL > 0 {
+		if gearAttribution.BankedPnL > 0 {
 			gColor = "#10b981"
-		} else if gear.BankedPnL < 0 {
+		} else if gearAttribution.BankedPnL < 0 {
 			gColor = "#ef4444"
 		}
 		fmt.Fprintf(&sb, `
@@ -348,7 +348,7 @@ func GenerateHTMLReport(s *EODReportSummary) string {
         <td class="text-center">%d</td>
         <td class="text-right" style="color: %s">₹%.2f</td>
       </tr>`,
-			gear.GearLabel, gear.TradesCount, gColor, gear.BankedPnL,
+			gearAttribution.GearLabel, gearAttribution.TradesCount, gColor, gearAttribution.BankedPnL,
 		)
 	}
 	sb.WriteString(`
@@ -376,13 +376,13 @@ func GenerateHTMLReport(s *EODReportSummary) string {
     </thead>
     <tbody>
 `)
-	if len(s.TradeLedger) == 0 {
+	if len(summary.TradeLedger) == 0 {
 		sb.WriteString(`<tr><td colspan="10" class="text-center" style="color: #64748b;">No trades executed today</td></tr>`)
 	} else {
-		for _, trade := range s.TradeLedger {
+		for _, tradeRecord := range summary.TradeLedger {
 			pill := `<span class="pill-win">WIN</span>`
 			tColor := "#10b981"
-			if !trade.IsWinner {
+			if !tradeRecord.IsWinner {
 				pill = `<span class="pill-loss">LOSS</span>`
 				tColor = "#ef4444"
 			}
@@ -399,9 +399,9 @@ func GenerateHTMLReport(s *EODReportSummary) string {
         <td class="text-right" style="color: %s; font-weight: 600;">₹%.2f</td>
         <td style="font-size: 11px; color: #94a3b8;">%s</td>
       </tr>`,
-				trade.Symbol, pill, trade.PatternType, trade.EntryPrice, trade.ExitPrice, trade.OneR,
-				trade.MFERMultiple, trade.MAERMultiple, trade.RealisedRMultiple,
-				tColor, trade.RealisedNetPnL, trade.ExitReason,
+				tradeRecord.Symbol, pill, tradeRecord.PatternType, tradeRecord.EntryPrice, tradeRecord.ExitPrice, tradeRecord.OneR,
+				tradeRecord.MFERMultiple, tradeRecord.MAERMultiple, tradeRecord.RealisedRMultiple,
+				tColor, tradeRecord.RealisedNetPnL, tradeRecord.ExitReason,
 			)
 		}
 	}
@@ -420,68 +420,68 @@ func GenerateHTMLReport(s *EODReportSummary) string {
 }
 
 // GenerateMarkdownReport produces a GitHub-Flavored Markdown summary
-func GenerateMarkdownReport(s *EODReportSummary) string {
+func GenerateMarkdownReport(summary *EODReportSummary) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "# AlgoTrade EOD Diagnostic Report — %s\n\n", s.TradingDate)
-	fmt.Fprintf(&sb, "*Generated at %s*\n\n", s.GeneratedAt.Format("2006-01-02 15:04:05 IST"))
+	fmt.Fprintf(&sb, "# AlgoTrade EOD Diagnostic Report — %s\n\n", summary.TradingDate)
+	fmt.Fprintf(&sb, "*Generated at %s*\n\n", summary.GeneratedAt.Format("2006-01-02 15:04:05 IST"))
 
 	// Key Metrics Table
 	sb.WriteString("## Executive Performance Summary\n\n")
 	sb.WriteString("| Metric | Value |\n")
 	sb.WriteString("|---|---|\n")
-	fmt.Fprintf(&sb, "| **Realised Net PnL** | **₹%.2f** |\n", s.RealisedNetPnL)
-	fmt.Fprintf(&sb, "| Realised Gross PnL | ₹%.2f |\n", s.RealisedGrossPnL)
-	fmt.Fprintf(&sb, "| Total Statutory Charges & Brokerage | ₹%.2f |\n", s.TotalCharges)
-	fmt.Fprintf(&sb, "| Win Rate | %.1f%% (%d Won / %d Lost / %d BE) |\n", s.WinRatePct, s.WinningTrades, s.LosingTrades, s.BreakevenTrades)
-	fmt.Fprintf(&sb, "| Profit Factor | %.2f |\n", s.ProfitFactor)
-	fmt.Fprintf(&sb, "| Average Realised R | %+.2fR |\n", s.AverageRMultiple)
-	fmt.Fprintf(&sb, "| Edge Ratio (Avg MFE / |MAE|) | %.2fx |\n", s.ExcursionSummary.EdgeRatio)
-	fmt.Fprintf(&sb, "| Exit Capture Efficiency | %.1f%% |\n\n", s.ExcursionSummary.CaptureEfficiency)
+	fmt.Fprintf(&sb, "| **Realised Net PnL** | **₹%.2f** |\n", summary.RealisedNetPnL)
+	fmt.Fprintf(&sb, "| Realised Gross PnL | ₹%.2f |\n", summary.RealisedGrossPnL)
+	fmt.Fprintf(&sb, "| Total Statutory Charges & Brokerage | ₹%.2f |\n", summary.TotalCharges)
+	fmt.Fprintf(&sb, "| Win Rate | %.1f%% (%d Won / %d Lost / %d BE) |\n", summary.WinRatePct, summary.WinningTrades, summary.LosingTrades, summary.BreakevenTrades)
+	fmt.Fprintf(&sb, "| Profit Factor | %.2f |\n", summary.ProfitFactor)
+	fmt.Fprintf(&sb, "| Average Realised R | %+.2fR |\n", summary.AverageRMultiple)
+	fmt.Fprintf(&sb, "| Edge Ratio (Avg MFE / |MAE|) | %.2fx |\n", summary.ExcursionSummary.EdgeRatio)
+	fmt.Fprintf(&sb, "| Exit Capture Efficiency | %.1f%% |\n\n", summary.ExcursionSummary.CaptureEfficiency)
 
 	// Diagnostic Alerts
-	if s.ExcursionSummary.StopLossAlert != "" {
-		fmt.Fprintf(&sb, "> [!WARNING]\n> **Stop Loss Width**: %s\n\n", s.ExcursionSummary.StopLossAlert)
+	if summary.ExcursionSummary.StopLossAlert != "" {
+		fmt.Fprintf(&sb, "> [!WARNING]\n> **Stop Loss Width**: %s\n\n", summary.ExcursionSummary.StopLossAlert)
 	}
-	if s.ExcursionSummary.TrailingStopAlert != "" {
-		fmt.Fprintf(&sb, "> [!WARNING]\n> **Trailing Stop Width**: %s\n\n", s.ExcursionSummary.TrailingStopAlert)
+	if summary.ExcursionSummary.TrailingStopAlert != "" {
+		fmt.Fprintf(&sb, "> [!WARNING]\n> **Trailing Stop Width**: %s\n\n", summary.ExcursionSummary.TrailingStopAlert)
 	}
-	if s.ShadowSummary.FilterEfficiencyAlert != "" {
-		fmt.Fprintf(&sb, "> [!CAUTION]\n> **Filter Efficiency**: %s\n\n", s.ShadowSummary.FilterEfficiencyAlert)
+	if summary.ShadowSummary.FilterEfficiencyAlert != "" {
+		fmt.Fprintf(&sb, "> [!CAUTION]\n> **Filter Efficiency**: %s\n\n", summary.ShadowSummary.FilterEfficiencyAlert)
 	}
 
 	// MFE vs MAE
 	sb.WriteString("## 1. MFE vs. MAE Excursion Breakdown\n\n")
 	sb.WriteString("| Metric | Value | Diagnostic Insight |\n")
 	sb.WriteString("|---|---|---|\n")
-	fmt.Fprintf(&sb, "| Average MFE | %+.2fR | Peak favorable run before exit |\n", s.ExcursionSummary.AverageMFE)
-	fmt.Fprintf(&sb, "| Average MAE | %+.2fR | Deepest adverse dip during trade |\n", s.ExcursionSummary.AverageMAE)
-	fmt.Fprintf(&sb, "| Median MAE of Winners | %+.2fR | Benchmark drawdown on winning trades |\n", s.ExcursionSummary.MedianMAEWinners)
-	fmt.Fprintf(&sb, "| Winners Staying Above -0.6R | %.1f%% | Target >85%% for tight stop optimization |\n\n", s.ExcursionSummary.PctWinnersUnder06R)
+	fmt.Fprintf(&sb, "| Average MFE | %+.2fR | Peak favorable run before exit |\n", summary.ExcursionSummary.AverageMFE)
+	fmt.Fprintf(&sb, "| Average MAE | %+.2fR | Deepest adverse dip during trade |\n", summary.ExcursionSummary.AverageMAE)
+	fmt.Fprintf(&sb, "| Median MAE of Winners | %+.2fR | Benchmark drawdown on winning trades |\n", summary.ExcursionSummary.MedianMAEWinners)
+	fmt.Fprintf(&sb, "| Winners Staying Above -0.6R | %.1f%% | Target >85%% for tight stop optimization |\n\n", summary.ExcursionSummary.PctWinnersUnder06R)
 
 	// Shadow Tracking
 	sb.WriteString("## 2. Shadow Tracking (Actual vs. Rejected Candidates)\n\n")
 	sb.WriteString("| Stream | Trades | Win Rate | Average R | Total Net PnL |\n")
 	sb.WriteString("|---|---|---|---|---|\n")
-	fmt.Fprintf(&sb, "| **Actual Trades** | %d | %.1f%% | %+.2fR | ₹%.2f |\n", s.ShadowSummary.ActualTradeCount, s.ShadowSummary.ActualWinRatePct, s.ShadowSummary.ActualAverageR, s.ShadowSummary.ActualTotalNetPnL)
-	fmt.Fprintf(&sb, "| **Shadow Setups** | %d | %.1f%% | %+.2fR | Simulated 1R |\n\n", s.ShadowSummary.ShadowSignalCount, s.ShadowSummary.ShadowWinRatePct, s.ShadowSummary.ShadowAverageR)
+	fmt.Fprintf(&sb, "| **Actual Trades** | %d | %.1f%% | %+.2fR | ₹%.2f |\n", summary.ShadowSummary.ActualTradeCount, summary.ShadowSummary.ActualWinRatePct, summary.ShadowSummary.ActualAverageR, summary.ShadowSummary.ActualTotalNetPnL)
+	fmt.Fprintf(&sb, "| **Shadow Setups** | %d | %.1f%% | %+.2fR | Simulated 1R |\n\n", summary.ShadowSummary.ShadowSignalCount, summary.ShadowSummary.ShadowWinRatePct, summary.ShadowSummary.ShadowAverageR)
 
 	// Slippage Audit
 	sb.WriteString("## 3. Slippage & Friction Audit\n\n")
-	if len(s.ToxicSymbols) > 0 {
-		fmt.Fprintf(&sb, "> [!CAUTION]\n> **Toxic Illiquid Stocks Flagged for Blacklist**: %s\n\n", strings.Join(s.ToxicSymbols, ", "))
+	if len(summary.ToxicSymbols) > 0 {
+		fmt.Fprintf(&sb, "> [!CAUTION]\n> **Toxic Illiquid Stocks Flagged for Blacklist**: %s\n\n", strings.Join(summary.ToxicSymbols, ", "))
 	}
 	sb.WriteString("| Symbol | Trades | Avg Intended | Avg Fill | Avg Slippage | Max Slippage | Status |\n")
 	sb.WriteString("|---|---|---|---|---|---|---|\n")
-	if len(s.SlippageRecords) == 0 {
+	if len(summary.SlippageRecords) == 0 {
 		sb.WriteString("| *None* | 0 | ₹0.00 | ₹0.00 | 0.000% | 0.000% | Clean |\n\n")
 	} else {
-		for _, slip := range s.SlippageRecords {
+		for _, slippageRecord := range summary.SlippageRecords {
 			status := "Clean"
-			if slip.IsToxicLiquidity {
+			if slippageRecord.IsToxicLiquidity {
 				status = "**TOXIC**"
 			}
 			fmt.Fprintf(&sb, "| %s | %d | ₹%.2f | ₹%.2f | %+.3f%% | %+.3f%% | %s |\n",
-				slip.Symbol, slip.TradeCount, slip.AvgIntendedPrice, slip.AvgFillPrice, slip.AvgSlippagePct, slip.MaxSlippagePct, status)
+				slippageRecord.Symbol, slippageRecord.TradeCount, slippageRecord.AvgIntendedPrice, slippageRecord.AvgFillPrice, slippageRecord.AvgSlippagePct, slippageRecord.MaxSlippagePct, status)
 		}
 		sb.WriteString("\n")
 	}
@@ -490,8 +490,8 @@ func GenerateMarkdownReport(s *EODReportSummary) string {
 	sb.WriteString("## 4. Probability Calibration Table\n\n")
 	sb.WriteString("| Score Bucket | Trades | Win Rate | Average R | Net PnL |\n")
 	sb.WriteString("|---|---|---|---|---|\n")
-	for _, pb := range s.ProbabilityBuckets {
-		fmt.Fprintf(&sb, "| %s | %d | %.1f%% | %+.2fR | ₹%.2f |\n", pb.BucketName, pb.TradeCount, pb.WinRatePct, pb.AverageR, pb.NetPnL)
+	for _, probabilityBucket := range summary.ProbabilityBuckets {
+		fmt.Fprintf(&sb, "| %s | %d | %.1f%% | %+.2fR | ₹%.2f |\n", probabilityBucket.BucketName, probabilityBucket.TradeCount, probabilityBucket.WinRatePct, probabilityBucket.AverageR, probabilityBucket.NetPnL)
 	}
 	sb.WriteString("\n")
 
@@ -499,8 +499,8 @@ func GenerateMarkdownReport(s *EODReportSummary) string {
 	sb.WriteString("## 5. Intraday Session Breakdown\n\n")
 	sb.WriteString("| Session | Hours | Trades | Win Rate | Average R | Net PnL |\n")
 	sb.WriteString("|---|---|---|---|---|---|\n")
-	for _, sess := range s.SessionBreakdowns {
-		fmt.Fprintf(&sb, "| %s | %s | %d | %.1f%% | %+.2fR | ₹%.2f |\n", sess.SessionName, sess.TimeWindow, sess.TradeCount, sess.WinRatePct, sess.AverageR, sess.NetPnL)
+	for _, sessionBreakdown := range summary.SessionBreakdowns {
+		fmt.Fprintf(&sb, "| %s | %s | %d | %.1f%% | %+.2fR | ₹%.2f |\n", sessionBreakdown.SessionName, sessionBreakdown.TimeWindow, sessionBreakdown.TradeCount, sessionBreakdown.WinRatePct, sessionBreakdown.AverageR, sessionBreakdown.NetPnL)
 	}
 	sb.WriteString("\n")
 
@@ -508,8 +508,8 @@ func GenerateMarkdownReport(s *EODReportSummary) string {
 	sb.WriteString("## 6. Trailing Stop Gear Attribution\n\n")
 	sb.WriteString("| Gear Level | Positions Reached | Banked Net PnL |\n")
 	sb.WriteString("|---|---|---|\n")
-	for _, g := range s.GearAttributions {
-		fmt.Fprintf(&sb, "| %s | %d | ₹%.2f |\n", g.GearLabel, g.TradesCount, g.BankedPnL)
+	for _, gearAttribution := range summary.GearAttributions {
+		fmt.Fprintf(&sb, "| %s | %d | ₹%.2f |\n", gearAttribution.GearLabel, gearAttribution.TradesCount, gearAttribution.BankedPnL)
 	}
 	sb.WriteString("\n")
 
@@ -517,12 +517,12 @@ func GenerateMarkdownReport(s *EODReportSummary) string {
 	sb.WriteString("## 7. Trade Ledger\n\n")
 	sb.WriteString("| Symbol | Pattern | Entry | Exit | 1R | MFE | MAE | Realised R | Net PnL | Exit Reason |\n")
 	sb.WriteString("|---|---|---|---|---|---|---|---|---|---|\n")
-	if len(s.TradeLedger) == 0 {
+	if len(summary.TradeLedger) == 0 {
 		sb.WriteString("| *No trades closed today* | - | - | - | - | - | - | - | - | - |\n")
 	} else {
-		for _, t := range s.TradeLedger {
+		for _, tradeRecord := range summary.TradeLedger {
 			fmt.Fprintf(&sb, "| %s | %s | ₹%.2f | ₹%.2f | ₹%.2f | %+.2fR | %+.2fR | %+.2fR | ₹%.2f | %s |\n",
-				t.Symbol, t.PatternType, t.EntryPrice, t.ExitPrice, t.OneR, t.MFERMultiple, t.MAERMultiple, t.RealisedRMultiple, t.RealisedNetPnL, t.ExitReason)
+				tradeRecord.Symbol, tradeRecord.PatternType, tradeRecord.EntryPrice, tradeRecord.ExitPrice, tradeRecord.OneR, tradeRecord.MFERMultiple, tradeRecord.MAERMultiple, tradeRecord.RealisedRMultiple, tradeRecord.RealisedNetPnL, tradeRecord.ExitReason)
 		}
 	}
 	sb.WriteString("\n")
@@ -531,7 +531,7 @@ func GenerateMarkdownReport(s *EODReportSummary) string {
 }
 
 // SaveReportFiles writes both HTML and Markdown reports to disk and records them in SQLite
-func SaveReportFiles(db *sql.DB, s *EODReportSummary, reportsDir string) (string, string, error) {
+func SaveReportFiles(db *sql.DB, summary *EODReportSummary, reportsDir string) (string, string, error) {
 	if reportsDir == "" {
 		reportsDir = "reports"
 	}
@@ -539,11 +539,11 @@ func SaveReportFiles(db *sql.DB, s *EODReportSummary, reportsDir string) (string
 		return "", "", fmt.Errorf("failed to create reports directory %s: %w", reportsDir, err)
 	}
 
-	htmlContent := GenerateHTMLReport(s)
-	mdContent := GenerateMarkdownReport(s)
+	htmlContent := GenerateHTMLReport(summary)
+	mdContent := GenerateMarkdownReport(summary)
 
-	htmlPath := filepath.Join(reportsDir, fmt.Sprintf("eod_%s.html", s.TradingDate))
-	mdPath := filepath.Join(reportsDir, fmt.Sprintf("eod_%s.md", s.TradingDate))
+	htmlPath := filepath.Join(reportsDir, fmt.Sprintf("eod_%s.html", summary.TradingDate))
+	mdPath := filepath.Join(reportsDir, fmt.Sprintf("eod_%s.md", summary.TradingDate))
 
 	if err := os.WriteFile(htmlPath, []byte(htmlContent), 0644); err != nil {
 		return "", "", fmt.Errorf("failed to write HTML report: %w", err)
@@ -553,7 +553,7 @@ func SaveReportFiles(db *sql.DB, s *EODReportSummary, reportsDir string) (string
 	}
 
 	if db != nil {
-		summaryJSON, _ := json.Marshal(s)
+		summaryJSON, _ := json.Marshal(summary)
 		_, _ = db.Exec(`
 			INSERT INTO daily_eod_reports (
 				trading_date, report_markdown, report_html, summary_json, is_email_sent, email_recipient, created_at
@@ -562,7 +562,7 @@ func SaveReportFiles(db *sql.DB, s *EODReportSummary, reportsDir string) (string
 				report_markdown = excluded.report_markdown,
 				report_html = excluded.report_html,
 				summary_json = excluded.summary_json;
-		`, s.TradingDate, mdContent, htmlContent, string(summaryJSON))
+		`, summary.TradingDate, mdContent, htmlContent, string(summaryJSON))
 	}
 
 	return htmlPath, mdPath, nil

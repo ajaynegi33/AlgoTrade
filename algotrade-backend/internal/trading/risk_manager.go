@@ -59,7 +59,7 @@ type CapitalManager struct {
 func NewCapitalManager(db *sql.DB, kiteService *kite.Service) *CapitalManager {
 	todayStr := market.TodayDateIST()
 
-	cm := &CapitalManager{
+	capitalManager := &CapitalManager{
 		db:          db,
 		kiteService: kiteService,
 		tradingDate: todayStr,
@@ -77,60 +77,60 @@ func NewCapitalManager(db *sql.DB, kiteService *kite.Service) *CapitalManager {
 		realisedNetByMode:   make(map[string]float64),
 	}
 
-	cm.loadFromDatabase()
-	return cm
+	capitalManager.loadFromDatabase()
+	return capitalManager
 }
 
-func (manager *CapitalManager) loadFromDatabase() {
-	if manager.db == nil {
+func (capitalManager *CapitalManager) loadFromDatabase() {
+	if capitalManager.db == nil {
 		return
 	}
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
+	capitalManager.mu.Lock()
+	defer capitalManager.mu.Unlock()
 
 	var mode string
 	var isAutoExecuteFlag int
 	var paperCapital, riskPercentage float64
 	var maxOpenPositions int
 
-	err := manager.db.QueryRow(`
+	err := capitalManager.db.QueryRow(`
 		SELECT mode, auto_execute, paper_capital, risk_per_trade_pct, max_open_positions
 		FROM execution_settings WHERE id = 1
 	`).Scan(&mode, &isAutoExecuteFlag, &paperCapital, &riskPercentage, &maxOpenPositions)
 	if err == nil {
 		if mode == "LIVE" || mode == "PAPER" {
-			manager.settings.Mode = mode
+			capitalManager.settings.Mode = mode
 		}
-		manager.settings.AutoExecute = isAutoExecuteFlag != 0
+		capitalManager.settings.AutoExecute = isAutoExecuteFlag != 0
 		if paperCapital >= 500.0 {
-			manager.settings.PaperCapital = paperCapital
+			capitalManager.settings.PaperCapital = paperCapital
 		}
 		if riskPercentage > 0 && riskPercentage <= 0.03 {
-			manager.settings.RiskPerTradePct = riskPercentage
+			capitalManager.settings.RiskPerTradePct = riskPercentage
 		}
 		if maxOpenPositions >= 1 && maxOpenPositions <= 15 {
-			manager.settings.MaxOpenPositions = maxOpenPositions
+			capitalManager.settings.MaxOpenPositions = maxOpenPositions
 		}
 	}
 
 	for _, modeName := range []string{"PAPER", "LIVE"} {
-		manager.ReconcileWithPositionsDB(modeName)
+		capitalManager.ReconcileWithPositionsDB(modeName)
 	}
 }
 
 // ReconcileWithPositionsDB re-synchronizes the daily risk ledger with ground-truth closed trades in the positions table.
 // Falsification Guard: Fixes any historical double-counting or ledger drift so /trades and the Dashboard remain 100% consistent.
-func (cm *CapitalManager) ReconcileWithPositionsDB(mode string) {
-	if cm.db == nil {
+func (capitalManager *CapitalManager) ReconcileWithPositionsDB(mode string) {
+	if capitalManager.db == nil {
 		return
 	}
 
-	rows, err := cm.db.Query(`
+	rows, err := capitalManager.db.Query(`
 		SELECT realised_gross_pnl, total_charges, realised_net_pnl, closed_at
 		FROM positions
 		WHERE trading_date = ? AND mode = ? AND state = 'CLOSED'
 		ORDER BY closed_at ASC
-	`, cm.tradingDate, mode)
+	`, capitalManager.tradingDate, mode)
 	if err != nil {
 		return
 	}
@@ -166,7 +166,7 @@ func (cm *CapitalManager) ReconcileWithPositionsDB(mode string) {
 	}
 
 	dto := &market.DailyRiskDTO{
-		TradingDate:       cm.tradingDate,
+		TradingDate:       capitalManager.tradingDate,
 		TradesTaken:       tradesTaken,
 		Wins:              wins,
 		Losses:            losses,
@@ -178,20 +178,20 @@ func (cm *CapitalManager) ReconcileWithPositionsDB(mode string) {
 	}
 
 	dto.PeakNetPnL = peakNet
-	cm.evaluateCircuitBreakersLocked(mode, dto, cumNet)
+	capitalManager.evaluateCircuitBreakersLocked(mode, dto, cumNet)
 
-	cm.dailyLedger[mode] = dto
-	cm.realisedGrossByMode[mode] = cumGross
-	cm.totalChargesByMode[mode] = cumCharges
-	cm.realisedNetByMode[mode] = cumNet
+	capitalManager.dailyLedger[mode] = dto
+	capitalManager.realisedGrossByMode[mode] = cumGross
+	capitalManager.totalChargesByMode[mode] = cumCharges
+	capitalManager.realisedNetByMode[mode] = cumNet
 
-	cm.persistDailyLedgerLocked(mode, dto, cumGross, cumCharges, cumNet)
+	capitalManager.persistDailyLedgerLocked(mode, dto, cumGross, cumCharges, cumNet)
 }
 
-func (cm *CapitalManager) evaluateCircuitBreakersLocked(mode string, ledger *market.DailyRiskDTO, cumNet float64) {
-	dailyStartingAccountEquity := cm.settings.PaperCapital
-	if mode == "LIVE" && cm.liveGrossBase > 0 {
-		dailyStartingAccountEquity = cm.liveGrossBase
+func (capitalManager *CapitalManager) evaluateCircuitBreakersLocked(mode string, ledger *market.DailyRiskDTO, cumNet float64) {
+	dailyStartingAccountEquity := capitalManager.settings.PaperCapital
+	if mode == "LIVE" && capitalManager.liveGrossBase > 0 {
+		dailyStartingAccountEquity = capitalManager.liveGrossBase
 	}
 
 	// Strict 3.0% Max Daily Loss Circuit Breaker relative to Day's Starting Capital
@@ -201,15 +201,15 @@ func (cm *CapitalManager) evaluateCircuitBreakersLocked(mode string, ledger *mar
 	}
 }
 
-func (cm *CapitalManager) persistDailyLedgerLocked(mode string, ledger *market.DailyRiskDTO, cumGross, cumCharges, cumNet float64) {
-	if cm.db == nil {
+func (capitalManager *CapitalManager) persistDailyLedgerLocked(mode string, ledger *market.DailyRiskDTO, cumGross, cumCharges, cumNet float64) {
+	if capitalManager.db == nil {
 		return
 	}
 	lockedInt := 0
 	if ledger.IsCircuitBreakerLocked {
 		lockedInt = 1
 	}
-	_, _ = cm.db.Exec(`
+	_, _ = capitalManager.db.Exec(`
 		INSERT INTO daily_risk_ledger (
 			trading_date, mode, trades_taken, wins, losses, consecutive_losses,
 			realised_gross_pnl, total_charges, realised_net_pnl, peak_net_pnl,
@@ -226,25 +226,25 @@ func (cm *CapitalManager) persistDailyLedgerLocked(mode string, ledger *market.D
 			peak_net_pnl = excluded.peak_net_pnl,
 			circuit_breaker_locked = excluded.circuit_breaker_locked,
 			lock_reason = excluded.lock_reason;
-	`, cm.tradingDate, mode, ledger.TradesTaken, ledger.Wins, ledger.Losses, ledger.ConsecutiveLosses,
+	`, capitalManager.tradingDate, mode, ledger.TradesTaken, ledger.Wins, ledger.Losses, ledger.ConsecutiveLosses,
 		cumGross, cumCharges, cumNet, ledger.PeakNetPnL, lockedInt, ledger.LockReason)
 }
 
-func (cm *CapitalManager) GetSettings() ExecutionSettings {
-	cm.mu.RLock()
-	defer cm.mu.RUnlock()
-	return cm.settings
+func (capitalManager *CapitalManager) GetSettings() ExecutionSettings {
+	capitalManager.mu.RLock()
+	defer capitalManager.mu.RUnlock()
+	return capitalManager.settings
 }
 
-func (cm *CapitalManager) UpdateSettings(newSettings ExecutionSettings, activeOpenCount int) error {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
+func (capitalManager *CapitalManager) UpdateSettings(newSettings ExecutionSettings, activeOpenCount int) error {
+	capitalManager.mu.Lock()
+	defer capitalManager.mu.Unlock()
 
 	if newSettings.Mode != "PAPER" && newSettings.Mode != "LIVE" {
 		return errors.New("mode must be 'PAPER' or 'LIVE'")
 	}
-	if newSettings.Mode != cm.settings.Mode && activeOpenCount > 0 {
-		return fmt.Errorf("cannot switch mode from %s to %s while %d position(s) are open", cm.settings.Mode, newSettings.Mode, activeOpenCount)
+	if newSettings.Mode != capitalManager.settings.Mode && activeOpenCount > 0 {
+		return fmt.Errorf("cannot switch mode from %s to %s while %d position(s) are open", capitalManager.settings.Mode, newSettings.Mode, activeOpenCount)
 	}
 	if newSettings.RiskPerTradePct <= 0 || newSettings.RiskPerTradePct > 0.03 {
 		return errors.New("risk_per_trade_pct must be between 0.001 (0.1%) and 0.03 (3.0%)")
@@ -253,19 +253,19 @@ func (cm *CapitalManager) UpdateSettings(newSettings ExecutionSettings, activeOp
 		return errors.New("max_open_positions must be between 1 and 50")
 	}
 	if newSettings.PaperCapital >= 500.0 {
-		cm.settings.PaperCapital = newSettings.PaperCapital
+		capitalManager.settings.PaperCapital = newSettings.PaperCapital
 	}
-	cm.settings.Mode = newSettings.Mode
-	cm.settings.AutoExecute = newSettings.AutoExecute
-	cm.settings.RiskPerTradePct = newSettings.RiskPerTradePct
-	cm.settings.MaxOpenPositions = newSettings.MaxOpenPositions
+	capitalManager.settings.Mode = newSettings.Mode
+	capitalManager.settings.AutoExecute = newSettings.AutoExecute
+	capitalManager.settings.RiskPerTradePct = newSettings.RiskPerTradePct
+	capitalManager.settings.MaxOpenPositions = newSettings.MaxOpenPositions
 
-	if cm.db != nil {
+	if capitalManager.db != nil {
 		autoInt := 0
-		if cm.settings.AutoExecute {
+		if capitalManager.settings.AutoExecute {
 			autoInt = 1
 		}
-		_, err := cm.db.Exec(`
+		_, err := capitalManager.db.Exec(`
 			UPDATE execution_settings SET
 				mode = ?,
 				auto_execute = ?,
@@ -274,7 +274,7 @@ func (cm *CapitalManager) UpdateSettings(newSettings ExecutionSettings, activeOp
 				max_open_positions = ?,
 				updated_at = CURRENT_TIMESTAMP
 			WHERE id = 1;
-		`, cm.settings.Mode, autoInt, cm.settings.PaperCapital, cm.settings.RiskPerTradePct, cm.settings.MaxOpenPositions)
+		`, capitalManager.settings.Mode, autoInt, capitalManager.settings.PaperCapital, capitalManager.settings.RiskPerTradePct, capitalManager.settings.MaxOpenPositions)
 		if err != nil {
 			return fmt.Errorf("failed to persist execution settings: %w", err)
 		}
@@ -282,16 +282,16 @@ func (cm *CapitalManager) UpdateSettings(newSettings ExecutionSettings, activeOp
 	return nil
 }
 
-func (cm *CapitalManager) UpdatePaperCapital(newCapital float64) error {
+func (capitalManager *CapitalManager) UpdatePaperCapital(newCapital float64) error {
 	if newCapital < 500.0 || newCapital > 1000000000.0 {
 		return errors.New("paper_capital must be between ₹500 and ₹100 Crore")
 	}
-	cm.mu.Lock()
-	cm.settings.PaperCapital = newCapital
-	cm.mu.Unlock()
+	capitalManager.mu.Lock()
+	capitalManager.settings.PaperCapital = newCapital
+	capitalManager.mu.Unlock()
 
-	if cm.db != nil {
-		_, err := cm.db.Exec(`UPDATE execution_settings SET paper_capital = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`, newCapital)
+	if capitalManager.db != nil {
+		_, err := capitalManager.db.Exec(`UPDATE execution_settings SET paper_capital = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`, newCapital)
 		if err != nil {
 			return fmt.Errorf("failed to update paper_capital in SQLite: %w", err)
 		}
@@ -300,11 +300,11 @@ func (cm *CapitalManager) UpdatePaperCapital(newCapital float64) error {
 }
 
 // RefreshLiveMargins polls Zerodha /user/margins and updates LiveGrossBase & LiveFreeMargin
-func (cm *CapitalManager) RefreshLiveMargins() error {
-	if cm.kiteService == nil {
+func (capitalManager *CapitalManager) RefreshLiveMargins() error {
+	if capitalManager.kiteService == nil {
 		return kite.ErrNoSession
 	}
-	margins, err := cm.kiteService.GetEquityMargins()
+	margins, err := capitalManager.kiteService.GetEquityMargins()
 	if err != nil {
 		return err
 	}
@@ -314,68 +314,68 @@ func (cm *CapitalManager) RefreshLiveMargins() error {
 		grossBase = margins.Net
 	}
 
-	cm.mu.Lock()
-	cm.liveGrossBase = math.Max(0, grossBase)
-	cm.liveFreeMargin = math.Max(0, margins.Net)
-	cm.lastLiveRefreshAt = time.Now()
-	cm.mu.Unlock()
+	capitalManager.mu.Lock()
+	capitalManager.liveGrossBase = math.Max(0, grossBase)
+	capitalManager.liveFreeMargin = math.Max(0, margins.Net)
+	capitalManager.lastLiveRefreshAt = time.Now()
+	capitalManager.mu.Unlock()
 	return nil
 }
 
 // ensureCurrentTradingDateLocked rolls over the daily risk ledger and PnL counters if the server stays up overnight
-func (cm *CapitalManager) ensureCurrentTradingDateLocked() {
+func (capitalManager *CapitalManager) ensureCurrentTradingDateLocked() {
 	todayStr := market.TodayDateIST()
-	if todayStr == cm.tradingDate {
+	if todayStr == capitalManager.tradingDate {
 		return
 	}
-	cm.tradingDate = todayStr
-	for _, m := range []string{"PAPER", "LIVE"} {
-		cm.realisedGrossByMode[m] = 0
-		cm.totalChargesByMode[m] = 0
-		cm.realisedNetByMode[m] = 0
-		cm.dailyLedger[m] = &market.DailyRiskDTO{
+	capitalManager.tradingDate = todayStr
+	for _, executionMode := range []string{"PAPER", "LIVE"} {
+		capitalManager.realisedGrossByMode[executionMode] = 0
+		capitalManager.totalChargesByMode[executionMode] = 0
+		capitalManager.realisedNetByMode[executionMode] = 0
+		capitalManager.dailyLedger[executionMode] = &market.DailyRiskDTO{
 			TradingDate: todayStr,
 		}
 	}
 }
 
 // ComputeCapitalSummary returns the live CapitalSummaryDTO and drawdown sizing multiplier
-func (cm *CapitalManager) ComputeCapitalSummary(
+func (capitalManager *CapitalManager) ComputeCapitalSummary(
 	blockedMargin float64,
 	unrealisedPnL float64,
 	totalOpenRiskRupees float64,
 	activeCount int,
 	sessionSizeMult float64,
 ) (market.CapitalSummaryDTO, market.DailyRiskDTO, float64) {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-	cm.ensureCurrentTradingDateLocked()
+	capitalManager.mu.Lock()
+	defer capitalManager.mu.Unlock()
+	capitalManager.ensureCurrentTradingDateLocked()
 
-	mode := cm.settings.Mode
-	grossPnL := cm.realisedGrossByMode[mode]
-	charges := cm.totalChargesByMode[mode]
-	netPnL := cm.realisedNetByMode[mode]
+	mode := capitalManager.settings.Mode
+	grossPnL := capitalManager.realisedGrossByMode[mode]
+	charges := capitalManager.totalChargesByMode[mode]
+	netPnL := capitalManager.realisedNetByMode[mode]
 
 	var netEquity, freeMargin float64
 	if mode == "LIVE" {
-		freeMargin = math.Max(0, cm.liveFreeMargin)
-		if cm.liveGrossBase > 0 {
-			netEquity = math.Max(freeMargin+blockedMargin, cm.liveGrossBase+netPnL+math.Min(0, unrealisedPnL))
+		freeMargin = math.Max(0, capitalManager.liveFreeMargin)
+		if capitalManager.liveGrossBase > 0 {
+			netEquity = math.Max(freeMargin+blockedMargin, capitalManager.liveGrossBase+netPnL+math.Min(0, unrealisedPnL))
 		} else {
 			netEquity = freeMargin + blockedMargin
 		}
 	} else {
-		baseCap := cm.settings.PaperCapital
+		baseCap := capitalManager.settings.PaperCapital
 		netEquity = math.Max(0, baseCap+netPnL+math.Min(0, unrealisedPnL))
 		freeMargin = math.Max(0, baseCap+netPnL-blockedMargin)
 	}
 
-	ledgerPtr := cm.dailyLedger[mode]
+	ledgerPtr := capitalManager.dailyLedger[mode]
 	var ledger market.DailyRiskDTO
 	if ledgerPtr != nil {
 		ledger = *ledgerPtr
 	} else {
-		ledger = market.DailyRiskDTO{TradingDate: cm.tradingDate}
+		ledger = market.DailyRiskDTO{TradingDate: capitalManager.tradingDate}
 	}
 
 	// Dynamic drawdown multiplier: never size up after a loss (fixed or reduced risk)
@@ -389,7 +389,7 @@ func (cm *CapitalManager) ComputeCapitalSummary(
 		sessionSizeMult = 1.0
 	}
 
-	effRiskPct := EffectiveRiskPerTradePct(netEquity, cm.settings.RiskPerTradePct)
+	effRiskPct := EffectiveRiskPerTradePct(netEquity, capitalManager.settings.RiskPerTradePct)
 	currentRiskBudget := netEquity * effRiskPct * sessionSizeMult * drawdownMult
 	if netEquity <= 25000.0 && netEquity >= 500.0 {
 		currentRiskBudget = math.Max(currentRiskBudget, netEquity*0.0075)
@@ -402,13 +402,13 @@ func (cm *CapitalManager) ComputeCapitalSummary(
 	// Evict stale in-flight reservations older than 15s and sum active ones
 	now := time.Now()
 	var totalReservedRisk, totalReservedMargin float64
-	for id, res := range cm.activeReservations {
-		if now.Sub(res.CreatedAt) > 15*time.Second {
-			delete(cm.activeReservations, id)
+	for reservationID, reservation := range capitalManager.activeReservations {
+		if now.Sub(reservation.CreatedAt) > 15*time.Second {
+			delete(capitalManager.activeReservations, reservationID)
 			continue
 		}
-		totalReservedRisk += res.ReservedRisk
-		totalReservedMargin += res.ReservedMargin
+		totalReservedRisk += reservation.ReservedRisk
+		totalReservedMargin += reservation.ReservedMargin
 	}
 
 	effectiveTotalOpenRisk := totalOpenRiskRupees + totalReservedRisk
@@ -422,7 +422,7 @@ func (cm *CapitalManager) ComputeCapitalSummary(
 
 	capDTO := market.CapitalSummaryDTO{
 		Mode:                 mode,
-		PaperCapital:         cm.settings.PaperCapital,
+		PaperCapital:         capitalManager.settings.PaperCapital,
 		NetEquity:            math.Round(netEquity*100.0) / 100.0,
 		FreeMargin:           math.Round(freeMargin*100.0) / 100.0,
 		BlockedMargin:        math.Round(effectiveBlockedMargin*100.0) / 100.0,
@@ -439,7 +439,7 @@ func (cm *CapitalManager) ComputeCapitalSummary(
 		TotalOpenRiskRupees:  math.Round(effectiveTotalOpenRisk*100.0) / 100.0,
 		PortfolioHeatPct:     math.Round(portfolioHeatPct*10000.0) / 10000.0,
 		MaxPortfolioHeatPct:  0.03,
-		MaxOpenPositions:     cm.settings.MaxOpenPositions,
+		MaxOpenPositions:     capitalManager.settings.MaxOpenPositions,
 		ActivePositionsCount: activeCount,
 	}
 
@@ -447,19 +447,19 @@ func (cm *CapitalManager) ComputeCapitalSummary(
 }
 
 // RecordClosedTrade updates the daily risk ledger and checks all 3 institutional circuit breakers
-func (cm *CapitalManager) RecordClosedTrade(mode string, grossPnL, charges, netPnL float64) {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-	cm.ensureCurrentTradingDateLocked()
+func (capitalManager *CapitalManager) RecordClosedTrade(mode string, grossPnL, charges, netPnL float64) {
+	capitalManager.mu.Lock()
+	defer capitalManager.mu.Unlock()
+	capitalManager.ensureCurrentTradingDateLocked()
 
-	cm.realisedGrossByMode[mode] += grossPnL
-	cm.totalChargesByMode[mode] += charges
-	cm.realisedNetByMode[mode] += netPnL
+	capitalManager.realisedGrossByMode[mode] += grossPnL
+	capitalManager.totalChargesByMode[mode] += charges
+	capitalManager.realisedNetByMode[mode] += netPnL
 
-	ledger, ok := cm.dailyLedger[mode]
-	if !ok {
-		ledger = &market.DailyRiskDTO{TradingDate: cm.tradingDate}
-		cm.dailyLedger[mode] = ledger
+	ledger, exists := capitalManager.dailyLedger[mode]
+	if !exists {
+		ledger = &market.DailyRiskDTO{TradingDate: capitalManager.tradingDate}
+		capitalManager.dailyLedger[mode] = ledger
 	}
 
 	ledger.TradesTaken++
@@ -474,54 +474,54 @@ func (cm *CapitalManager) RecordClosedTrade(mode string, grossPnL, charges, netP
 		ledger.WinRatePct = math.Round((float64(ledger.Wins)/float64(ledger.TradesTaken))*1000.0) / 10.0
 	}
 
-	cumNet := cm.realisedNetByMode[mode]
+	cumNet := capitalManager.realisedNetByMode[mode]
 	if cumNet > ledger.PeakNetPnL {
 		ledger.PeakNetPnL = cumNet
 	}
 
-	cm.evaluateCircuitBreakersLocked(mode, ledger, cumNet)
-	cm.persistDailyLedgerLocked(mode, ledger, cm.realisedGrossByMode[mode], cm.totalChargesByMode[mode], cumNet)
+	capitalManager.evaluateCircuitBreakersLocked(mode, ledger, cumNet)
+	capitalManager.persistDailyLedgerLocked(mode, ledger, capitalManager.realisedGrossByMode[mode], capitalManager.totalChargesByMode[mode], cumNet)
 }
 
 // ReserveRiskAndMargin atomically validates and reserves risk and margin under the manager lock.
 // This eliminates the TOCTOU concurrency race where two goroutines evaluate capacity simultaneously.
-func (cm *CapitalManager) ReserveRiskAndMargin(
+func (capitalManager *CapitalManager) ReserveRiskAndMargin(
 	symbol string,
 	proposedRiskRupees float64,
 	proposedMarginRupees float64,
 	activeOpenRisk float64,
 	activeBlockedMargin float64,
 ) (string, error) {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-	cm.ensureCurrentTradingDateLocked()
+	capitalManager.mu.Lock()
+	defer capitalManager.mu.Unlock()
+	capitalManager.ensureCurrentTradingDateLocked()
 
 	// 1. Evict stale reservations older than 15 seconds
 	now := time.Now()
-	for id, res := range cm.activeReservations {
-		if now.Sub(res.CreatedAt) > 15*time.Second {
-			delete(cm.activeReservations, id)
+	for reservationID, reservation := range capitalManager.activeReservations {
+		if now.Sub(reservation.CreatedAt) > 15*time.Second {
+			delete(capitalManager.activeReservations, reservationID)
 		}
 	}
 
-	mode := cm.settings.Mode
-	ledger := cm.dailyLedger[mode]
+	mode := capitalManager.settings.Mode
+	ledger := capitalManager.dailyLedger[mode]
 	if ledger != nil && ledger.IsCircuitBreakerLocked {
 		return "", fmt.Errorf("daily circuit breaker is locked: %s", ledger.LockReason)
 	}
 
 	// 2. Compute live equity and free margin
 	var netEquity, freeMargin float64
-	netPnL := cm.realisedNetByMode[mode]
+	netPnL := capitalManager.realisedNetByMode[mode]
 	if mode == "LIVE" {
-		freeMargin = math.Max(0, cm.liveFreeMargin)
-		if cm.liveGrossBase > 0 {
-			netEquity = math.Max(freeMargin+activeBlockedMargin, cm.liveGrossBase+netPnL)
+		freeMargin = math.Max(0, capitalManager.liveFreeMargin)
+		if capitalManager.liveGrossBase > 0 {
+			netEquity = math.Max(freeMargin+activeBlockedMargin, capitalManager.liveGrossBase+netPnL)
 		} else {
 			netEquity = freeMargin + activeBlockedMargin
 		}
 	} else {
-		baseCap := cm.settings.PaperCapital
+		baseCap := capitalManager.settings.PaperCapital
 		netEquity = math.Max(0, baseCap+netPnL)
 		freeMargin = math.Max(0, baseCap+netPnL-activeBlockedMargin)
 	}
@@ -532,9 +532,9 @@ func (cm *CapitalManager) ReserveRiskAndMargin(
 
 	// 3. Sum all existing in-flight reservations
 	var totalReservedRisk, totalReservedMargin float64
-	for _, res := range cm.activeReservations {
-		totalReservedRisk += res.ReservedRisk
-		totalReservedMargin += res.ReservedMargin
+	for _, reservation := range capitalManager.activeReservations {
+		totalReservedRisk += reservation.ReservedRisk
+		totalReservedMargin += reservation.ReservedMargin
 	}
 
 	// 4. Wall 1: Risk Heat Ceiling (Strict 3.0% limit)
@@ -554,7 +554,7 @@ func (cm *CapitalManager) ReserveRiskAndMargin(
 
 	// 6. Atomically record the reservation token
 	reservationID := fmt.Sprintf("RES-%s-%d", symbol, now.UnixNano())
-	cm.activeReservations[reservationID] = RiskReservation{
+	capitalManager.activeReservations[reservationID] = RiskReservation{
 		ReservationID:  reservationID,
 		Symbol:         symbol,
 		ReservedRisk:   proposedRiskRupees,
@@ -566,78 +566,78 @@ func (cm *CapitalManager) ReserveRiskAndMargin(
 }
 
 // ReleaseReservation frees an in-flight reservation if order submission fails or is rejected
-func (cm *CapitalManager) ReleaseReservation(reservationID string) {
+func (capitalManager *CapitalManager) ReleaseReservation(reservationID string) {
 	if reservationID == "" {
 		return
 	}
-	cm.mu.Lock()
-	delete(cm.activeReservations, reservationID)
-	cm.mu.Unlock()
+	capitalManager.mu.Lock()
+	delete(capitalManager.activeReservations, reservationID)
+	capitalManager.mu.Unlock()
 }
 
 // PromoteReservation cleans up the reservation when the position worker is successfully spawned,
 // seamlessly transferring risk tracking to the active worker.
-func (cm *CapitalManager) PromoteReservation(reservationID string) {
+func (capitalManager *CapitalManager) PromoteReservation(reservationID string) {
 	if reservationID == "" {
 		return
 	}
-	cm.mu.Lock()
-	delete(cm.activeReservations, reservationID)
-	cm.mu.Unlock()
+	capitalManager.mu.Lock()
+	delete(capitalManager.activeReservations, reservationID)
+	capitalManager.mu.Unlock()
 }
 
 // SyncUniverseLeverages queries Zerodha POST /margins/orders in 50-stock chunks using LIMIT @ ₹1000
 // (which works even at 08:30 AM pre-open when LTP is 0) and caches exact MIS leverages in SQLite.
-func (cm *CapitalManager) SyncUniverseLeverages(ctx context.Context) {
-	if cm.kiteService == nil || cm.db == nil {
+func (capitalManager *CapitalManager) SyncUniverseLeverages(ctx context.Context) {
+	if capitalManager.kiteService == nil || capitalManager.db == nil {
 		return
 	}
-	client := cm.kiteService.GetClient()
-	session := cm.kiteService.GetSession()
+	client := capitalManager.kiteService.GetClient()
+	session := capitalManager.kiteService.GetSession()
 	if client == nil || session == nil || session.AccessToken == "" {
 		return
 	}
 
-	rows, err := cm.db.Query(`SELECT instrument_token, tradingsymbol FROM scanned_stocks ORDER BY tradingsymbol ASC`)
+	rows, err := capitalManager.db.Query(`SELECT instrument_token, tradingsymbol FROM scanned_stocks ORDER BY tradingsymbol ASC`)
 	if err != nil {
 		return
 	}
 	defer rows.Close()
-	type item struct {
+	type stockTokenSymbol struct {
 		token  uint32
 		symbol string
 	}
-	var list []item
+	var stockList []stockTokenSymbol
 	for rows.Next() {
-		var it item
-		if err := rows.Scan(&it.token, &it.symbol); err == nil && it.symbol != "" {
-			list = append(list, it)
+		var stockItem stockTokenSymbol
+		if err := rows.Scan(&stockItem.token, &stockItem.symbol); err == nil && stockItem.symbol != "" {
+			stockList = append(stockList, stockItem)
 		}
 	}
 	if err := rows.Err(); err != nil {
 		slog.Error("Failed iterating scanned stocks for leverage sync", "error", err)
 	}
 
-	if len(list) == 0 {
+	if len(stockList) == 0 {
 		return
 	}
 
 	updatedCount := 0
 	const batchSize = 50
-	for start := 0; start < len(list); start += batchSize {
+	for start := 0; start < len(stockList); start += batchSize {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		end := min(len(list), start+batchSize)
-		chunk := list[start:end]
+		end := min(len(stockList), start+batchSize)
+		chunk := stockList[start:end]
 
 		params := make([]kiteconnect.OrderMarginParam, 0, len(chunk))
-		for _, st := range chunk {
+		for _, stockItem := range chunk {
 			params = append(params, kiteconnect.OrderMarginParam{
 				Exchange:        ExchangeNSE,
-				Tradingsymbol:   st.symbol,
+				Tradingsymbol:   stockItem.symbol,
 				TransactionType: "BUY",
 				Variety:         DefaultVariety,
 				Product:         ProductMIS,
@@ -647,29 +647,29 @@ func (cm *CapitalManager) SyncUniverseLeverages(ctx context.Context) {
 			})
 		}
 
-		margins, mErr := client.GetOrderMargins(kiteconnect.GetMarginParams{
+		margins, marginErr := client.GetOrderMargins(kiteconnect.GetMarginParams{
 			OrderParams: params,
 			Compact:     true,
 		})
-		if mErr != nil {
-			slog.Warn("GetOrderMargins batch failed, keeping cached SQLite MIS leverages", "error", mErr)
+		if marginErr != nil {
+			slog.Warn("GetOrderMargins batch failed, keeping cached SQLite MIS leverages", "error", marginErr)
 			return
 		}
 
-		tx, txErr := cm.db.Begin()
+		tx, txErr := capitalManager.db.Begin()
 		if txErr == nil {
-			stmt, sErr := tx.Prepare(`UPDATE scanned_stocks SET mis_leverage = ?, mis_margin_pct = ? WHERE tradingsymbol = ?`)
-			if sErr == nil {
-				for _, m := range margins {
-					if m.Total > 0 && m.TradingSymbol != "" {
-						marginPct := math.Round((m.Total/1000.0)*10000.0) / 10000.0
-						lev := math.Round((1000.0/m.Total)*100.0) / 100.0
-						lev = math.Max(1.0, math.Min(5.0, lev))
-						_, _ = stmt.Exec(lev, marginPct, m.TradingSymbol)
+			stmt, stmtErr := tx.Prepare(`UPDATE scanned_stocks SET mis_leverage = ?, mis_margin_pct = ? WHERE tradingsymbol = ?`)
+			if stmtErr == nil {
+				for _, orderMargin := range margins {
+					if orderMargin.Total > 0 && orderMargin.TradingSymbol != "" {
+						marginPct := math.Round((orderMargin.Total/1000.0)*10000.0) / 10000.0
+						calculatedLeverage := math.Round((1000.0/orderMargin.Total)*100.0) / 100.0
+						calculatedLeverage = math.Max(1.0, math.Min(5.0, calculatedLeverage))
+						_, _ = stmt.Exec(calculatedLeverage, marginPct, orderMargin.TradingSymbol)
 						updatedCount++
-					} else if m.TradingSymbol != "" {
+					} else if orderMargin.TradingSymbol != "" {
 						// Stock not permitted for MIS intraday leverage: store 0.0, never assume 5x
-						_, _ = stmt.Exec(0.0, 0.0, m.TradingSymbol)
+						_, _ = stmt.Exec(0.0, 0.0, orderMargin.TradingSymbol)
 					}
 				}
 				stmt.Close()

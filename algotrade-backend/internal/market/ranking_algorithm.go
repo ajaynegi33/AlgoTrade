@@ -178,10 +178,10 @@ func CalculateBullishScore(stock *StockMetrics, breadthRatio float64) (score flo
 
 	// Midday Lull Penalty (11:30 to 13:15 IST)
 	if stock.LastUpdatedUnix > 0 {
-		t := time.Unix(stock.LastUpdatedUnix, 0).In(istZone)
-		hour, min := t.Hour(), t.Minute()
-		totMin := hour*60 + min
-		if totMin >= 11*60+30 && totMin <= 13*60+15 && compositeRVOL < 2.2 {
+		updateTime := time.Unix(stock.LastUpdatedUnix, 0).In(istZone)
+		hour, min := updateTime.Hour(), updateTime.Minute()
+		totalMinutes := hour*60 + min
+		if totalMinutes >= 11*60+30 && totalMinutes <= 13*60+15 && compositeRVOL < 2.2 {
 			winProbability -= 0.06
 		}
 	}
@@ -260,18 +260,18 @@ func CalculateBearishScore(
 
 	// Inverted Value Sweet Spot: Short push-off below VWAP
 	normalizedVWAPDistanceBear := (stock.ExchangeVWAP - stock.LTP) / atrSafe
-	var sVWAPBear float64
+	var vwapScoreBear float64
 	switch {
 	case normalizedVWAPDistanceBear < -0.10:
-		sVWAPBear = 0.0
+		vwapScoreBear = 0.0
 	case normalizedVWAPDistanceBear < 0.00:
-		sVWAPBear = 45.0 // Testing VWAP resistance buffer
+		vwapScoreBear = 45.0 // Testing VWAP resistance buffer
 	case normalizedVWAPDistanceBear <= 0.60:
-		sVWAPBear = 100.0 - 150.0*(normalizedVWAPDistanceBear-0.25)*(normalizedVWAPDistanceBear-0.25)
+		vwapScoreBear = 100.0 - 150.0*(normalizedVWAPDistanceBear-0.25)*(normalizedVWAPDistanceBear-0.25)
 	case normalizedVWAPDistanceBear <= 1.50:
-		sVWAPBear = 80.0 - ((normalizedVWAPDistanceBear-0.60)/0.90)*60.0
+		vwapScoreBear = 80.0 - ((normalizedVWAPDistanceBear-0.60)/0.90)*60.0
 	default:
-		sVWAPBear = 10.0
+		vwapScoreBear = 10.0
 		reasons |= PenaltyOverextended
 	}
 
@@ -284,10 +284,10 @@ func CalculateBearishScore(
 	}
 
 	if invertedCloseLocationValue < 0.55 || (currentBar.Open > 0 && stock.LTP >= currentBar.Open) {
-		if sVWAPBear > 40.0 {
-			sVWAPBear = 40.0
+		if vwapScoreBear > 40.0 {
+			vwapScoreBear = 40.0
 		}
-	} else if sVWAPBear >= 85.0 {
+	} else if vwapScoreBear >= 85.0 {
 		reasons |= ReasonBearishBreakdown
 	}
 
@@ -331,22 +331,22 @@ func CalculateBearishScore(
 	rTarget := math.Max(0.1, (stock.LTP-targetProxy)/oneR)
 	ev = (winProbability * rTarget) - ((1.0 - winProbability) * 1.0) - 0.05
 
-	sRVOLBear := math.Min(100.0, 105.0/(1.0+math.Exp(-1.65*(compositeRVOL-2.0))))
-	sRSBear := math.Min(100.0, math.Max(0.0, 50.0+48.4*math.Tanh(0.65*(-stock.CompositeRS))))
-	effOBIBear := float64(stock.SmoothedBuyerRatio)
-	if effOBIBear <= 0 {
-		effOBIBear = 0.50
+	rvolScoreBear := math.Min(100.0, 105.0/(1.0+math.Exp(-1.65*(compositeRVOL-2.0))))
+	rsScoreBear := math.Min(100.0, math.Max(0.0, 50.0+48.4*math.Tanh(0.65*(-stock.CompositeRS))))
+	effectiveOBIBear := float64(stock.SmoothedBuyerRatio)
+	if effectiveOBIBear <= 0 {
+		effectiveOBIBear = 0.50
 	}
-	sellerOBI := 1.0 - effOBIBear
-	bearFlowComp := 0.40*sellerOBI + 0.60*float64(aggressorSellRatio)
-	sFlowBear := math.Min(100.0, math.Max(0.0, (bearFlowComp-0.35)*200.0))
-	sEVBear := math.Min(100.0, math.Max(0.0, (ev+0.40)*55.0))
+	sellerOBI := 1.0 - effectiveOBIBear
+	bearFlowComposite := 0.40*sellerOBI + 0.60*float64(aggressorSellRatio)
+	flowScoreBear := math.Min(100.0, math.Max(0.0, (bearFlowComposite-0.35)*200.0))
+	evScoreBear := math.Min(100.0, math.Max(0.0, (ev+0.40)*55.0))
 
-	score = (0.26 * sVWAPBear) +
-		(0.22 * sRVOLBear) +
-		(0.18 * sRSBear) +
-		(0.20 * sFlowBear) +
-		(0.14 * sEVBear)
+	score = (0.26 * vwapScoreBear) +
+		(0.22 * rvolScoreBear) +
+		(0.18 * rsScoreBear) +
+		(0.20 * flowScoreBear) +
+		(0.14 * evScoreBear)
 
 	stock.BearishScore = score
 	stock.Reasons |= (reasons & (ReasonBearishBreakdown | ReasonSectorLagging))
