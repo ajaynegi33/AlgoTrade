@@ -30,7 +30,7 @@ type PositionWorker struct {
 	Mode          string
 	Symbol        string
 	Token         uint32
-	StockIdx      uint16
+	StockIndex    uint16
 	PatternType   string
 	TickSize      float64
 	MISLeverage   float64
@@ -110,7 +110,7 @@ type WorkerConfig struct {
 	Mode         string
 	Symbol       string
 	Token        uint32
-	StockIdx     uint16
+	StockIndex   uint16
 	PatternType  string
 	TickSize     float64
 	MISLeverage  float64
@@ -148,7 +148,7 @@ func NewPositionWorker(parentCtx context.Context, cfg WorkerConfig) *PositionWor
 		Mode:                 cfg.Mode,
 		Symbol:               cfg.Symbol,
 		Token:                cfg.Token,
-		StockIdx:             cfg.StockIdx,
+		StockIndex:           cfg.StockIndex,
 		PatternType:          cfg.PatternType,
 		TickSize:             tick,
 		MISLeverage:          lev,
@@ -447,10 +447,10 @@ func (worker *PositionWorker) workerLoop() {
 			}
 			// Check if SL order has been stranded in OPEN status for >= 500ms (gapped through limit)
 			worker.mu.RLock()
-			openSince := worker.slOpenSinceMs
-			slStat := worker.slOrderStatus
+			slOpenTimestampMs := worker.slOpenSinceMs
+			currentSLOrderStatus := worker.slOrderStatus
 			worker.mu.RUnlock()
-			if slStat == OrderStatusOpen && openSince > 0 && (time.Now().UnixMilli()-openSince) >= 500 {
+			if currentSLOrderStatus == OrderStatusOpen && slOpenTimestampMs > 0 && (time.Now().UnixMilli()-slOpenTimestampMs) >= 500 {
 				worker.executeEmergencyFlatten("SL_STRANDED_OPEN_500MS")
 				return
 			}
@@ -459,17 +459,17 @@ func (worker *PositionWorker) workerLoop() {
 			// If trade has been active for >= 45 minutes and peak favorable excursion hasn't even reached +0.50R,
 			// information edge has decayed into random walk friction. Exit cleanly at market.
 			worker.mu.RLock()
-			st := worker.state
+			currentWorkerState := worker.state
 			openedAt := worker.OpenedAt
 			worker.mu.RUnlock()
-			if st == StateProtectedActive && !openedAt.IsZero() && time.Since(openedAt) >= 45*time.Minute {
-				hwm := math.Float64frombits(worker.highWaterMarkBits.Load())
+			if currentWorkerState == StateProtectedActive && !openedAt.IsZero() && time.Since(openedAt) >= 45*time.Minute {
+				highWaterMark := math.Float64frombits(worker.highWaterMarkBits.Load())
 				entryPrice := worker.GetEntryPrice()
-				var maxFavR float64
-				if worker.OneR > 0 && hwm > 0 && entryPrice > 0 {
-					maxFavR = (hwm - entryPrice) / worker.OneR
+				var maxFavorableRMultiple float64
+				if worker.OneR > 0 && highWaterMark > 0 && entryPrice > 0 {
+					maxFavorableRMultiple = (highWaterMark - entryPrice) / worker.OneR
 				}
-				if maxFavR < 0.50 {
+				if maxFavorableRMultiple < 0.50 {
 					worker.executeEmergencyFlatten("ALPHA_DECAY_45M_STAGNATION")
 					return
 				}

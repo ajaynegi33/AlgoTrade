@@ -73,7 +73,7 @@ type ActivePositionDTO struct {
 	Symbol           string  `json:"symbol"`
 	InstrumentToken  uint32  `json:"instrument_token"`
 	State            string  `json:"state"`        // "ENTRY_PLACED", "PROTECTED_ACTIVE", "SCALE_OUT_PENDING", "RUNNER_ACTIVE", "SHADOW_STOP_ACTIVE", "EMERGENCY_FLATTENING", "CLOSED"
-	PatternType      string  `json:"pattern_type"` // "VWAP_PULLBACK_RECLAIM" | "ORB_15M_BREAKOUT"
+	PatternType      string  `json:"pattern_type"` // "VWAP_PULLBACK_RECLAIM" | "FAILED_BREAKDOWN_SPRING" | "ORB_RETEST_RECLAIM"
 	EntryPrice       float64 `json:"entry_price"`
 	ExitPrice        float64 `json:"exit_price,omitempty"`
 	LTP              float64 `json:"ltp"`
@@ -118,7 +118,7 @@ type CandidateGateDiagnosticDTO struct {
 	IsScoreValid   bool    `json:"score_ok"`
 	IsRVOLValid    bool    `json:"rvol_ok"`
 	IsBookQualityValid bool `json:"book_quality_ok"`
-	PatternMatched string  `json:"pattern_matched"` // "VWAP_PULLBACK_RECLAIM" | "ORB_15M_BREAKOUT" | ""
+	PatternMatched string  `json:"pattern_matched"` // "VWAP_PULLBACK_RECLAIM" | "FAILED_BREAKDOWN_SPRING" | "ORB_RETEST_RECLAIM" | ""
 	IsSizingApproved bool `json:"sizing_approved"`
 	OverallStatus  string  `json:"overall_status"`  // "READY" | "ACTIVE_OR_COOLDOWN" | "BLOCKED"
 	BlockingReason string  `json:"blocking_reason"` // Exact human-readable gate that held back or approved the stock
@@ -215,7 +215,7 @@ type TradeHistoryItemDTO struct {
 	Orders                []TradeOrderLegDTO `json:"orders,omitempty"`
 }
 
-// PatternPerformanceDTO summarizes performance by entry pattern (e.g. VWAP_PULLBACK_RECLAIM vs ORB_15M_BREAKOUT)
+// PatternPerformanceDTO summarizes performance by entry pattern (e.g. VWAP_PULLBACK_RECLAIM, FAILED_BREAKDOWN_SPRING, ORB_RETEST_RECLAIM)
 type PatternPerformanceDTO struct {
 	PatternType    string  `json:"pattern_type"`
 	Trades         int     `json:"trades"`

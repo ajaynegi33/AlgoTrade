@@ -8,7 +8,7 @@ import (
 )
 
 // OnTickHotPath is executed by the Actor on every incoming tick for this position's instrument.
-func (worker *PositionWorker) OnTickHotPath(stockMetrics *market.StockMetrics, isInMacroShock bool) {
+func (worker *PositionWorker) OnTickHotPath(stockMetrics *market.StockMetrics) {
 	if worker.isClosed.Load() {
 		return
 	}

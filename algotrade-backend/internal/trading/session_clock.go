@@ -46,7 +46,7 @@ func EvaluateGlobalSessionClocks(now time.Time, breadthPct float64, topBullishRV
 		istLoc = ist
 	}
 	nowIST := now.In(istLoc)
-	istMin := nowIST.Hour()*60 + nowIST.Minute()
+	istMinutesSinceMidnight := nowIST.Hour()*60 + nowIST.Minute()
 	isWeekday := nowIST.Weekday() >= time.Monday && nowIST.Weekday() <= time.Friday
 
 	marketSessionClocks := make([]market.MarketSessionItemDTO, 0, len(globalZones))
@@ -59,7 +59,7 @@ func EvaluateGlobalSessionClocks(now time.Time, breadthPct float64, topBullishRV
 			loc = istLoc
 		}
 		localNow := now.In(loc)
-		localMin := localNow.Hour()*60 + localNow.Minute()
+		localMinutesSinceMidnight := localNow.Hour()*60 + localNow.Minute()
 		localWeekday := localNow.Weekday() >= time.Monday && localNow.Weekday() <= time.Friday
 
 		status := "CLOSED"
@@ -68,22 +68,22 @@ func EvaluateGlobalSessionClocks(now time.Time, breadthPct float64, topBullishRV
 
 		if !localWeekday {
 			label = "Weekend"
-		} else if localMin < zone.OpenMin {
-			diff := zone.OpenMin - localMin
-			if diff <= 30 {
+		} else if localMinutesSinceMidnight < zone.OpenMin {
+			minutesUntilOpen := zone.OpenMin - localMinutesSinceMidnight
+			if minutesUntilOpen <= 30 {
 				status = "PRE_OPEN"
 			}
-			label = fmt.Sprintf("Opens in %s", formatDurationMin(diff))
-			if (zone.ID == "FRANKFURT" || zone.ID == "LONDON") && diff < minutesToEuropeOpen {
-				minutesToEuropeOpen = diff
+			label = fmt.Sprintf("Opens in %s", formatDurationMin(minutesUntilOpen))
+			if (zone.ID == "FRANKFURT" || zone.ID == "LONDON") && minutesUntilOpen < minutesToEuropeOpen {
+				minutesToEuropeOpen = minutesUntilOpen
 			}
-		} else if zone.LunchStart > 0 && localMin >= zone.LunchStart && localMin < zone.LunchEnd {
+		} else if zone.LunchStart > 0 && localMinutesSinceMidnight >= zone.LunchStart && localMinutesSinceMidnight < zone.LunchEnd {
 			status = "LUNCH"
-			label = fmt.Sprintf("Lunch • Resumes in %s", formatDurationMin(zone.LunchEnd-localMin))
-		} else if localMin < zone.CloseMin {
+			label = fmt.Sprintf("Lunch • Resumes in %s", formatDurationMin(zone.LunchEnd-localMinutesSinceMidnight))
+		} else if localMinutesSinceMidnight < zone.CloseMin {
 			status = "OPEN"
 			isOpen = true
-			label = fmt.Sprintf("Open • %s left", formatDurationMin(zone.CloseMin-localMin))
+			label = fmt.Sprintf("Open • %s left", formatDurationMin(zone.CloseMin-localMinutesSinceMidnight))
 			if zone.ID == "FRANKFURT" {
 				isFrankfurtOpen = true
 			}
@@ -114,7 +114,7 @@ func EvaluateGlobalSessionClocks(now time.Time, breadthPct float64, topBullishRV
 		Clocks:            marketSessionClocks,
 	}
 
-	if !isWeekday || istMin < 9*60+15 || istMin >= 15*60+30 {
+	if !isWeekday || istMinutesSinceMidnight < 9*60+15 || istMinutesSinceMidnight >= 15*60+30 {
 		dto.Phase = "MARKET_CLOSED"
 		dto.PhaseLabel = "NSE Market Closed"
 		dto.PlaybookNote = "NSE Cash Equity intraday session runs 09:15–15:30 IST. Zero overnight exposure."
@@ -122,13 +122,13 @@ func EvaluateGlobalSessionClocks(now time.Time, breadthPct float64, topBullishRV
 	}
 
 	switch {
-	case istMin < 9*60+30:
+	case istMinutesSinceMidnight < 9*60+30:
 		dto.Phase = "OPENING_NOISE_BLACKOUT"
 		dto.PhaseLabel = "09:15–09:30 Opening Noise Blackout"
 		dto.PlaybookNote = "Absorbing opening auction imbalances, retail fakeouts, and establishing opening 15m structural range."
 		dto.IsNewEntryAllowed = false
 
-	case istMin < 11*60+30:
+	case istMinutesSinceMidnight < 11*60+30:
 		dto.Phase = "MORNING_DISCOVERY_DRIVE"
 		dto.PhaseLabel = "Morning Institutional Discovery Drive"
 		dto.PlaybookNote = "Peak domestic & Asia overlap liquidity. VWAP Pullback Reclaim, Bear Trap Spring, & ORB Retest active."
@@ -137,7 +137,7 @@ func EvaluateGlobalSessionClocks(now time.Time, breadthPct float64, topBullishRV
 		dto.MinRVOL = 1.5
 		dto.SizeMultiplier = 1.00
 
-	case !isFrankfurtOpen && !isLondonOpen && istMin < 13*60+30:
+	case !isFrankfurtOpen && !isLondonOpen && istMinutesSinceMidnight < 13*60+30:
 		dto.Phase = "MIDDAY_COMPRESSION"
 		// Check Live NSE Domestic Tape Override (Richie Naso & Dr. Samir Varma: lock midday chop unless extreme domestic breadth & surge):
 		if breadthPct >= 70.0 && topBullishRVOL >= 2.5 {
@@ -157,7 +157,7 @@ func EvaluateGlobalSessionClocks(now time.Time, breadthPct float64, topBullishRV
 			dto.SizeMultiplier = 0.50
 		}
 
-	case istMin < 14*60+45:
+	case istMinutesSinceMidnight < 14*60+45:
 		dto.Phase = "EUROPE_OVERLAP_EXPANSION"
 		dto.PhaseLabel = "Europe / London Overlap Expansion"
 		dto.PlaybookNote = "Frankfurt & London institutional desks active. Second-wave trend breakouts & VWAP reclaims unlocked."
@@ -166,7 +166,7 @@ func EvaluateGlobalSessionClocks(now time.Time, breadthPct float64, topBullishRV
 		dto.MinRVOL = 1.5
 		dto.SizeMultiplier = 1.00
 
-	case istMin < 15*60+14:
+	case istMinutesSinceMidnight < 15*60+14:
 		dto.Phase = "EXIT_ONLY_LOCKOUT"
 		dto.PhaseLabel = "14:45+ Exit-Only Trail Window"
 		dto.PlaybookNote = "New entries locked out. Active runners trailing on Multi-Gear SL ahead of 15:14 IST square-off."

@@ -148,7 +148,7 @@ func TestPositionWorkerThreeStepScaleOutAndShadowStopMod25(t *testing.T) {
 	stock.LTP = worker.GetEntryPrice() + 1.60*worker.OneR
 	stock.RollingPeak = stock.LTP
 	stock.LastUpdatedUnix += 5
-	worker.OnTickHotPath(&stock, false)
+	worker.OnTickHotPath(&stock)
 
 	time.Sleep(120 * time.Millisecond)
 	if !worker.hasTranche1Completed.Load() {
@@ -164,7 +164,7 @@ func TestPositionWorkerThreeStepScaleOutAndShadowStopMod25(t *testing.T) {
 	stock.LTP = worker.GetEntryPrice() + 3.0*worker.OneR
 	stock.RollingPeak = stock.LTP
 	stock.LastUpdatedUnix += 25
-	worker.OnTickHotPath(&stock, false)
+	worker.OnTickHotPath(&stock)
 
 	shadow := worker.ToDTO().ShadowStop
 	if shadow <= worker.GetBreakevenStop() {
@@ -175,7 +175,7 @@ func TestPositionWorkerThreeStepScaleOutAndShadowStopMod25(t *testing.T) {
 	stock.LTP = shadow - 0.15
 	stock.FastAggressorEMA = 0.30
 	stock.LastUpdatedUnix += 2
-	worker.OnTickHotPath(&stock, false)
+	worker.OnTickHotPath(&stock)
 
 	select {
 	case <-closedCh:
@@ -347,7 +347,7 @@ func TestPhase26FalsificationSuite_BugsB1ToB5(t *testing.T) {
 	bel.AggressorBuyRatio = 0.34
 	bel.FastAggressorEMA = 0.33
 	bel.LastUpdatedUnix = nowUnix + 35
-	worker.OnTickHotPath(&bel, false)
+	worker.OnTickHotPath(&bel)
 	time.Sleep(60 * time.Millisecond)
 
 	tightenedStop := worker.ToDTO().CurrentStop
@@ -638,7 +638,7 @@ func TestSLGapThroughBreachAndFlatten(t *testing.T) {
 	// Now simulate price falling directly to 58.81 (below initial stop 58.83)
 	stock.LTP = 58.81
 	stock.LastUpdatedUnix += 5
-	worker.OnTickHotPath(&stock, false)
+	worker.OnTickHotPath(&stock)
 
 	select {
 	case <-closedCh:
@@ -824,7 +824,7 @@ func TestPositionWorker_EarlyHarvestAt065RAnd5mClose(t *testing.T) {
 
 	// 1. Tick at 802.60 (+0.52R): verify stop does NOT ratchet to Breakeven yet (Breakeven triggers at >= +1.0R per Quant Laws)
 	stock.LTP = 802.60
-	worker.OnTickHotPath(stock, false)
+	worker.OnTickHotPath(stock)
 	shadow := math.Float64frombits(worker.shadowStopBits.Load())
 	if shadow >= 800.80 {
 		t.Fatalf("expected shadow stop to NOT ratchet to Breakeven 800.80 at +0.52R, got %.2f", shadow)
@@ -832,7 +832,7 @@ func TestPositionWorker_EarlyHarvestAt065RAnd5mClose(t *testing.T) {
 
 	// 2. Tick at 805.20 (+1.04R): verify stop ratchets to Breakeven (800.80)
 	stock.LTP = 805.20
-	worker.OnTickHotPath(stock, false)
+	worker.OnTickHotPath(stock)
 	shadow = math.Float64frombits(worker.shadowStopBits.Load())
 	if shadow < 800.80 {
 		t.Fatalf("expected shadow stop to ratchet to Breakeven 800.80 at +1.04R, got %.2f", shadow)
@@ -840,14 +840,14 @@ func TestPositionWorker_EarlyHarvestAt065RAnd5mClose(t *testing.T) {
 
 	// 3. Tick at 807.60 (+1.52R): verify Tranche 1 50% scale-out is triggered
 	stock.LTP = 807.60
-	worker.OnTickHotPath(stock, false)
+	worker.OnTickHotPath(stock)
 	if !worker.isTranche1Pending.Load() {
 		t.Fatalf("expected isTranche1Pending to be TRUE at +1.52R for profit harvest, got false")
 	}
 
 	// 3. Intra-candle dip does NOT panic-dump if 5m bar hasn't closed below InitialStop
 	stock.LTP = 796.00
-	worker.OnTickHotPath(stock, false)
+	worker.OnTickHotPath(stock)
 	if worker.isClosed.Load() {
 		t.Fatalf("expected position to hold during intra-candle wick above InitialStop (795.00), but was closed prematurely")
 	}
@@ -856,7 +856,7 @@ func TestPositionWorker_EarlyHarvestAt065RAnd5mClose(t *testing.T) {
 	stock.CurrentBarIdx = 3
 	stock.SessionBars[2] = market.OHLCVBar{High: 798.0, Low: 793.0, Open: 797.0, Close: 794.0} // Closed below 795.00!
 	stock.LTP = 794.00
-	worker.OnTickHotPath(stock, false)
+	worker.OnTickHotPath(stock)
 	if !worker.isMarketExitPending.Load() {
 		t.Fatalf("expected isMarketExitPending to be TRUE after completed 5m candle closed below InitialStop (794.00 < 795.00)")
 	}
@@ -1321,14 +1321,14 @@ func TestRunawayPriceGuard(t *testing.T) {
 	// Now price runs away to 103.0 (+1.5R above entry 100.0, > 1.2R threshold of 102.40)
 	stock.LTP = 103.0
 	// Tick 1: runaway begins
-	worker.OnTickHotPath(stock, false)
+	worker.OnTickHotPath(stock)
 	if worker.runawaySinceUnix.Load() == 0 {
 		t.Fatalf("Expected runaway timer to start")
 	}
 
 	// Advance clock by 35 seconds
 	stock.LastUpdatedUnix += 35
-	worker.OnTickHotPath(stock, false)
+	worker.OnTickHotPath(stock)
 
 	// Position worker should receive emergency exit
 	time.Sleep(100 * time.Millisecond)
@@ -1900,7 +1900,7 @@ func TestPositionWorker_SingleShareScaleOutProtection(t *testing.T) {
 	stock.LTP = worker.GetEntryPrice() + 1.60*worker.OneR
 	stock.RollingPeak = stock.LTP
 	stock.LastUpdatedUnix += 5
-	worker.OnTickHotPath(stock, false)
+	worker.OnTickHotPath(stock)
 
 	time.Sleep(100 * time.Millisecond)
 

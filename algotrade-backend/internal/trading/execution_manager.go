@@ -288,7 +288,7 @@ func (manager *Manager) OnSecondTick(
 		gateStatus = pickStatus
 		gateReason = pickReason
 		if candidate != nil {
-			manager.spawnCandidateWorker(*candidate, settings.Mode, &stocks[candidate.StockIdx])
+			manager.spawnCandidateWorker(*candidate, settings.Mode, &stocks[candidate.StockIndex])
 		}
 	} else if candidate != nil {
 		gateStatus = "PAUSED_SIGNAL_READY"
@@ -299,7 +299,7 @@ func (manager *Manager) OnSecondTick(
 	stateDTO := &market.ExecutionStateDTO{
 		Mode:                 settings.Mode,
 		IsAutoExecuteEnabled: settings.AutoExecute,
-		IsMacroShockActive:   false,
+		IsMacroShockActive:   pulse.MarketRegime == "FLASH_SHOCK",
 		GateStatus:           gateStatus,
 		GateReason:        gateReason,
 		Capital:           capDTO,
@@ -352,7 +352,7 @@ func (manager *Manager) spawnCandidateWorker(candidate CandidateSignal, mode str
 		Mode:                 mode,
 		Symbol:               candidate.Symbol,
 		Token:                candidate.Token,
-		StockIdx:             candidate.StockIdx,
+		StockIndex:           candidate.StockIndex,
 		PatternType:          candidate.PatternType,
 		TickSize:             float64(targetStock.TickSize),
 		MISLeverage:          misLeverage,
@@ -617,7 +617,7 @@ func (manager *Manager) rehydrateOpenPositionsFromDB() {
 
 		if manager.actor != nil {
 			idx := manager.actor.BindPositionWorker(positionRecord.token, positionRecord.symbol, worker)
-			worker.StockIdx = idx
+			worker.StockIndex = idx
 			if stockPtr := manager.actor.GetStockPtrByIndex(idx); stockPtr != nil {
 				worker.getStockPtr = func() *market.StockMetrics { return stockPtr }
 				if stockPtr.TickSize > 0 {

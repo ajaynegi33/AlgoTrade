@@ -52,7 +52,7 @@ type DepthLevel struct {
 
 // StockMetrics holds real-time quantitative state for a single stock.
 // Strict descending alignment layout: Zero internal compiler padding holes.
-// Total struct size: Exactly 3,976 bytes (divisible by 8).
+// Total struct size: Exactly 4,008 bytes (divisible by 8).
 type StockMetrics struct {
 	// -------------------------------------------------------------------------
 	// 1. Eight-Byte Types (Composite Arrays, float64, uint64, int64)
@@ -92,7 +92,7 @@ type StockMetrics struct {
 	BarSellVolume     uint64  // Aggressor volume hitting the Bid in current 5m bar
 	LastUpdatedUnix   int64   // Exchange timestamp of last tick (epoch seconds)
 	RollingPeak       float64 // Continuous time-decaying (tau=20s) price peak for shock velocity
-	// Subtotal Group 1: 3,600 + (25 fields * 8B) = 3,800 bytes (divisible by 8)
+	// Subtotal Group 1: 3,600 + (27 fields * 8B) = 3,816 bytes (divisible by 8)
 
 	// -------------------------------------------------------------------------
 	// 2. Four-Byte Types (uint32, float32) - 10 fields * 4B = 40 bytes (divisible by 8)

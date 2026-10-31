@@ -12,7 +12,7 @@ import (
 
 // CandidateSignal represents a qualified long trade setup selected by the Signal Picker
 type CandidateSignal struct {
-	StockIdx     uint16
+	StockIndex   uint16
 	Token        uint32
 	Symbol       string
 	PatternType  string // PatternVWAPPullbackReclaim | PatternFailedBreakdownReclaim | PatternORBRetestReclaim
@@ -43,11 +43,6 @@ func PickBestLongCandidate(
 	minScore := sessionClock.MinBullishScore
 	minRVOL := sessionClock.MinRVOL
 	sizeMult := sessionClock.SizeMultiplier
-	isOpeningRangeBreakoutAllowed := true
-
-	if sessionClock.Phase == "MIDDAY_COMPRESSION" && !sessionClock.IsTapeOverrideActive {
-		isOpeningRangeBreakoutAllowed = false
-	}
 
 	maxScan := min(5, len(bullishSortedStockIndices))
 	candidateDiagnostics := make([]market.CandidateGateDiagnosticDTO, 0, maxScan)
@@ -85,10 +80,10 @@ func PickBestLongCandidate(
 		}
 
 		// Sector-Level Circuit Breaker: If this specific sector is restricted, block this stock ONLY!
-		if secHealth, ok := sectorHealthMap[stock.SectorID]; ok && secHealth.IsRestricted {
+		if sectorHealth, exists := sectorHealthMap[stock.SectorID]; exists && sectorHealth.IsRestricted {
 			candidateDiagnostic.IsRegimeValid = false
 			candidateDiagnostic.OverallStatus = "BLOCKED"
-			candidateDiagnostic.BlockingReason = fmt.Sprintf("Sector (%s) is RESTRICTED: %s", candidateDiagnostic.Sector, secHealth.RestrictionReason)
+			candidateDiagnostic.BlockingReason = fmt.Sprintf("Sector (%s) is RESTRICTED: %s", candidateDiagnostic.Sector, sectorHealth.RestrictionReason)
 			candidateDiagnostics = append(candidateDiagnostics, candidateDiagnostic)
 			continue
 		}
@@ -107,7 +102,7 @@ func PickBestLongCandidate(
 		hasAskWall := top2Bid == 0 || uint64(stock.AskLevels[0].Qty) > 4*top2Bid
 		candidateDiagnostic.IsBookQualityValid = !hasPenalty && !hasAskWall
 
-		atrSafe := math.Max(stock.ATR14, stock.LTP*0.0025)
+		safeATR := math.Max(stock.ATR14, stock.LTP*0.0025)
 		tickSize := float64(stock.TickSize)
 		if tickSize <= 0 {
 			tickSize = 0.05
@@ -127,15 +122,15 @@ func PickBestLongCandidate(
 		// Richie Naso Confluence Law: 9 EMA must be strictly positive (warm), above or at VWAP,
 		// and ATR-normalized slope (ΔEMA9 / ATRsafe) must be flat or rising (>= -0.05 ATR).
 		// Volatility Buffer Law: Stop is placed below signal candle low minus 0.20 ATR buffer to avoid stop hunts.
-		distanceToVWAPInATR := (stock.LTP - stock.ExchangeVWAP) / atrSafe
+		distanceToVWAPInATR := (stock.LTP - stock.ExchangeVWAP) / safeATR
 		previousBarMidpoint := (previousBar.Open + previousBar.Close) / 2.0
-		normalizedEMA9Slope := stock.EMA9Slope / atrSafe
+		normalizedEMA9Slope := stock.EMA9Slope / safeATR
 		isEMA9Confluence := stock.EMA9 > 0 && stock.EMA9 >= stock.ExchangeVWAP && normalizedEMA9Slope >= -0.05
 
 		if distanceToVWAPInATR >= 0.05 && distanceToVWAPInATR <= 0.55 &&
 			previousBar.Low > 0 &&
-			previousBar.Low <= stock.ExchangeVWAP+0.35*atrSafe &&
-			previousBar.Low >= stock.ExchangeVWAP-0.15*atrSafe &&
+			previousBar.Low <= stock.ExchangeVWAP+0.35*safeATR &&
+			previousBar.Low >= stock.ExchangeVWAP-0.15*safeATR &&
 			stock.LTP > math.Max(currentBar.Open+2.0*tickSize, previousBarMidpoint) &&
 			closeLocationValue >= 0.58 &&
 			stock.AggressorBuyRatio >= 0.56 &&
@@ -143,16 +138,16 @@ func PickBestLongCandidate(
 			stock.SmoothedBuyerRatio >= 0.55 &&
 			isEMA9Confluence {
 			matchedPattern = PatternVWAPPullbackReclaim
-			signalBarLow = math.Min(previousBar.Low, currentBar.Low) - (0.20 * atrSafe)
+			signalBarLow = math.Min(previousBar.Low, currentBar.Low) - (0.20 * safeATR)
 		}
 
 		// Strategy Setup 2: Failed Breakdown Reclaim (Specialist Liquidity Sweep / Bear Trap Spring)
 		// Per Richie Naso & Rishi Narang: When market makers sweep below VWAP to trigger retail stops,
 		// and volume immediately reclaims VWAP with aggressive buyers, ride the trapped-short squeeze.
 		if matchedPattern == "" && stock.CurrentBarIdx >= 2 {
-			sweptBelowVWAP := previousBar.Low < stock.ExchangeVWAP-0.05*atrSafe &&
-				previousBar.Low >= stock.ExchangeVWAP-0.45*atrSafe
-			reclaimedVWAP := stock.LTP >= stock.ExchangeVWAP+0.05*atrSafe &&
+			sweptBelowVWAP := previousBar.Low < stock.ExchangeVWAP-0.05*safeATR &&
+				previousBar.Low >= stock.ExchangeVWAP-0.45*safeATR
+			reclaimedVWAP := stock.LTP >= stock.ExchangeVWAP+0.05*safeATR &&
 				stock.LTP > currentBar.Open+2.0*tickSize
 
 			if sweptBelowVWAP && reclaimedVWAP &&
@@ -162,38 +157,38 @@ func PickBestLongCandidate(
 				stock.SmoothedBuyerRatio >= 0.56 &&
 				compositeRVOL >= 1.5 {
 				matchedPattern = PatternFailedBreakdownReclaim
-				signalBarLow = previousBar.Low - (0.20 * atrSafe)
+				signalBarLow = previousBar.Low - (0.20 * safeATR)
 			}
 		}
 
 		// Strategy Setup 3: 15-Minute Opening Range Retest Reclaim (Abolishes Naive 80%-Failure First Breakout)
 		// Per Richie Naso: Never buy the initial breakout poke. Require a completed 5m bar close above ORH,
 		// followed by a retest of the range high that holds as confirmed support before entry.
-		if matchedPattern == "" && isOpeningRangeBreakoutAllowed && stock.CurrentBarIdx >= 4 {
+		if matchedPattern == "" && stock.CurrentBarIdx >= 4 {
 			openingRangeHigh, openingRangeLow, isORBReady := stock.OpeningRange15m()
 			hasConfirmedBreakoutClose := false
 			if isORBReady {
-				for barIdx := uint8(3); barIdx < stock.CurrentBarIdx; barIdx++ {
-					if stock.SessionBars[barIdx].Close > openingRangeHigh {
+				for completedBarIndex := uint8(3); completedBarIndex < stock.CurrentBarIdx; completedBarIndex++ {
+					if stock.SessionBars[completedBarIndex].Close > openingRangeHigh {
 						hasConfirmedBreakoutClose = true
 						break
 					}
 				}
 			}
 
-			if isORBReady && hasConfirmedBreakoutClose && (openingRangeHigh-openingRangeLow) <= 1.8*atrSafe &&
-				previousBar.Low <= openingRangeHigh+0.25*atrSafe &&
-				previousBar.Low >= openingRangeHigh-0.35*atrSafe &&
+			if isORBReady && hasConfirmedBreakoutClose && (openingRangeHigh-openingRangeLow) <= 1.8*safeATR &&
+				previousBar.Low <= openingRangeHigh+0.25*safeATR &&
+				previousBar.Low >= openingRangeHigh-0.35*safeATR &&
 				stock.LTP > openingRangeHigh &&
 				stock.LTP > currentBar.Open+tickSize &&
-				(stock.LTP-openingRangeHigh) <= 0.45*atrSafe &&
+				(stock.LTP-openingRangeHigh) <= 0.45*safeATR &&
 				compositeRVOL >= 1.8 &&
 				closeLocationValue >= 0.62 &&
 				stock.AggressorBuyRatio >= 0.58 &&
 				stock.FastAggressorEMA >= 0.56 &&
 				stock.SmoothedBuyerRatio >= 0.56 {
 				matchedPattern = PatternORBRetestReclaim
-				signalBarLow = math.Min(previousBar.Low, currentBar.Low) - (0.20 * atrSafe)
+				signalBarLow = math.Min(previousBar.Low, currentBar.Low) - (0.20 * safeATR)
 			}
 		}
 		candidateDiagnostic.PatternMatched = matchedPattern
@@ -258,7 +253,7 @@ func PickBestLongCandidate(
 
 		if winningSignal == nil {
 			winningSignal = &CandidateSignal{
-				StockIdx:     stockIndex,
+				StockIndex:   stockIndex,
 				Token:        stock.InstrumentToken,
 				Symbol:       symbol,
 				PatternType:  matchedPattern,
