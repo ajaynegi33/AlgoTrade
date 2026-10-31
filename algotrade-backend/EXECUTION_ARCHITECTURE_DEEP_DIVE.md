@@ -134,6 +134,8 @@ Kite Ticker WebSocket
 | **Calendar Day Rollover** | `tick.ExchangeTime` | `> today0915Epoch + 64800` | Reset 75 bar slots, pullback counts, and baseline volumes |
 | **Out-of-Order Tick Guard** | `tick.Volume` vs `stock.Volume` | `tick.Volume > stock.Volume` | Set $\Delta_{\text{vol}} = 0$ (prevents `uint64` underflow) |
 | **5m Candle Rollover** | `barIdx = (t - epoch) / 300` | `barIdx > stock.CurrentBarIdx` | Finalize candle, push to `barFlushChan`, advance slot |
+| **Completed-Bar 9 EMA Invariant** | `barIndex < activeSlot` | `barIndex <= completedBarLimit` | Seed historical EMA strictly from finalized 5m closes (avoids double-counting live bar) |
+| **Two-Phase Paper Hot Path** | `byToken[token]` resting orders | `RLock` read filter | Exit in <20ns if no order touched; elevate to `Lock` only on trigger breach |
 | **Lee-Ready Aggressor Rule**| `LTP` vs `prevAsk1`, `prevBid1` | $\text{LTP} \ge \text{Ask1} \lor \text{LTP} \le \text{Bid1}$ | Classify trade print as Buyer (+) or Seller (-) volume |
 
 #### Mathematical Formulations
@@ -226,6 +228,7 @@ internal/trading/execution_manager.go: Manager.OnSecondTick()
 | Gate Checkpoint | Inspected Data Point | Exact Rule Filter | Rejection Reason / Action |
 | :--- | :--- | :--- | :--- |
 | **Session Clock** | `sessionClock.IsNewEntryAllowed` | `== true` | Lock entries (`LOCKED_SESSION_WINDOW`) |
+| **Macro Shock**   | `pulse.MarketRegime` | `!= "FLASH_SHOCK"` (Breadth $> 20\%$) | Lock entries (`LOCKED_MACRO_SHOCK`) |
 | **Gate 0: Warmup** | `stock.IsWarm`, `stock.CurrentBarIdx` | `IsWarm == true && BarIdx >= 1` | `Warming up 5m bars / VWAP feed` |
 | **Gate 0: Cooldown**| `symbolCooldowns[symbol]` | `time.Now() < cooldownExpiry` | `Position active or in 15m cooldown` |
 | **Gate 1: Sector** | `sectorHealthMap[sectorID].IsRestricted`| `== false` | `Sector is RESTRICTED: [Reason]` |
@@ -313,6 +316,11 @@ internal/trading/entry_gatekeeper.go: PickBestLongCandidate()
    $$Q_{\text{liq}} = \max\left(1, \left\lfloor 0.20 \times \sum_{i=1}^3 \text{AskQty}_i \right\rfloor\right) \quad (\text{Never consume } > 20\% \text{ of top-3 ask depth})$$
    $$Q_{\text{final}} = \min(Q_{\text{risk}}, Q_{\text{margin}}, Q_{\text{conc}}, Q_{\text{liq}})$$
 
+5. **Dynamic Statutory Marginal Dust Floor**:
+   To ensure small partial fills remain economically viable, the partial fill dust floor ($Q_{\text{dust}}$) is dynamically calculated from round-trip statutory taxes on a 1-share exit at $+1.0R$:
+   $$Q_{\text{dust}} = \max\left(1, \min\left(\left\lceil \frac{\max(\text{Taxes}_{\text{1 share}}, 20.0)}{\max(0.50, \text{OneR})} \right\rceil, \lfloor 0.15 \times Q_{\text{final}} \rfloor\right)\right)$$
+   Where $\text{Taxes}_{\text{1 share}} = \text{CalculateRoundTripCharges}(P_{\text{entry}}, P_{\text{target1R}}, 1).\text{TotalCharges}$ and $20.0$ is the Zerodha minimum flat exit brokerage.
+
 ---
 
 ### Step 5: Position Worker Lifecycle, 5-Minute Timeout & Partial Fill Promotion
@@ -324,9 +332,9 @@ When an entry order is sent to the exchange, we don't buy at market price (which
 ```
 internal/trading/execution_manager.go: Manager.spawnCandidateWorker()
   ──> internal/trading/position_worker.go: PositionWorker.Start()
+        ├── go worker.workerLoop() (Dedicated Goroutine spawned first)
         ├── Place Limit Buy Order via broker.PlaceLimitBuy()
         ├── Register order with order_reconciler.go
-        ├── go worker.workerLoop() (Dedicated Goroutine)
         └── Start 5-Minute Timeout: time.NewTimer(300 * time.Second)
 ```
 
@@ -406,6 +414,7 @@ internal/market/tick_ingestion.go: Actor.processTick()
 
 #### Race-Free 3-Step Scale-Out Protocol (`executeThreeStepScaleOut`)
 Triggered when trade reaches $+1.50R$ (Tranche 1 Asymmetric Profit Harvest per Dr. Samir Varma):
+- **Single-Share Position Invariant**: If $Q_{\text{remaining}} < 2$ (e.g. 1-share position), position halving is mathematically impossible ($1 / 2 = 0$). The engine marks Tranche 1 as complete, transitions to Gear 2 (`GearDynamicTrail`), and immediately ratchets the resting stop to Tax-Free Breakeven directly via `worker.ProposeStopRatchet`, allowing the single share to run safely without invalid zero-quantity exchange orders.
 1. **Step 1 (Shrink SL)**: Shrink resting SL order quantity from $Q \to Q_{\text{runner}}$ while keeping trigger price unchanged.
 2. **Step 2 (Marketable Sell)**: Place marketable limit sell for $Q_{\text{scale}} = Q / 2$.
    - **Compensating Rollback**: If Step 2 fails, immediately re-expands resting SL quantity back to $Q$.

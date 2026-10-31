@@ -90,7 +90,8 @@ The core setup is the **Institutional Pullback Reclaim (VWAP & Order Block Confl
    - Evaluates what percentage of active stocks are currently trading above their Volume Weighted Average Price (VWAP).
    - **Bullish Expansion ($> 58\%$)**: Aggressive long entries permitted.
    - **Sideways Chop ($40\% - 58\%$)**: Defensive mode. Only highest quality pullbacks with Bullish Score $\ge 82$ allowed.
-   - **Bearish Expansion ($< 40\%$)**: Capital preservation mode. All new long entries are strictly rejected.
+   - **Bearish Expansion ($20\% - 40\%$)**: Capital preservation mode. All new long entries are strictly rejected.
+   - **Macro Flash Shock ($\le 20\%$)**: Catastrophic market-wide liquidation active. Engages `LOCKED_MACRO_SHOCK` lockout and displays emergency warning across the Trader Cockpit.
 
 3. **Institutional Pullback to Demand**:
    - Price must pull back towards the Volume Weighted Average Price (VWAP) or a freshly formed 5-minute candle low support.
@@ -244,6 +245,7 @@ Even if a stock looks bullish, it will be firmly rejected if it violates any saf
 | Gate Check | Inspected Condition | Exact Passing Threshold | Why It Blocks (Rejection Reason Code) |
 | :--- | :--- | :--- | :--- |
 | **Session Clock** | `sessionClock.IsNewEntryAllowed` | `== true` | `LOCKED_SESSION_WINDOW`: Outside trading hours, during 09:15-09:30 blackout, 11:30-13:30 midday lull, or post-14:45 exit window. |
+| **Macro Shock**   | `pulse.MarketRegime` | `!= "FLASH_SHOCK"` (Breadth $> 20\%$) | `LOCKED_MACRO_SHOCK`: Universe breadth collapsed $\le 20.0\%$. Catastrophic market-wide liquidation active; new entries prohibited. |
 | **Symbol Cooldown**| Active position or exit timer | Cooldown elapsed ($> 15\text{ min}$) | `POSITION_ACTIVE_OR_COOLDOWN`: Prevents overtrading, churn, and revenge-trading on the same symbol. |
 | **Sector Health** | Granular Sector Circuit Breaker | Sector Breadth $\ge 40\%$ and Sector Avg Change $\ge -0.50\%$ | `SECTOR_RESTRICTED`: The entire sector (e.g., Nifty Bank, IT) is experiencing systemic selling pressure. |
 | **Quant Score** | `stock.BullishScore` | $\ge 75.0$ (Morning) / $\ge 80.0$ (Midday) / $\ge 76.0$ (Europe) | `SCORE_BELOW_MIN`: Stock does not possess strong enough multi-factor momentum or institutional sponsorship. |
@@ -316,10 +318,12 @@ algotrade/
 └── algotrade-frontend/           # Next.js 14 React client, TailwindCSS, lucide icons
 ```
 
-### The Single-Writer Actor Pattern
+### The Single-Writer Actor Pattern & Hot-Path Invariants
 To avoid mutex lock contention on the market hot path (which processes thousands of ticks/sec), AlgoTrade enforces a **Single-Writer Concurrency Pattern**:
 - All incoming tick packets from Zerodha Kite are sent to a single dedicated goroutine (`market.Actor`).
-- The Actor updates in-memory arrays sequentially without taking locks.
+- The Actor updates in-memory contiguous `[512]StockMetrics` arrays sequentially without taking locks (<250ns per tick).
+- **Two-Phase Hot Path Order Evaluation**: In Paper mode, `EvaluateTickForToken` executes an initial `RLock` read filter on resting orders and price boundaries. 99.99% of ticks exit in <20ns without acquiring an exclusive write lock, ensuring concurrent API order queries never stall the Actor tick ingestion thread.
+- **Completed-Bar 9 EMA Seeding Invariant**: Historical seeder computes running EMA strictly across finalized 5-minute bars prior to the current forming bar (`activeSlot`), eliminating double-counting when live ticks roll over.
 - Latency-sensitive reads utilize lock-free atomic bitcasts (`atomic.Uint64` storing float bits via `math.Float64bits`).
 - Workers and risk management goroutines communicate through bounded, non-blocking Go channels.
 
@@ -358,14 +362,14 @@ stateDiagram-v2
 ```
 
 - **Cancellation Drain Window (500ms)**: After sending a cancellation to the exchange, the worker waits 500ms to absorb any late fills crossing the network.
-- **Dust Guard**: If $< 10$ shares filled, it immediately triggers an emergency flatten to prevent tiny orphan positions with disproportionate brokerage fees.
-- **Partial Fill Promotion**: If $\ge 10$ shares filled, it recalculates risk for the exact filled size and places the stop loss at break-even.
+- **Dynamic Dust Guard**: If filled shares $< \text{DustFloorQty}$ (dynamically calculated so expected profit at $+1.0R$ covers actual statutory taxes and flat ₹20 brokerage), it immediately triggers an emergency flatten to prevent tiny orphan positions with disproportionate friction.
+- **Partial Fill Promotion**: If filled shares $\ge \text{DustFloorQty}$, it recalculates risk for the exact filled size and places a custom stop loss at break-even.
 
 ### 3. The 4-Gear Dynamic Trailing Stop Ratchet
 As the trade moves in our favor, stop loss management shifts through four distinct algorithmic gears designed to respect the **NSE maximum 25 order modifications per day**:
 - **Gear 1 (Agile Dynamic Trail)**: Mods 1–18. Minimum advance $\ge \max(2\text{ ticks}, 0.12 \times \text{BaseBuffer})$ with a 350ms cooldown. Moves the stop quickly out of the initial danger zone based on real-time order flow $M_{\text{flow}}$.
 - **Early Breakeven Protection (+1.00R)**: Once the trade reaches $+1.00R$, the stop loss is automatically ratcheted to **Tax-Free Breakeven** ($P_{\text{entry}} + \text{Taxes} + 0.15\%$). Per Dr. Samir Varma & Rishi Narang, ratcheting at $+0.50R$ suffocates valid trends in normal Brownian noise; moving to BE at $+1.00R$ lets the trade breathe while locking in net profitability.
-- **Tranche 1 Asymmetric Scale-Out (+1.50R)**: When the trade reaches $+1.50R$, the worker executes a 3-step race-free scale-out: shrinks resting SL quantity, places a marketable limit sell for 50%, and raises the runner SL to Tax-Free Breakeven.
+- **Tranche 1 Asymmetric Scale-Out (+1.50R)**: When the trade reaches $+1.50R$, the worker executes a 3-step race-free scale-out: shrinks resting SL quantity, places a marketable limit sell for 50%, and raises the runner SL to Tax-Free Breakeven. For 1-share positions (where halving is impossible), Tranche 1 is directly marked completed, and the single share ratchets immediately to Breakeven via `worker.ProposeStopRatchet`.
 - **Gear 3 (Coarse 5m Bar Trail)**: Mods 19–24. Minimum advance $\ge \max(0.40 \times \text{BaseBuffer}, 0.35 \times \text{ATR})$ with a 1500ms cooldown. Anchors trailing defense to completed 5-minute candle lows.
 - **Gear 4 (Virtual Shadow Stop in RAM)**: At modification 24, order modifications cease completely. The stop continues trailing virtually in RAM (`shadowStopBits`), strictly preserving **Modification #25** exclusively for emergency market exit.
 - **In-Trade Alpha Decay Stagnation Guard**: If a trade stays active for $\ge 45\text{ minutes}$ and its peak excursion has not even reached $+0.50R$, the information edge has decayed into random walk friction; the worker exits immediately at market.
