@@ -125,7 +125,8 @@ func ComputeStopAndBufferSpec(entryPrice float64, signalBarLow float64, averageT
 
 // BreakevenTriggerPrice computes the exact SL trigger price (rounded up to TickSize)
 // on remaining runner shares so that even if the runner stops out at Breakeven,
-// all round-trip statutory taxes & brokerage on the entire trade + a 2-tick/0.15% cushion are 100% covered.
+// all round-trip statutory taxes & brokerage on the entire trade are 100% covered.
+// Formula: P_breakeven = RoundUpToTick(EntryPrice + (RoundTripTaxes / runnerQuantity), TickSize)
 func BreakevenTriggerPrice(entryPrice float64, initialQuantity, runnerQuantity int, tickSize float64) float64 {
 	if tickSize <= 0 {
 		tickSize = 0.05
@@ -137,13 +138,17 @@ func BreakevenTriggerPrice(entryPrice float64, initialQuantity, runnerQuantity i
 		runnerQuantity = 1
 	}
 
-	// Calculate round-trip taxes on the original entry quantity
+	// Calculate round-trip statutory taxes and brokerage on the original entry quantity
 	roundTripTaxes := CalculateRoundTripCharges(entryPrice, entryPrice, initialQuantity)
 	perShareTax := roundTripTaxes.TotalCharges / float64(runnerQuantity)
 
-	// Cushion = max(perShareTax + 2 ticks, 0.15% of entry price)
-	minCushion := math.Max(perShareTax+2.0*tickSize, 0.0015*entryPrice)
-	return RoundUpToTick(entryPrice+minCushion, tickSize)
+	// Breakeven price must be strictly above entry price + per-share tax cost
+	minRequiredPrice := entryPrice + perShareTax
+	breakevenPrice := RoundUpToTick(minRequiredPrice, tickSize)
+	if breakevenPrice <= entryPrice {
+		breakevenPrice = RoundUpToTick(entryPrice+tickSize, tickSize)
+	}
+	return breakevenPrice
 }
 
 // ComputeSellSLLimitPrice calculates the protective limit price below triggerPrice

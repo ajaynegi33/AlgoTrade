@@ -31,6 +31,7 @@ type ScannedStock struct {
 	TickSize        float64   `json:"tick_size"`
 	LastPrice       float64   `json:"last_price"`
 	MISLeverage     float64   `json:"mis_leverage"`
+	MISMarginPct    float64   `json:"mis_margin_pct"`
 	ScanDate        string    `json:"scan_date"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
@@ -152,7 +153,7 @@ func (service *Service) GetUniverse(date string) (*UniverseSummary, error) {
 
 	query := `
 		SELECT instrument_token, tradingsymbol, name, exchange, segment, instrument_type,
-		       lot_size, tick_size, last_price, COALESCE(mis_leverage, 5.0), scan_date, updated_at
+		       lot_size, tick_size, last_price, COALESCE(mis_leverage, 0.0), COALESCE(mis_margin_pct, 0.0), scan_date, updated_at
 		FROM scanned_stocks
 		WHERE scan_date = ?
 		ORDER BY tradingsymbol ASC
@@ -180,6 +181,7 @@ func (service *Service) GetUniverse(date string) (*UniverseSummary, error) {
 			&scannedStock.TickSize,
 			&scannedStock.LastPrice,
 			&scannedStock.MISLeverage,
+			&scannedStock.MISMarginPct,
 			&scannedStock.ScanDate,
 			&updatedStr,
 		)

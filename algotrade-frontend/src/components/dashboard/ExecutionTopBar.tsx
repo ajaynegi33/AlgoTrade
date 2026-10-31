@@ -280,10 +280,24 @@ export const ExecutionTopBar = memo(function ExecutionTopBar({
 
           <div className="p-3 rounded-2xl bg-slate-50/80 border border-slate-200/70">
             <span className="text-[10px] text-slate-400 uppercase font-bold block">
-              Risk / Trade ({(capital.risk_per_trade_pct * 100).toFixed(2)}%)
+              Portfolio Heat (Max {((capital.max_portfolio_heat_pct ?? 0.03) * 100).toFixed(0)}%)
             </span>
-            <span className="text-sm font-black text-emerald-700 mt-1 block">
-              ₹{capital.current_risk_budget.toLocaleString("en-IN", { maximumFractionDigits: 0 })}
+            <span
+              className={`text-sm font-black mt-1 block ${
+                (capital.portfolio_heat_pct ?? 0) >= (capital.max_portfolio_heat_pct ?? 0.03)
+                  ? "text-rose-700"
+                  : (capital.portfolio_heat_pct ?? 0) > 0
+                  ? "text-amber-700"
+                  : "text-emerald-700"
+              }`}
+            >
+              {((capital.portfolio_heat_pct ?? 0) * 100).toFixed(1)}%{" "}
+              <span className="text-xs font-bold text-slate-500">
+                ({capital.total_open_risk_rupees ? `₹${Math.round(capital.total_open_risk_rupees)}` : "₹0"})
+              </span>
+            </span>
+            <span className="text-[10px] text-slate-500 font-semibold block mt-0.5">
+              1% Budget: ₹{capital.current_risk_budget.toLocaleString("en-IN", { maximumFractionDigits: 0 })}
             </span>
           </div>
 

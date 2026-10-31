@@ -48,7 +48,7 @@ type CapitalSummaryDTO struct {
 	CurrentRiskBudget    float64 `json:"current_risk_budget"`    // Dynamic ₹ risk budget for next trade
 	TotalOpenRiskRupees  float64 `json:"total_open_risk_rupees"` // Sum of open downside risk across active trades
 	PortfolioHeatPct     float64 `json:"portfolio_heat_pct"`     // TotalOpenRiskRupees / NetEquity (e.g. 0.015 for 1.5%)
-	MaxPortfolioHeatPct  float64 `json:"max_portfolio_heat_pct"` // Maximum allowed portfolio heat (0.02 = 2.0%)
+	MaxPortfolioHeatPct  float64 `json:"max_portfolio_heat_pct"` // Maximum allowed portfolio heat (0.03 = 3.0%)
 	MaxOpenPositions     int     `json:"max_open_positions"`     // Legacy slot limit / secondary safety ceiling
 	ActivePositionsCount int     `json:"active_positions_count"` // Currently open positions
 }

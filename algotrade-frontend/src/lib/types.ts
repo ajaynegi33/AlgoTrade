@@ -205,6 +205,9 @@ export interface CapitalSummaryData {
   net_day_pnl: number;
   risk_per_trade_pct: number;
   current_risk_budget: number;
+  total_open_risk_rupees?: number;
+  portfolio_heat_pct?: number;
+  max_portfolio_heat_pct?: number;
   max_open_positions: number;
   active_positions_count: number;
 }

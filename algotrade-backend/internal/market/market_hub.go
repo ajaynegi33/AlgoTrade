@@ -259,8 +259,14 @@ func (actor *Actor) seedUniverseFromScreener() error {
 				actor.stocks[idx].PrevClose = st.LastPrice
 				if st.MISLeverage > 0 {
 					actor.stocks[idx].MISLeverage = float32(st.MISLeverage)
+					if st.MISMarginPct > 0 {
+						actor.stocks[idx].MISMarginFraction = float32(st.MISMarginPct)
+					} else {
+						actor.stocks[idx].MISMarginFraction = float32(1.0 / st.MISLeverage)
+					}
 				} else {
-					actor.stocks[idx].MISLeverage = 5.0
+					actor.stocks[idx].MISLeverage = 0.0
+					actor.stocks[idx].MISMarginFraction = 0.0
 				}
 				actor.stocks[idx].IsTradeable = true
 			}
@@ -542,8 +548,14 @@ func (actor *Actor) runLoop() {
 				}
 				if st.MISLeverage > 0 {
 					actor.stocks[idx].MISLeverage = float32(st.MISLeverage)
+					if st.MISMarginPct > 0 {
+						actor.stocks[idx].MISMarginFraction = float32(st.MISMarginPct)
+					} else {
+						actor.stocks[idx].MISMarginFraction = float32(1.0 / st.MISLeverage)
+					}
 				} else if actor.stocks[idx].MISLeverage <= 0 {
-					actor.stocks[idx].MISLeverage = 5.0
+					actor.stocks[idx].MISLeverage = 0.0
+					actor.stocks[idx].MISMarginFraction = 0.0
 				}
 				actor.stocks[idx].IsTradeable = true
 				if !existed {

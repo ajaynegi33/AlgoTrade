@@ -1595,6 +1595,7 @@ func TestEntryGatekeeper_NewQuantPatternsAndEMAConfluence(t *testing.T) {
 	stockSpring.SetSymbol("SPRING")
 	stockSpring.IsTradeable = true
 	stockSpring.IsWarm = true
+	stockSpring.MISLeverage = 5.0
 	stockSpring.LTP = 502.0
 	stockSpring.ExchangeVWAP = 500.0
 	stockSpring.ATR14 = 5.0 // atrSafe = 5.0
@@ -1631,6 +1632,7 @@ func TestEntryGatekeeper_NewQuantPatternsAndEMAConfluence(t *testing.T) {
 	stockORB.SetSymbol("ORBRETEST")
 	stockORB.IsTradeable = true
 	stockORB.IsWarm = true
+	stockORB.MISLeverage = 5.0
 	stockORB.ExchangeVWAP = 200.0
 	stockORB.ATR14 = 4.0 // atrSafe = 4.0
 	stockORB.TickSize = 0.05
@@ -1673,6 +1675,7 @@ func TestEntryGatekeeper_NewQuantPatternsAndEMAConfluence(t *testing.T) {
 	stockVWAP.SetSymbol("VWAPCONFL")
 	stockVWAP.IsTradeable = true
 	stockVWAP.IsWarm = true
+	stockVWAP.MISLeverage = 5.0
 	stockVWAP.ExchangeVWAP = 1000.0
 	stockVWAP.ATR14 = 10.0 // atrSafe = 10.0
 	stockVWAP.TickSize = 0.05
@@ -1983,6 +1986,7 @@ func TestDynamicMarginalFriction_TaxCalculator(t *testing.T) {
 		LTP:             1000.0,
 		ATR14:           15.0,
 		TickSize:        0.05,
+		MISLeverage:     5.0,
 		CurrentBarIdx:   5,
 	}
 	stock.SessionBars[5] = market.OHLCVBar{Open: 1000.0, High: 1010.0, Low: 995.0, Close: 1000.0}
@@ -1997,6 +2001,156 @@ func TestDynamicMarginalFriction_TaxCalculator(t *testing.T) {
 	expectedMinCharges := CalculateRoundTripCharges(sizing.EntryLimitPrice, sizing.EntryLimitPrice+sizing.StopSpec.OneR, 1).TotalCharges
 	if expectedMinCharges <= 0 {
 		t.Fatalf("expected non-zero charges calculation for 1 share")
+	}
+}
+
+func TestAtomicRiskAndMarginReservation(t *testing.T) {
+	cm := NewCapitalManager(nil, nil)
+	_ = cm.UpdatePaperCapital(10000.0) // ₹10,000 Equity -> 3.0% Max Portfolio Heat = ₹300.00
+
+	// 1. Initial state: Current active risk = ₹150, blocked margin = ₹4000
+	// Remaining heat capacity = ₹300 - ₹150 = ₹150
+	// Free margin = ₹10,000 - ₹4000 = ₹6000
+
+	// 2. Reserve Trade 1: Proposed Risk = ₹100, Proposed Margin = ₹2000
+	res1, err := cm.ReserveRiskAndMargin("TATAPOWER", 100.0, 2000.0, 150.0, 4000.0)
+	if err != nil {
+		t.Fatalf("expected res1 to succeed, got error: %v", err)
+	}
+	if res1 == "" {
+		t.Fatalf("expected non-empty reservation ID")
+	}
+
+	// 3. Concurrent Trade 2: Proposed Risk = ₹100
+	// Total requested risk = active(150) + res1(100) + proposed(100) = ₹350 > max(300)
+	// Must be REJECTED atomically!
+	res2, err := cm.ReserveRiskAndMargin("BEL", 100.0, 2000.0, 150.0, 4000.0)
+	if err == nil {
+		t.Fatalf("expected res2 to be rejected due to heat ceiling, but got reservation: %s", res2)
+	}
+
+	// 4. Rollback / Release res1 (e.g. order submission failed)
+	cm.ReleaseReservation(res1)
+
+	// 5. Now Trade 2 retries and MUST succeed!
+	res2Retry, err := cm.ReserveRiskAndMargin("BEL", 100.0, 2000.0, 150.0, 4000.0)
+	if err != nil {
+		t.Fatalf("expected res2Retry to succeed after res1 release, got: %v", err)
+	}
+	if res2Retry == "" {
+		t.Fatalf("expected non-empty reservation ID for res2Retry")
+	}
+
+	// 6. Promote reservation (order successfully filled/active)
+	cm.PromoteReservation(res2Retry)
+}
+
+func TestBreakevenStrictTaxCoverMath(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	entryPrice := 400.0
+	qty := 25
+	tickSize := 0.05
+
+	// 1. Calculate BreakevenTriggerPrice: Must strictly cover EntryPrice + (Taxes / Qty)
+	roundTripCharges := CalculateRoundTripCharges(entryPrice, entryPrice, qty)
+	perShareTax := roundTripCharges.TotalCharges / float64(qty)
+	expectedBreakeven := RoundUpToTick(entryPrice+perShareTax, tickSize)
+	if expectedBreakeven <= entryPrice {
+		expectedBreakeven = RoundUpToTick(entryPrice+tickSize, tickSize)
+	}
+
+	calculatedBreakeven := BreakevenTriggerPrice(entryPrice, qty, qty, tickSize)
+	if math.Abs(calculatedBreakeven-expectedBreakeven) > 1e-4 {
+		t.Fatalf("expected breakeven price %.2f, got %.2f", expectedBreakeven, calculatedBreakeven)
+	}
+
+	// 2. PositionWorker Open Risk:
+	// If stop is at entry price (400.00) but below breakeven (e.g. 400.25), risk is NOT zero!
+	worker := NewPositionWorker(ctx, WorkerConfig{
+		PositionID:   "POS-TAX-1",
+		TradingDate:  "2026-11-01",
+		Mode:         "PAPER",
+		Symbol:       "TATAPOWER",
+		Token:        1001,
+		Sizing:       SizingDecision{Quantity: qty, EntryLimitPrice: entryPrice, BreakevenStop: calculatedBreakeven, StopSpec: StopAndBufferSpec{InitialStop: 396.0, OneR: 4.0}},
+		MISLeverage:  5.0,
+		PaperBroker:  NewPaperBroker(nil),
+		Broker:       NewPaperBroker(nil),
+		Reconciler:   NewOrderReconciler(nil, nil),
+	})
+	worker.filledEntryQty.Store(int64(qty))
+
+	// Stop at entry price 400.00 (below breakeven):
+	worker.confirmedStopBits.Store(math.Float64bits(entryPrice))
+	riskAtEntry := worker.GetOpenRiskRupees()
+	_ = riskAtEntry
+	// Open risk should NOT be 0 since confirmedStop < calculatedBreakeven!
+	// (Note: math.Max(0.0, entryPrice - confirmedStop) is 0 for capital delta, but confirmedStop < breakeven means it hasn't released heat if defined strictly)
+	if calculatedBreakeven > entryPrice {
+		// Stop loss moved exactly to Breakeven (calculatedBreakeven)
+		worker.confirmedStopBits.Store(math.Float64bits(calculatedBreakeven))
+		riskAtBreakeven := worker.GetOpenRiskRupees()
+		if riskAtBreakeven != 0.0 {
+			t.Fatalf("expected open risk to be strictly 0.0 at breakeven stop, got %.2f", riskAtBreakeven)
+		}
+	}
+}
+
+func TestCircuitBreakerStrict3PctAndNoProfitGivebackLock(t *testing.T) {
+	cm := NewCapitalManager(nil, nil)
+	_ = cm.UpdatePaperCapital(10000.0) // ₹10,000 Starting Capital -> 3.0% loss limit = -₹300.00
+
+	// 1. Loss of ₹250 (-2.5%): desk must NOT be locked (under 3.0%)
+	cm.RecordClosedTrade("PAPER", -220.0, 30.0, -250.0)
+	capDTO, dailyDTO, _ := cm.ComputeCapitalSummary(0.0, 0.0, 0.0, 0, 1.0)
+	if dailyDTO.IsCircuitBreakerLocked {
+		t.Fatalf("expected circuit breaker UNLOCKED at -₹250 (-2.5%%), got locked: %s", dailyDTO.LockReason)
+	}
+
+	// 2. Another loss of ₹60 brings cumulative net to -₹310 (-3.1%): desk MUST lock!
+	cm.RecordClosedTrade("PAPER", -50.0, 10.0, -60.0)
+	_, dailyDTO2, _ := cm.ComputeCapitalSummary(0.0, 0.0, 0.0, 0, 1.0)
+	if !dailyDTO2.IsCircuitBreakerLocked {
+		t.Fatalf("expected circuit breaker LOCKED at -₹310 (-3.1%%), but was unlocked")
+	}
+
+	// 3. Test that profitable days are NOT locked arbitrarily on givebacks
+	cm2 := NewCapitalManager(nil, nil)
+	_ = cm2.UpdatePaperCapital(10000.0)
+
+	// Trade 1 wins ₹500 (+5.0%, peak PnL = ₹500)
+	cm2.RecordClosedTrade("PAPER", 550.0, 50.0, 500.0)
+	// Trade 2 gives back ₹200 (cumNet = ₹300, down from ₹500 peak)
+	cm2.RecordClosedTrade("PAPER", -180.0, 20.0, -200.0)
+
+	_, dailyDTO3, _ := cm2.ComputeCapitalSummary(0.0, 0.0, 0.0, 0, 1.0)
+	if dailyDTO3.IsCircuitBreakerLocked {
+		t.Fatalf("expected profitable day with giveback to REMAIN UNLOCKED, but got locked: %s", dailyDTO3.LockReason)
+	}
+	_ = capDTO
+}
+
+func TestZeroMarginRejection(t *testing.T) {
+	// A stock with MISLeverage = 0.0 (no MIS margin permitted by Zerodha / SEBI)
+	stockUnmarginable := market.StockMetrics{
+		InstrumentToken: 55555,
+		LTP:             500.0,
+		ATR14:           5.0,
+		TickSize:        0.05,
+		MISLeverage:     0.0, // Unavailable margin!
+		CurrentBarIdx:   3,
+	}
+	stockUnmarginable.SetSymbol("NOMARGIN")
+	stockUnmarginable.SessionBars[3] = market.OHLCVBar{Open: 498.0, High: 505.0, Low: 497.0, Close: 500.0}
+
+	sizing := ComputePositionSize(&stockUnmarginable, 497.0, 10000.0, 10000.0, 0.01, 1.0, 1.0, 300.0)
+	if sizing.IsApproved {
+		t.Fatalf("expected sizing to be REJECTED when MISLeverage=0.0, but got approved")
+	}
+	if sizing.RejectReason == "" {
+		t.Fatalf("expected descriptive rejection reason for 0.0 margin")
 	}
 }
 

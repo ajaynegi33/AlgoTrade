@@ -231,7 +231,7 @@ func (manager *Manager) OnSecondTick(
 		sessionClock.SizeMultiplier,
 	)
 
-	maxPortfolioHeatRupees := 0.02 * capDTO.NetEquity
+	maxPortfolioHeatRupees := 0.03 * capDTO.NetEquity // 3.0% Max Portfolio Heat
 	remainingHeatBudgetRupees := math.Max(0.0, maxPortfolioHeatRupees-totalOpenRiskRupees)
 	var portfolioHeatPercentage float64
 	if capDTO.NetEquity > 0 {
@@ -267,13 +267,13 @@ func (manager *Manager) OnSecondTick(
 		gateReason = "Zerodha Kite session is disconnected. Authenticate to trade in LIVE mode."
 	} else if isPortfolioHeatExceeded {
 		gateStatus = "LOCKED_MAX_PORTFOLIO_HEAT"
-		gateReason = fmt.Sprintf("Max Portfolio Heat (%.2f%% / 2.00%%) reached. Open risk is ₹%.2f. Awaiting active stops to trail to breakeven.",
+		gateReason = fmt.Sprintf("Max Portfolio Heat (%.2f%% / 3.00%%) reached. Open risk is ₹%.2f. Awaiting active stops to trail to breakeven.",
 			portfolioHeatPercentage*100.0, totalOpenRiskRupees)
 	} else if settings.AutoExecute {
 		gateStatus = pickStatus
 		gateReason = pickReason
 		if candidate != nil {
-			manager.spawnCandidateWorker(*candidate, settings.Mode, &stocks[candidate.StockIndex])
+			manager.spawnCandidateWorker(*candidate, settings.Mode, &stocks[candidate.StockIndex], totalOpenRiskRupees, blockedMargin)
 		}
 	} else if candidate != nil {
 		gateStatus = "PAUSED_SIGNAL_READY"
@@ -311,12 +311,28 @@ func (manager *Manager) isSymbolUnavailable(symbol string, _ uint32) bool {
 	return false
 }
 
-func (manager *Manager) spawnCandidateWorker(candidate CandidateSignal, mode string, targetStock *market.StockMetrics) {
+func (manager *Manager) spawnCandidateWorker(candidate CandidateSignal, mode string, targetStock *market.StockMetrics, activeOpenRisk, activeBlockedMargin float64) {
 	manager.mu.Lock()
 	if _, exists := manager.symbolToWorker[candidate.Symbol]; exists {
 		manager.mu.Unlock()
 		return
 	}
+
+	// 1. Atomic Risk & Margin Reservation:
+	// Eliminates the TOCTOU concurrency race where two goroutines evaluate capacity simultaneously.
+	reservationID, err := manager.capitalMgr.ReserveRiskAndMargin(
+		candidate.Symbol,
+		candidate.Sizing.RiskBudgetRupees,
+		candidate.Sizing.RequiredMargin,
+		activeOpenRisk,
+		activeBlockedMargin,
+	)
+	if err != nil {
+		manager.mu.Unlock()
+		slog.Warn("Atomic risk reservation rejected entry", "symbol", candidate.Symbol, "error", err)
+		return
+	}
+
 	seq := manager.posSeq.Add(1)
 	positionID := fmt.Sprintf("POS-%s-%d", candidate.Symbol, seq)
 	todayStr := market.TodayDateIST()
@@ -327,8 +343,8 @@ func (manager *Manager) spawnCandidateWorker(candidate CandidateSignal, mode str
 	}
 
 	misLeverage := float64(targetStock.MISLeverage)
-	if misLeverage < 1.0 {
-		misLeverage = 5.0
+	if misLeverage <= 0 {
+		misLeverage = 1.0 // 100% cash / CNC requirement if no MIS permitted
 	}
 
 	worker := NewPositionWorker(manager.ctx, WorkerConfig{
@@ -364,7 +380,13 @@ func (manager *Manager) spawnCandidateWorker(candidate CandidateSignal, mode str
 	go func() {
 		if err := worker.Start(); err != nil {
 			slog.Warn("Candidate PositionWorker failed to start", "symbol", candidate.Symbol, "error", err)
+			manager.capitalMgr.ReleaseReservation(reservationID)
+			manager.mu.Lock()
+			delete(manager.activeWorkers, positionID)
+			delete(manager.symbolToWorker, candidate.Symbol)
+			manager.mu.Unlock()
 		} else {
+			manager.capitalMgr.PromoteReservation(reservationID)
 			slog.Info("Spawned autonomous PositionWorker",
 				"position_id", positionID,
 				"mode", mode,

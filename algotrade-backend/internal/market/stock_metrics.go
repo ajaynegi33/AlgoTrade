@@ -106,7 +106,7 @@ type StockMetrics struct {
 	AggressorBuyRatio  float32 // BarBuyVolume / (BarBuyVolume + BarSellVolume)
 	MISLeverage        float32 // Cached Zerodha MIS leverage (e.g. 5.0x for 20% VaR)
 	FastAggressorEMA   float32 // Fast alpha=0.25 tick-delta aggressor EMA for <1s shock detection
-	_pad4              uint32  // Explicit 4-byte padding to align Group 2 to 40 bytes
+	MISMarginFraction  float32 // Cached Zerodha MIS margin fraction (e.g. 0.20 for 5x, 0.0 if not permitted)
 
 	// -------------------------------------------------------------------------
 	// 3. Two-Byte Types (uint16, ReasonFlag) - 2 fields * 2B = 4 bytes

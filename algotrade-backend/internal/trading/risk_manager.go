@@ -24,6 +24,16 @@ type ExecutionSettings struct {
 	MaxOpenPositions int     `json:"max_open_positions"` // Default 4
 }
 
+// RiskReservation represents an atomic in-flight risk and margin allocation
+// held while an order is being placed, preventing concurrent double-allocation.
+type RiskReservation struct {
+	ReservationID  string    `json:"reservation_id"`
+	Symbol         string    `json:"symbol"`
+	ReservedRisk   float64   `json:"reserved_risk"`
+	ReservedMargin float64   `json:"reserved_margin"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
 // CapitalManager manages real-time Zerodha & Paper capital, margin reservation, and daily circuit breakers
 type CapitalManager struct {
 	db          *sql.DB
@@ -35,6 +45,9 @@ type CapitalManager struct {
 	liveFreeMargin    float64
 	liveGrossBase     float64
 	lastLiveRefreshAt time.Time
+
+	// Atomic in-flight risk & margin reservations
+	activeReservations map[string]RiskReservation
 
 	// Ledger per mode ("PAPER" | "LIVE")
 	dailyLedger map[string]*market.DailyRiskDTO
@@ -57,6 +70,7 @@ func NewCapitalManager(db *sql.DB, kiteService *kite.Service) *CapitalManager {
 			RiskPerTradePct:  0.005,
 			MaxOpenPositions: 4,
 		},
+		activeReservations:  make(map[string]RiskReservation),
 		dailyLedger:         make(map[string]*market.DailyRiskDTO),
 		realisedGrossByMode: make(map[string]float64),
 		totalChargesByMode:  make(map[string]float64),
@@ -175,24 +189,15 @@ func (cm *CapitalManager) ReconcileWithPositionsDB(mode string) {
 }
 
 func (cm *CapitalManager) evaluateCircuitBreakersLocked(mode string, ledger *market.DailyRiskDTO, cumNet float64) {
-	baseCap := cm.settings.PaperCapital
+	dailyStartingAccountEquity := cm.settings.PaperCapital
 	if mode == "LIVE" && cm.liveGrossBase > 0 {
-		baseCap = cm.liveGrossBase
+		dailyStartingAccountEquity = cm.liveGrossBase
 	}
-	oneR := baseCap * cm.settings.RiskPerTradePct
 
-	// 1. Max Daily Loss Circuit Breaker (-2.0% of Capital or -3.0R)
-	if baseCap > 0 && cumNet <= -0.020*baseCap {
+	// Strict 3.0% Max Daily Loss Circuit Breaker relative to Day's Starting Capital
+	if dailyStartingAccountEquity > 0 && cumNet <= -0.030*dailyStartingAccountEquity {
 		ledger.IsCircuitBreakerLocked = true
-		ledger.LockReason = fmt.Sprintf("Max Daily Loss Reached (₹%.0f / -2.0%% cap)", cumNet)
-	} else if ledger.ConsecutiveLosses >= 2 {
-		// 2. 2 Consecutive Losses Lockout (Preserves capital; stop for the day)
-		ledger.IsCircuitBreakerLocked = true
-		ledger.LockReason = "2 Consecutive Losses Circuit Breaker"
-	} else if oneR > 0 && ledger.PeakNetPnL >= 2.0*oneR && cumNet <= 0.55*ledger.PeakNetPnL {
-		// 3. Profit-Giveback Lock (Protects banked green days once PeakNetPnL >= +2.0R)
-		ledger.IsCircuitBreakerLocked = true
-		ledger.LockReason = fmt.Sprintf("Profit-Giveback Lock (Protected ₹%.0f from ₹%.0f peak)", cumNet, ledger.PeakNetPnL)
+		ledger.LockReason = fmt.Sprintf("Max Daily Loss Reached (₹%.0f / -3.0%% cap)", cumNet)
 	}
 }
 
@@ -394,9 +399,25 @@ func (cm *CapitalManager) ComputeCapitalSummary(
 	deployedExposure := math.Round(blockedMargin * 5.0 * 100.0) / 100.0
 	freeBuyingPower5x := math.Round(freeMargin * 5.0 * 100.0) / 100.0
 
+	// Evict stale in-flight reservations older than 15s and sum active ones
+	now := time.Now()
+	var totalReservedRisk, totalReservedMargin float64
+	for id, res := range cm.activeReservations {
+		if now.Sub(res.CreatedAt) > 15*time.Second {
+			delete(cm.activeReservations, id)
+			continue
+		}
+		totalReservedRisk += res.ReservedRisk
+		totalReservedMargin += res.ReservedMargin
+	}
+
+	effectiveTotalOpenRisk := totalOpenRiskRupees + totalReservedRisk
+	effectiveBlockedMargin := blockedMargin + totalReservedMargin
+	freeMargin = math.Max(0, freeMargin-totalReservedMargin)
+
 	var portfolioHeatPct float64
 	if netEquity > 0 {
-		portfolioHeatPct = totalOpenRiskRupees / netEquity
+		portfolioHeatPct = effectiveTotalOpenRisk / netEquity
 	}
 
 	capDTO := market.CapitalSummaryDTO{
@@ -404,7 +425,7 @@ func (cm *CapitalManager) ComputeCapitalSummary(
 		PaperCapital:         cm.settings.PaperCapital,
 		NetEquity:            math.Round(netEquity*100.0) / 100.0,
 		FreeMargin:           math.Round(freeMargin*100.0) / 100.0,
-		BlockedMargin:        math.Round(blockedMargin*100.0) / 100.0,
+		BlockedMargin:        math.Round(effectiveBlockedMargin*100.0) / 100.0,
 		BuyingPower5x:        buyingPower5x,
 		DeployedExposure:     deployedExposure,
 		FreeBuyingPower5x:    freeBuyingPower5x,
@@ -415,9 +436,9 @@ func (cm *CapitalManager) ComputeCapitalSummary(
 		NetDayPnL:            math.Round((netPnL+unrealisedPnL)*100.0) / 100.0,
 		RiskPerTradePct:      effRiskPct,
 		CurrentRiskBudget:    math.Round(currentRiskBudget*100.0) / 100.0,
-		TotalOpenRiskRupees:  math.Round(totalOpenRiskRupees*100.0) / 100.0,
+		TotalOpenRiskRupees:  math.Round(effectiveTotalOpenRisk*100.0) / 100.0,
 		PortfolioHeatPct:     math.Round(portfolioHeatPct*10000.0) / 10000.0,
-		MaxPortfolioHeatPct:  0.02,
+		MaxPortfolioHeatPct:  0.03,
 		MaxOpenPositions:     cm.settings.MaxOpenPositions,
 		ActivePositionsCount: activeCount,
 	}
@@ -460,6 +481,109 @@ func (cm *CapitalManager) RecordClosedTrade(mode string, grossPnL, charges, netP
 
 	cm.evaluateCircuitBreakersLocked(mode, ledger, cumNet)
 	cm.persistDailyLedgerLocked(mode, ledger, cm.realisedGrossByMode[mode], cm.totalChargesByMode[mode], cumNet)
+}
+
+// ReserveRiskAndMargin atomically validates and reserves risk and margin under the manager lock.
+// This eliminates the TOCTOU concurrency race where two goroutines evaluate capacity simultaneously.
+func (cm *CapitalManager) ReserveRiskAndMargin(
+	symbol string,
+	proposedRiskRupees float64,
+	proposedMarginRupees float64,
+	activeOpenRisk float64,
+	activeBlockedMargin float64,
+) (string, error) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.ensureCurrentTradingDateLocked()
+
+	// 1. Evict stale reservations older than 15 seconds
+	now := time.Now()
+	for id, res := range cm.activeReservations {
+		if now.Sub(res.CreatedAt) > 15*time.Second {
+			delete(cm.activeReservations, id)
+		}
+	}
+
+	mode := cm.settings.Mode
+	ledger := cm.dailyLedger[mode]
+	if ledger != nil && ledger.IsCircuitBreakerLocked {
+		return "", fmt.Errorf("daily circuit breaker is locked: %s", ledger.LockReason)
+	}
+
+	// 2. Compute live equity and free margin
+	var netEquity, freeMargin float64
+	netPnL := cm.realisedNetByMode[mode]
+	if mode == "LIVE" {
+		freeMargin = math.Max(0, cm.liveFreeMargin)
+		if cm.liveGrossBase > 0 {
+			netEquity = math.Max(freeMargin+activeBlockedMargin, cm.liveGrossBase+netPnL)
+		} else {
+			netEquity = freeMargin + activeBlockedMargin
+		}
+	} else {
+		baseCap := cm.settings.PaperCapital
+		netEquity = math.Max(0, baseCap+netPnL)
+		freeMargin = math.Max(0, baseCap+netPnL-activeBlockedMargin)
+	}
+
+	if netEquity <= 0 {
+		return "", errors.New("insufficient account equity (net equity <= 0)")
+	}
+
+	// 3. Sum all existing in-flight reservations
+	var totalReservedRisk, totalReservedMargin float64
+	for _, res := range cm.activeReservations {
+		totalReservedRisk += res.ReservedRisk
+		totalReservedMargin += res.ReservedMargin
+	}
+
+	// 4. Wall 1: Risk Heat Ceiling (Strict 3.0% limit)
+	maxPortfolioHeatRupees := 0.03 * netEquity
+	effectiveOpenRisk := activeOpenRisk + totalReservedRisk
+	if effectiveOpenRisk+proposedRiskRupees > maxPortfolioHeatRupees+1e-6 {
+		return "", fmt.Errorf("max portfolio heat (3.0%% = ₹%.2f) exceeded: current open=₹%.2f, reserved=₹%.2f, proposed=₹%.2f",
+			maxPortfolioHeatRupees, activeOpenRisk, totalReservedRisk, proposedRiskRupees)
+	}
+
+	// 5. Wall 2: Broker Margin Floor (Free Cash Margin check)
+	availableCashMargin := freeMargin - totalReservedMargin
+	if proposedMarginRupees > availableCashMargin {
+		return "", fmt.Errorf("insufficient free cash margin: available=₹%.2f, reserved=₹%.2f, proposed=₹%.2f",
+			freeMargin, totalReservedMargin, proposedMarginRupees)
+	}
+
+	// 6. Atomically record the reservation token
+	reservationID := fmt.Sprintf("RES-%s-%d", symbol, now.UnixNano())
+	cm.activeReservations[reservationID] = RiskReservation{
+		ReservationID:  reservationID,
+		Symbol:         symbol,
+		ReservedRisk:   proposedRiskRupees,
+		ReservedMargin: proposedMarginRupees,
+		CreatedAt:      now,
+	}
+
+	return reservationID, nil
+}
+
+// ReleaseReservation frees an in-flight reservation if order submission fails or is rejected
+func (cm *CapitalManager) ReleaseReservation(reservationID string) {
+	if reservationID == "" {
+		return
+	}
+	cm.mu.Lock()
+	delete(cm.activeReservations, reservationID)
+	cm.mu.Unlock()
+}
+
+// PromoteReservation cleans up the reservation when the position worker is successfully spawned,
+// seamlessly transferring risk tracking to the active worker.
+func (cm *CapitalManager) PromoteReservation(reservationID string) {
+	if reservationID == "" {
+		return
+	}
+	cm.mu.Lock()
+	delete(cm.activeReservations, reservationID)
+	cm.mu.Unlock()
 }
 
 // SyncUniverseLeverages queries Zerodha POST /margins/orders in 50-stock chunks using LIMIT @ ₹1000
@@ -534,14 +658,18 @@ func (cm *CapitalManager) SyncUniverseLeverages(ctx context.Context) {
 
 		tx, txErr := cm.db.Begin()
 		if txErr == nil {
-			stmt, sErr := tx.Prepare(`UPDATE scanned_stocks SET mis_leverage = ? WHERE tradingsymbol = ?`)
+			stmt, sErr := tx.Prepare(`UPDATE scanned_stocks SET mis_leverage = ?, mis_margin_pct = ? WHERE tradingsymbol = ?`)
 			if sErr == nil {
 				for _, m := range margins {
 					if m.Total > 0 && m.TradingSymbol != "" {
+						marginPct := math.Round((m.Total/1000.0)*10000.0) / 10000.0
 						lev := math.Round((1000.0/m.Total)*100.0) / 100.0
 						lev = math.Max(1.0, math.Min(5.0, lev))
-						_, _ = stmt.Exec(lev, m.TradingSymbol)
+						_, _ = stmt.Exec(lev, marginPct, m.TradingSymbol)
 						updatedCount++
+					} else if m.TradingSymbol != "" {
+						// Stock not permitted for MIS intraday leverage: store 0.0, never assume 5x
+						_, _ = stmt.Exec(0.0, 0.0, m.TradingSymbol)
 					}
 				}
 				stmt.Close()

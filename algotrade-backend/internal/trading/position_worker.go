@@ -246,8 +246,13 @@ func (worker *PositionWorker) GetOpenRiskRupees() float64 {
 	confirmedStop := math.Float64frombits(worker.confirmedStopBits.Load())
 	breakevenStop := worker.GetBreakevenStop()
 
-	// Breakeven Heat Release: Once stop is at or above Breakeven, downside risk to account equity is 0!
-	if (breakevenStop > 0 && confirmedStop >= breakevenStop) || confirmedStop >= entryPrice {
+	// Breakeven Heat Release: Risk is strictly 0.0 if and only if the stop loss reaches or exceeds BreakevenStop
+	// (which guarantees that EntryPrice + per-share taxes are 100% covered).
+	targetBreakeven := breakevenStop
+	if targetBreakeven <= 0 {
+		targetBreakeven = entryPrice
+	}
+	if confirmedStop >= targetBreakeven {
 		return 0
 	}
 
@@ -264,7 +269,7 @@ func (worker *PositionWorker) GetOpenRiskRupees() float64 {
 	}
 
 	// Case 2: Active filled position with stop still below breakeven
-	if confirmedStop <= 0 || confirmedStop >= entryPrice {
+	if confirmedStop <= 0 || confirmedStop >= targetBreakeven {
 		return 0
 	}
 	return math.Max(0.0, entryPrice-confirmedStop) * float64(remainingShares)

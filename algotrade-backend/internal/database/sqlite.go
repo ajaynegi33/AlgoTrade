@@ -289,7 +289,8 @@ func runMigrations(db *sql.DB) error {
 	}
 
 	// Idempotent column migrations
-	_, _ = db.Exec(`ALTER TABLE scanned_stocks ADD COLUMN mis_leverage REAL NOT NULL DEFAULT 5.0;`)
+	_, _ = db.Exec(`ALTER TABLE scanned_stocks ADD COLUMN mis_leverage REAL NOT NULL DEFAULT 0.0;`)
+	_, _ = db.Exec(`ALTER TABLE scanned_stocks ADD COLUMN mis_margin_pct REAL NOT NULL DEFAULT 0.0;`)
 	_, _ = db.Exec(`ALTER TABLE positions ADD COLUMN exit_price REAL NOT NULL DEFAULT 0.0;`)
 	_, _ = db.Exec(`ALTER TABLE positions ADD COLUMN low_water_mark REAL NOT NULL DEFAULT 0.0;`)
 	_, _ = db.Exec(`ALTER TABLE positions ADD COLUMN mfe_r REAL NOT NULL DEFAULT 0.0;`)

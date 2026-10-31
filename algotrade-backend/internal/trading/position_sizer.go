@@ -152,19 +152,26 @@ func ComputePositionSize(
 		riskBudget = math.Max(riskBudget, netEquity*0.0075)
 	}
 
-	// Cap risk budget by remaining portfolio heat capacity (2.0% equity ceiling)
+	// Cap risk budget by remaining portfolio heat capacity (3.0% equity ceiling)
 	if remainingHeatBudgetRupees > 0 {
 		riskBudget = math.Min(riskBudget, remainingHeatBudgetRupees)
 	} else if remainingHeatBudgetRupees == 0 {
 		return SizingDecision{
 			IsApproved:   false,
-			RejectReason: "portfolio heat capacity exhausted (2.0% equity heat limit reached)",
+			RejectReason: "portfolio heat capacity exhausted (3.0% equity heat limit reached)",
 		}
 	}
 
-	leverage := float64(stockMetrics.MISLeverage)
-	if leverage < 1.0 || leverage > 5.0 {
-		leverage = 5.0
+	misIntradayLeverageMultiplier := float64(stockMetrics.MISLeverage)
+	if misIntradayLeverageMultiplier <= 0 {
+		// Stock not permitted for MIS margin by Zerodha / SEBI: reject setup
+		return SizingDecision{
+			IsApproved:   false,
+			RejectReason: fmt.Sprintf("stock %s has no MIS intraday margin permitted (leverage=0.0)", stockMetrics.SymbolString()),
+		}
+	}
+	if misIntradayLeverageMultiplier > 5.0 {
+		misIntradayLeverageMultiplier = 5.0
 	}
 
 	// Estimate per-share tax + slippage friction at tentative quantity
@@ -176,18 +183,18 @@ func ComputePositionSize(
 	// THE 4 INSTITUTIONAL SIZING CONSTRAINTS
 	// =========================================================================
 
-	// Constraint 1: Risk-Capped Quantity
-	riskCappedQuantity := int(math.Floor(riskBudget / (stopSpec.OneR + perShareFriction)))
+	// Constraint 1: Risk-Capped Quantity (shares allowed by 1% risk budget)
+	sharesAllowedByRiskBudget := int(math.Floor(riskBudget / (stopSpec.OneR + perShareFriction)))
 
-	// Constraint 2: Margin-Capped Quantity (with 5% RMS safety buffer)
-	marginCappedQuantity := int(math.Floor((0.95 * freeMargin * leverage) / entryLimitPrice))
+	// Constraint 2: Margin-Capped Quantity (maximizes broker leverage to minimize cash footprint, 5% RMS buffer)
+	sharesAllowedByMarginLimit := int(math.Floor((0.95 * freeMargin * misIntradayLeverageMultiplier) / entryLimitPrice))
 
 	// Constraint 3: Single-Stock Concentration Cap
 	concentrationFactor := StandardConcentrationRatio
 	if netEquity < 25000.0 {
 		concentrationFactor = MicroConcentrationRatio
 	}
-	concentrationCappedQuantity := int(math.Floor((concentrationFactor * netEquity * leverage) / entryLimitPrice))
+	concentrationCappedQuantity := int(math.Floor((concentrationFactor * netEquity * misIntradayLeverageMultiplier) / entryLimitPrice))
 
 	// Constraint 4: Order-Book Top-3 Ask Liquidity Cap (never sweep more than 20% of visible depth)
 	var askTop3Qty uint64
@@ -197,19 +204,19 @@ func ComputePositionSize(
 	liquidityCappedQuantity := max(1, int(math.Floor(MaxTop3AskLiquidityRatio*float64(askTop3Qty))))
 
 	// Micro-Capital Allowance (₹500 to ₹25,000 accounts):
-	// If riskCappedQuantity == 0 because 0.5% of ₹1,000 is ₹5, allow 1 share if margin covers it and max loss <= 2.0% of NetEquity
-	if riskCappedQuantity == 0 && netEquity < 25000.0 && marginCappedQuantity >= 1 {
+	// If sharesAllowedByRiskBudget == 0 because 0.5% of ₹1,000 is ₹5, allow 1 share if margin covers it and max loss <= 2.0% of NetEquity
+	if sharesAllowedByRiskBudget == 0 && netEquity < 25000.0 && sharesAllowedByMarginLimit >= 1 {
 		if (stopSpec.OneR + perShareFriction) <= 0.02*netEquity {
-			riskCappedQuantity = 1
+			sharesAllowedByRiskBudget = 1
 		}
 	}
 
 	// Final Allocated Quantity = Min across all 4 constraints
-	allocatedQuantity := min(riskCappedQuantity, min(marginCappedQuantity, min(concentrationCappedQuantity, liquidityCappedQuantity)))
+	allocatedQuantity := min(sharesAllowedByRiskBudget, min(sharesAllowedByMarginLimit, min(concentrationCappedQuantity, liquidityCappedQuantity)))
 	if allocatedQuantity <= 0 {
 		return SizingDecision{
 			IsApproved:   false,
-			RejectReason: fmt.Sprintf("quantity constrained to 0 (qRisk=%d, qMargin=%d, qConc=%d, qLiq=%d)", riskCappedQuantity, marginCappedQuantity, concentrationCappedQuantity, liquidityCappedQuantity),
+			RejectReason: fmt.Sprintf("quantity constrained to 0 (qRisk=%d, qMargin=%d, qConc=%d, qLiq=%d)", sharesAllowedByRiskBudget, sharesAllowedByMarginLimit, concentrationCappedQuantity, liquidityCappedQuantity),
 		}
 	}
 
@@ -243,9 +250,9 @@ func ComputePositionSize(
 	minViableQty := min(max(1, marginalViableQty), maxDustAllowed)
 
 	// Calculate Breakeven Stop on runner tranche using stoploss.go
-	runnerQty := max(1, allocatedQuantity-(allocatedQuantity/2))
+	runnerQty := allocatedQuantity // 100% runner policy to prevent double-brokerage and tax churn
 	beStop := BreakevenTriggerPrice(entryLimitPrice, allocatedQuantity, runnerQty, tickSize)
-	reqMargin := (float64(allocatedQuantity) * entryLimitPrice) / leverage
+	reqMargin := (float64(allocatedQuantity) * entryLimitPrice) / misIntradayLeverageMultiplier
 
 	// Target Projections: R1 target at +0.65R (scale-out), R2 target at +1.65R (runner expansion)
 	targetR1 := RoundUpToTick(entryLimitPrice+0.65*stopSpec.OneR, tickSize)
