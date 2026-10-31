@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, memo } from "react";
+import React, { useState, useEffect, memo } from "react";
 import { ExecutionStateData } from "@/lib/types";
 import { PaperFundsModal } from "./PaperFundsModal";
 import { toast } from "sonner";
@@ -29,6 +29,18 @@ export const ExecutionTopBar = memo(function ExecutionTopBar({
   const [isPaperModalOpen, setIsPaperModalOpen] = useState(false);
   const [confirmLiveSwitch, setConfirmLiveSwitch] = useState(false);
 
+  // Close live confirmation modal on Escape key press
+  useEffect(() => {
+    if (!confirmLiveSwitch) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setConfirmLiveSwitch(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [confirmLiveSwitch]);
+
   if (!executionState) {
     return null;
   }
@@ -36,20 +48,43 @@ export const ExecutionTopBar = memo(function ExecutionTopBar({
   const { mode, auto_execute, gate_status, gate_reason, capital, daily_risk, active_positions } =
     executionState;
 
-  const handleModeSwitch = async (nextMode: "PAPER" | "LIVE") => {
-    if (nextMode === mode || isUpdating) return;
-    if (nextMode === "LIVE" && !confirmLiveSwitch) {
-      setConfirmLiveSwitch(true);
-      return;
+  // Toggle live confirmation dialog (CANNOT switch mode by itself)
+  const handleToggleLivePrompt = () => {
+    if (isUpdating || mode === "LIVE") return;
+    setConfirmLiveSwitch((prev) => !prev);
+  };
+
+  // Switch to PAPER mode safely (or dismiss pending live confirmation)
+  const handleSelectPaper = async () => {
+    if (isUpdating) return;
+    setConfirmLiveSwitch(false);
+    if (mode === "LIVE") {
+      try {
+        await onUpdateSettings({ mode: "PAPER" });
+        toast.success("Switched execution mode to PAPER SIM");
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Failed to switch execution mode";
+        toast.error(msg);
+      }
     }
+  };
+
+  // Explicit confirmation button action: ONLY this function can switch to LIVE mode
+  const handleConfirmGoLive = async () => {
+    if (isUpdating) return;
     setConfirmLiveSwitch(false);
     try {
-      await onUpdateSettings({ mode: nextMode });
-      toast.success(`Switched execution mode to ${nextMode}`);
+      await onUpdateSettings({ mode: "LIVE" });
+      toast.success("Switched execution mode to LIVE (Zerodha Connect)");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to switch execution mode";
       toast.error(msg);
     }
+  };
+
+  // Dismiss live confirmation dialog
+  const handleCancelLive = () => {
+    setConfirmLiveSwitch(false);
   };
 
   const handleToggleAutoExecute = async () => {
@@ -108,7 +143,7 @@ export const ExecutionTopBar = memo(function ExecutionTopBar({
               <button
                 type="button"
                 disabled={isUpdating}
-                onClick={() => handleModeSwitch("PAPER")}
+                onClick={handleSelectPaper}
                 className={`px-3.5 py-1.5 rounded-xl text-xs font-black transition-all cursor-pointer ${
                   mode === "PAPER"
                     ? "bg-slate-900 text-white shadow-2xs"
@@ -120,10 +155,12 @@ export const ExecutionTopBar = memo(function ExecutionTopBar({
               <button
                 type="button"
                 disabled={isUpdating}
-                onClick={() => handleModeSwitch("LIVE")}
+                onClick={handleToggleLivePrompt}
                 className={`px-3.5 py-1.5 rounded-xl text-xs font-black transition-all cursor-pointer ${
                   mode === "LIVE"
                     ? "bg-emerald-600 text-white shadow-2xs"
+                    : confirmLiveSwitch
+                    ? "bg-amber-200 text-amber-900 border border-amber-400 font-extrabold"
                     : "text-slate-600 hover:text-slate-900"
                 }`}
               >
@@ -156,27 +193,6 @@ export const ExecutionTopBar = memo(function ExecutionTopBar({
             >
               GATE: {gate_status}
             </span>
-
-            {/* 2-Step Safety Confirmation before switching to Real-Money LIVE Zerodha Mode */}
-            {confirmLiveSwitch && mode === "PAPER" && (
-              <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-2xl bg-amber-50 border border-amber-300 text-amber-900 text-xs">
-                <span className="font-bold">Confirm Live Zerodha Capital?</span>
-                <button
-                  type="button"
-                  onClick={() => handleModeSwitch("LIVE")}
-                  className="px-2.5 py-0.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-black cursor-pointer"
-                >
-                  YES, GO LIVE
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setConfirmLiveSwitch(false)}
-                  className="px-2 py-0.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold cursor-pointer"
-                >
-                  Cancel
-                </button>
-              </div>
-            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
@@ -307,6 +323,63 @@ export const ExecutionTopBar = memo(function ExecutionTopBar({
           await onSavePaperCapital(newCap);
         }}
       />
+
+      {/* 2-Step Safety Confirmation Modal before switching to Real-Money LIVE Zerodha Mode */}
+      {confirmLiveSwitch && mode === "PAPER" && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="confirm-live-title"
+          onClick={handleCancelLive}
+          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-2xs flex items-center justify-center p-4"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white border border-rose-200 rounded-3xl max-w-md w-full p-6 shadow-2xl font-mono space-y-4"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-rose-50 border border-rose-200 flex items-center justify-center text-rose-600 text-lg font-black shrink-0">
+                ⚠️
+              </div>
+              <div>
+                <h3 id="confirm-live-title" className="text-sm font-black text-slate-900 uppercase tracking-wider">
+                  Confirm Live Zerodha Trading
+                </h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Real-money order routing via Kite Connect
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-amber-50/80 border border-amber-200 text-xs text-amber-950 space-y-1.5 leading-relaxed">
+              <p className="font-bold">
+                You are switching from PAPER simulation to LIVE execution.
+              </p>
+              <p className="text-[11px] text-amber-900">
+                When Auto-Execution is ARMED, high-probability long signals will dispatch live BUY LIMIT and SL-LIMIT orders directly to your Zerodha account with real capital.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={handleCancelLive}
+                className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-colors cursor-pointer"
+              >
+                Cancel (Stay in Paper)
+              </button>
+              <button
+                type="button"
+                disabled={isUpdating}
+                onClick={handleConfirmGoLive}
+                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black transition-colors cursor-pointer shadow-xs"
+              >
+                YES, SWITCH TO LIVE
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 });
