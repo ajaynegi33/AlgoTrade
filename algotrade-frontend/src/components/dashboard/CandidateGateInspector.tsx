@@ -64,8 +64,8 @@ export const CandidateGateInspector = memo(function CandidateGateInspector({
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
                     <Link
-                      href={`/search/${encodeURIComponent(c.symbol)}`}
-                      className="text-sm font-black text-slate-900 hover:text-emerald-700 transition-colors"
+                      href={`/stock/${encodeURIComponent(c.symbol)}`}
+                      className="text-sm font-black text-slate-900 hover:text-emerald-700 hover:underline transition-colors"
                     >
                       {c.symbol}
                     </Link>

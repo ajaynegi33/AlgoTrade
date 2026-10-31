@@ -3,6 +3,7 @@
 import React, { memo, useMemo } from "react";
 import Link from "next/link";
 import { ActivePositionData } from "@/lib/types";
+import { computeStopLossRadar } from "@/lib/stopLossRadar";
 import { toast } from "sonner";
 
 interface LiveActiveTradesProps {
@@ -136,6 +137,8 @@ export const LiveActiveTrades = memo(function LiveActiveTrades({
               Math.max(0, ((stopR + 1.0) / 3.0) * 100)
             );
 
+            const radar = computeStopLossRadar(pos);
+
             return (
               <div
                 key={pos.position_id}
@@ -146,8 +149,8 @@ export const LiveActiveTrades = memo(function LiveActiveTrades({
                   <div>
                     <div className="flex items-center gap-2">
                       <Link
-                        href={`/search/${encodeURIComponent(pos.symbol)}`}
-                        className="text-base font-black text-slate-900 hover:text-emerald-700 transition-colors"
+                        href={`/stock/${encodeURIComponent(pos.symbol)}`}
+                        className="text-base font-black text-slate-900 hover:text-emerald-700 hover:underline transition-colors cursor-pointer"
                       >
                         {pos.symbol}
                       </Link>
@@ -170,7 +173,7 @@ export const LiveActiveTrades = memo(function LiveActiveTrades({
                   </span>
                 </div>
 
-                {/* Price & SL Telemetry Grid */}
+                {/* Price Telemetry Grid */}
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
                   <div className="p-2.5 rounded-xl bg-white border border-slate-200/80">
                     <span className="text-[10px] text-slate-400 block uppercase">Entry / BE</span>
@@ -193,20 +196,6 @@ export const LiveActiveTrades = memo(function LiveActiveTrades({
                   </div>
 
                   <div className="p-2.5 rounded-xl bg-white border border-slate-200/80">
-                    <span className="text-[10px] text-slate-400 block uppercase">Active SL</span>
-                    <strong className="text-rose-700 font-black">
-                      ₹{effectiveStop.toFixed(2)}
-                    </strong>
-                    <span
-                      className={`text-[10px] block font-bold ${
-                        isTightStop ? "text-amber-700" : "text-slate-500"
-                      }`}
-                    >
-                      Dist: ₹{stopDistRupees.toFixed(2)} ({stopDistPct.toFixed(2)}%)
-                    </span>
-                  </div>
-
-                  <div className="p-2.5 rounded-xl bg-white border border-slate-200/80">
                     <span className="text-[10px] text-slate-400 block uppercase">
                       {pos.tranche1_done ? "Runner Buffer (Δ)" : "1R Scale-Out"}
                     </span>
@@ -216,6 +205,108 @@ export const LiveActiveTrades = memo(function LiveActiveTrades({
                     <span className="text-[10px] text-slate-400 block">
                       1R = ₹{pos.one_r.toFixed(2)}
                     </span>
+                  </div>
+
+                  <div className="p-2.5 rounded-xl bg-white border border-slate-200/80">
+                    <span className="text-[10px] text-slate-400 block uppercase">Live R-Multiple</span>
+                    <strong
+                      className={`font-black ${
+                        pos.r_multiple >= 0 ? "text-emerald-700" : "text-rose-700"
+                      }`}
+                    >
+                      {pos.r_multiple >= 0 ? "+" : ""}
+                      {pos.r_multiple.toFixed(2)}R
+                    </strong>
+                    <span className="text-[10px] text-slate-400 block">
+                      Peak: +{pos.mfe_r_multiple.toFixed(2)}R
+                    </span>
+                  </div>
+                </div>
+
+                {/* =========================================================================
+                    DYNAMIC STOP LOSS & RATCHET RADAR (Current SL -> Next SL -> Activation)
+                    ========================================================================= */}
+                <div className="rounded-xl border border-slate-200/90 bg-white p-3 space-y-2.5">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-1.5">
+                    <div className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
+                      <span className="text-[11px] font-black text-slate-900 uppercase tracking-wider">
+                        Stop Loss &amp; Trailing Radar
+                      </span>
+                    </div>
+                    <span className="text-[10px] font-bold text-slate-500">
+                      {radar.currentStopType === "RAM_SHADOW" ? (
+                        <span className="px-2 py-0.5 rounded bg-purple-100 text-purple-800 border border-purple-200">
+                          RAM VIRTUAL SHADOW
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200">
+                          NSE EXCHANGE RESTING
+                        </span>
+                      )}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                    {/* 1. CURRENT STOP LOSS */}
+                    <div className="p-2.5 rounded-lg bg-rose-50/50 border border-rose-100 space-y-1">
+                      <span className="text-[10px] font-bold text-rose-700 uppercase tracking-wider block">
+                        Current Stop Loss
+                      </span>
+                      <div className="text-base font-black text-rose-800">
+                        ₹{radar.currentStop.toFixed(2)}
+                      </div>
+                      <div className="text-[10px] text-rose-900 font-medium">
+                        {radar.currentStopLabel}
+                      </div>
+                      <div className="text-[10px] text-slate-500">
+                        Dist: <strong className={isTightStop ? "text-amber-700 font-bold" : "text-slate-700"}>
+                          ₹{stopDistRupees.toFixed(2)} ({stopDistPct.toFixed(2)}%)
+                        </strong>
+                      </div>
+                    </div>
+
+                    {/* 2. NEXT STOP LOSS PRICE */}
+                    <div className="p-2.5 rounded-lg bg-amber-50/50 border border-amber-100 space-y-1">
+                      <span className="text-[10px] font-bold text-amber-800 uppercase tracking-wider block">
+                        Next Stop Loss Price
+                      </span>
+                      <div className="text-base font-black text-amber-900">
+                        ₹{radar.nextStopPrice.toFixed(2)}
+                      </div>
+                      <div className="text-[10px] text-amber-900 font-medium truncate" title={radar.nextStopLabel}>
+                        {radar.nextStopLabel}
+                      </div>
+                      <div className="text-[10px] text-slate-500 truncate" title={radar.nextStopMilestone}>
+                        {radar.nextStopMilestone}
+                      </div>
+                    </div>
+
+                    {/* 3. WHEN NEXT SL ACTIVATES */}
+                    <div className="p-2.5 rounded-lg bg-emerald-50/50 border border-emerald-100 space-y-1">
+                      <span className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider block">
+                        When Next SL Activates
+                      </span>
+                      <div className="text-[11px] font-black text-emerald-950 leading-tight">
+                        {radar.triggerCondition}
+                      </div>
+                      <div className="text-[10px] text-emerald-800 font-semibold">
+                        {radar.isTriggerReached ? (
+                          <span className="text-emerald-700 font-bold">✓ Milestone Reached / Trailing Active</span>
+                        ) : (
+                          <span>
+                            ₹{radar.triggerDistanceRupees.toFixed(2)} away ({radar.triggerDistancePercent.toFixed(2)}% move)
+                          </span>
+                        )}
+                      </div>
+                      {/* Trigger Progress Bar */}
+                      <div className="w-full h-1.5 rounded-full bg-emerald-100 overflow-hidden mt-1">
+                        <div
+                          className="h-full bg-emerald-600 transition-all duration-300"
+                          style={{ width: `${radar.triggerProgressPercent}%` }}
+                        />
+                      </div>
+                    </div>
                   </div>
                 </div>
 

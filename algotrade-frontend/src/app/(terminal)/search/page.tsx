@@ -199,7 +199,7 @@ export default function SearchHubPage() {
               {topGainers.map((st) => (
                 <Link
                   key={st.symbol}
-                  href={`/search/${st.symbol.toUpperCase()}`}
+                  href={`/stock/${st.symbol.toUpperCase()}`}
                   className="flex items-center justify-between p-2 rounded-xl hover:bg-slate-50 border border-transparent hover:border-slate-200/80 transition-all group"
                 >
                   <div className="min-w-0">
@@ -239,7 +239,7 @@ export default function SearchHubPage() {
               {topLosers.map((st) => (
                 <Link
                   key={st.symbol}
-                  href={`/search/${st.symbol.toUpperCase()}`}
+                  href={`/stock/${st.symbol.toUpperCase()}`}
                   className="flex items-center justify-between p-2 rounded-xl hover:bg-slate-50 border border-transparent hover:border-slate-200/80 transition-all group"
                 >
                   <div className="min-w-0">
@@ -279,7 +279,7 @@ export default function SearchHubPage() {
               {volumeOutliers.map((st) => (
                 <Link
                   key={st.symbol}
-                  href={`/search/${st.symbol.toUpperCase()}`}
+                  href={`/stock/${st.symbol.toUpperCase()}`}
                   className="flex items-center justify-between p-2 rounded-xl hover:bg-slate-50 border border-transparent hover:border-slate-200/80 transition-all group"
                 >
                   <div className="min-w-0">
@@ -319,7 +319,7 @@ export default function SearchHubPage() {
               {highEvSetups.map((st) => (
                 <Link
                   key={st.symbol}
-                  href={`/search/${st.symbol.toUpperCase()}`}
+                  href={`/stock/${st.symbol.toUpperCase()}`}
                   className="flex items-center justify-between p-2 rounded-xl hover:bg-slate-50 border border-transparent hover:border-slate-200/80 transition-all group"
                 >
                   <div className="min-w-0">
@@ -380,7 +380,7 @@ export default function SearchHubPage() {
                 return (
                   <tr
                     key={s.symbol}
-                    onClick={() => router.push(`/search/${s.symbol.toUpperCase()}`)}
+                    onClick={() => router.push(`/stock/${s.symbol.toUpperCase()}`)}
                     className="hover:bg-slate-50/80 transition-colors cursor-pointer group"
                   >
                     <td className="py-3 px-4 text-slate-400 text-[11px]">{idx + 1}</td>

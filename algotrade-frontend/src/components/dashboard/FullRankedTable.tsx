@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useMemo, useState, memo } from "react";
+import Link from "next/link";
 import { StockRankData, decodeReasonFlags } from "@/lib/types";
 
 interface FullRankedTableProps {
@@ -18,8 +19,13 @@ const RankedStockRow = memo(
         <td className="py-2.5 px-3.5 text-center font-bold text-slate-400 group-hover:text-slate-900">
           #{s.rank}
         </td>
-        <td className="py-2.5 px-3.5 font-bold text-slate-900 whitespace-nowrap">
-          {s.symbol}
+        <td className="py-2.5 px-3.5 font-bold whitespace-nowrap">
+          <Link
+            href={`/stock/${encodeURIComponent(s.symbol)}`}
+            className="text-slate-900 hover:text-emerald-700 hover:underline transition-colors cursor-pointer"
+          >
+            {s.symbol}
+          </Link>
         </td>
         <td className="py-2.5 px-3.5 text-slate-500 text-[11px] whitespace-nowrap">
           {s.sector}

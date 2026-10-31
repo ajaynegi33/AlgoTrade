@@ -215,7 +215,14 @@ export default function TradeHistoryAndTaxPage() {
   );
 
   useEffect(() => {
-    loadHistory(false);
+    let isMounted = true;
+    const timer = setTimeout(() => {
+      if (isMounted) loadHistory(false);
+    }, 0);
+    return () => {
+      isMounted = false;
+      clearTimeout(timer);
+    };
   }, [loadHistory]);
 
   // Auto-refresh when active/closed positions count changes in the live WebSocket stream
@@ -223,7 +230,10 @@ export default function TradeHistoryAndTaxPage() {
   const liveClosedCount = liveSnapshot?.execution?.closed_positions?.length ?? 0;
   useEffect(() => {
     if (liveActiveCount > 0 || liveClosedCount > 0) {
-      loadHistory(true);
+      const timer = setTimeout(() => {
+        loadHistory(true);
+      }, 100);
+      return () => clearTimeout(timer);
     }
   }, [liveActiveCount, liveClosedCount, loadHistory]);
 

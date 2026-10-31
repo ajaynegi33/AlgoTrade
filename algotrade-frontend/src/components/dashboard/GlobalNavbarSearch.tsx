@@ -98,7 +98,7 @@ export function GlobalNavbarSearch() {
     (symbol: string) => {
       setIsOpen(false);
       setQuery("");
-      router.push(`/search/${symbol.toUpperCase()}`);
+      router.push(`/stock/${symbol.toUpperCase()}`);
     },
     [router]
   );

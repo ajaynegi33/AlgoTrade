@@ -44,9 +44,8 @@ export default function DashboardSidebar({
   const displayEmail = kiteProfile?.email || user?.email;
 
   const isDashboardActive = pathname === "/dashboard";
-  const isOrderBlockActive = pathname.startsWith("/orderblock");
   const isTradesActive = pathname.startsWith("/trades");
-  const isSearchActive = pathname.startsWith("/search");
+  const isSearchActive = pathname.startsWith("/search") || pathname.startsWith("/stock");
   const isLeaderboardActive = pathname.startsWith("/leaderboard");
   const isUniverseActive = pathname.startsWith("/universe");
   const isProfileActive = pathname.startsWith("/profile");
@@ -175,37 +174,6 @@ export default function DashboardSidebar({
             </span>
           </Link>
 
-          {/* 2. OrderBlock Minimax Decision Tree */}
-          <Link
-            href="/orderblock"
-            onClick={onCloseMobile}
-            title="OrderBlock Minimax α-β Decision Tree"
-            className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-2xl transition-all group cursor-pointer active:scale-[0.98] ${
-              isOrderBlockActive
-                ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-500/20 shadow-2xs"
-                : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 font-medium"
-            } ${isCollapsed ? "md:justify-center md:px-0" : ""}`}
-          >
-            <svg
-              className={`w-5 h-5 shrink-0 transition-colors ${
-                isOrderBlockActive ? "text-emerald-700" : "text-slate-500 group-hover:text-slate-900"
-              }`}
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-            </svg>
-
-            <span
-              className={`text-xs font-semibold whitespace-nowrap overflow-hidden transition-all duration-150 ${
-                isCollapsed ? "md:opacity-0 md:w-0 md:hidden" : "opacity-100"
-              }`}
-            >
-              OrderBlock α-β
-            </span>
-          </Link>
 
           {/* 3. Trade History, Tax Audit & Engine Analytics */}
           <Link

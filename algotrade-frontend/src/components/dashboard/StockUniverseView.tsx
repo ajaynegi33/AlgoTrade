@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useMemo } from "react";
+import Link from "next/link";
 import { useTradingStore } from "@/store/useTradingStore";
 import { getKiteLoginURL } from "@/lib/api";
 import { toast } from "sonner";
@@ -367,9 +368,12 @@ export default function StockUniverseView() {
 
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-2">
-                          <span className="font-extrabold text-slate-900 group-hover:text-emerald-700 transition-colors">
+                          <Link
+                            href={`/stock/${encodeURIComponent(stock.tradingsymbol)}`}
+                            className="font-extrabold text-slate-900 hover:text-emerald-700 hover:underline transition-colors cursor-pointer"
+                          >
                             {stock.tradingsymbol}
-                          </span>
+                          </Link>
                           <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">
                             {stock.exchange}
                           </span>
