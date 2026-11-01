@@ -48,7 +48,7 @@ type PositionWorker struct {
 	OneR          float64
 	SignalBarLow  float64
 
-	// Lock-free atomic state shared with Actor.OnTickHotPath
+	// Lock-free atomic state shared with Actor.UpdateTrailingStopLossOnPriceTick
 	entryPriceBits       atomic.Uint64
 	breakevenStopBits    atomic.Uint64
 	latestLTPBits        atomic.Uint64
@@ -441,7 +441,7 @@ func (worker *PositionWorker) workerLoop() {
 			return
 
 		case reason := <-worker.emergReasonCh:
-			worker.executeEmergencyFlatten(reason)
+			worker.EmergencySellAllAndClosePosition(reason)
 			return
 
 		case <-entryTimeout.C:
@@ -460,7 +460,7 @@ func (worker *PositionWorker) workerLoop() {
 			currentSLOrderStatus := worker.slOrderStatus
 			worker.mu.RUnlock()
 			if currentSLOrderStatus == OrderStatusOpen && slOpenTimestampMs > 0 && (time.Now().UnixMilli()-slOpenTimestampMs) >= 500 {
-				worker.executeEmergencyFlatten("SL_STRANDED_OPEN_500MS")
+				worker.EmergencySellAllAndClosePosition("SL_STRANDED_OPEN_500MS")
 				return
 			}
 
@@ -479,7 +479,7 @@ func (worker *PositionWorker) workerLoop() {
 					maxFavorableRMultiple = (highWaterMark - entryPrice) / worker.OneR
 				}
 				if maxFavorableRMultiple < 0.50 {
-					worker.executeEmergencyFlatten("ALPHA_DECAY_45M_STAGNATION")
+					worker.EmergencySellAllAndClosePosition("ALPHA_DECAY_45M_STAGNATION")
 					return
 				}
 			}
@@ -492,7 +492,7 @@ func (worker *PositionWorker) workerLoop() {
 			}
 			select {
 			case reason := <-worker.emergReasonCh:
-				worker.executeEmergencyFlatten(reason)
+				worker.EmergencySellAllAndClosePosition(reason)
 				return
 			default:
 			}
@@ -513,7 +513,7 @@ func (worker *PositionWorker) handleEntryTimeout() {
 	worker.mu.RUnlock()
 
 	if filled >= initQty {
-		worker.ensureInitialSLPlaced()
+		worker.PlaceInitialStopLossOrderIfNotPlaced()
 		return
 	}
 
@@ -541,12 +541,12 @@ func (worker *PositionWorker) handleEntryTimeout() {
 	if filled < worker.DustFloorQty {
 		slog.Warn("Partial fill below viable dust floor, flattening immediately",
 			"symbol", worker.Symbol, "filled", filled, "dust_floor", worker.DustFloorQty)
-		worker.executeEmergencyFlatten("PARTIAL_FILL_DUST_GUARD")
+		worker.EmergencySellAllAndClosePosition("PARTIAL_FILL_DUST_GUARD")
 		return
 	}
 
 	runnerQty := max(1, filled-(filled/2))
-	beStop := BreakevenTriggerPrice(worker.GetEntryPrice(), filled, runnerQty, worker.TickSize)
+	beStop := CalculateTaxCoveringBreakevenStop(worker.GetEntryPrice(), filled, runnerQty, worker.TickSize)
 	worker.mu.Lock()
 	worker.InitialQty = filled
 	worker.BreakevenStop = beStop
@@ -558,10 +558,10 @@ func (worker *PositionWorker) handleEntryTimeout() {
 	worker.breakevenStopBits.Store(math.Float64bits(beStop))
 
 	if !hasSL {
-		worker.ensureInitialSLPlaced()
+		worker.PlaceInitialStopLossOrderIfNotPlaced()
 	} else if filled > slQty && !worker.hasTranche1Completed.Load() && workerState != StateScaleOutPending && worker.modCount.Load() < MaxSafetyModifications {
 		curStop := math.Float64frombits(worker.confirmedStopBits.Load())
-		limitPx := ComputeSellSLLimitPrice(curStop, worker.TickSize)
+		limitPx := CalculateProtectiveLimitPriceBelowStop(curStop, worker.TickSize)
 		ltp := worker.LatestLTP()
 		if err := worker.broker.ModifySLOrder(worker.ctx, slOrderID, filled, curStop, limitPx, ltp, worker.TickSize); err == nil {
 			worker.mu.Lock()

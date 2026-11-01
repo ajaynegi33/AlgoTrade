@@ -617,7 +617,7 @@ func (manager *Manager) rehydrateOpenPositionsFromDB() {
 			worker.mu.Unlock()
 			manager.reconciler.RegisterOrder(positionRecord.slOrderID, positionRecord.positionID, "SL", positionRecord.symbol, "SELL", "SL", remQty, positionRecord.currentStop, positionRecord.currentStop, OrderStatusTrigPending)
 			if positionRecord.mode == "PAPER" && manager.paperBroker != nil && remQty > 0 {
-				limitPx := ComputeSellSLLimitPrice(positionRecord.currentStop, worker.TickSize)
+				limitPx := CalculateProtectiveLimitPriceBelowStop(positionRecord.currentStop, worker.TickSize)
 				manager.paperBroker.SeedRestingOrder(positionRecord.slOrderID, positionRecord.symbol, positionRecord.token, remQty, positionRecord.currentStop, limitPx, positionRecord.modCount, OrderStatusTrigPending)
 			}
 		}

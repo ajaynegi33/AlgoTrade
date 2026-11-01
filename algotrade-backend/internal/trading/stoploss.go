@@ -53,7 +53,7 @@ type StopAndBufferSpec struct {
 // CORE STOP LOSS CALCULATIONS
 // =========================================================================================
 
-// ComputeStopAndBufferSpec calculates non-inverting stop bounds (DeltaMin < DeltaMax),
+// CalculateInitialStopLoss calculates non-inverting stop bounds (DeltaMin < DeltaMax),
 // places a structural stop below the signal candle low, and decouples the dynamic breathing
 // buffer (BaseBuffer) from tight intra-day entry candles.
 //
@@ -64,7 +64,7 @@ type StopAndBufferSpec struct {
 //  4. Base breathing buffer: 0.75x ATR bounded within [DeltaMin, DeltaMax].
 //  5. Signal candle low: raw stop = signalBarLow - 2 ticks.
 //  6. No-Chase Rule: if raw stop distance > 1.25 * DeltaMax, the setup is rejected.
-func ComputeStopAndBufferSpec(entryPrice float64, signalBarLow float64, averageTrueRange14 float64, tickSize float64) (StopAndBufferSpec, error) {
+func CalculateInitialStopLoss(entryPrice float64, signalBarLow float64, averageTrueRange14 float64, tickSize float64) (StopAndBufferSpec, error) {
 	if entryPrice <= 0 {
 		return StopAndBufferSpec{}, fmt.Errorf("invalid entry price: %.2f", entryPrice)
 	}
@@ -123,11 +123,11 @@ func ComputeStopAndBufferSpec(entryPrice float64, signalBarLow float64, averageT
 	}, nil
 }
 
-// BreakevenTriggerPrice computes the exact SL trigger price (rounded up to TickSize)
+// CalculateTaxCoveringBreakevenStop computes the exact SL trigger price (rounded up to TickSize)
 // on remaining runner shares so that even if the runner stops out at Breakeven,
 // all round-trip statutory taxes & brokerage on the entire trade are 100% covered.
 // Formula: P_breakeven = RoundUpToTick(EntryPrice + (RoundTripTaxes / runnerQuantity), TickSize)
-func BreakevenTriggerPrice(entryPrice float64, initialQuantity, runnerQuantity int, tickSize float64) float64 {
+func CalculateTaxCoveringBreakevenStop(entryPrice float64, initialQuantity, runnerQuantity int, tickSize float64) float64 {
 	if tickSize <= 0 {
 		tickSize = 0.05
 	}
@@ -151,10 +151,10 @@ func BreakevenTriggerPrice(entryPrice float64, initialQuantity, runnerQuantity i
 	return breakevenPrice
 }
 
-// ComputeSellSLLimitPrice calculates the protective limit price below triggerPrice
+// CalculateProtectiveLimitPriceBelowStop calculates the protective limit price below triggerPrice
 // for NSE Stop-Loss Limit (SL-L) orders. Placing the limit slightly below the trigger
 // prevents resting orders from being gapped through in fast markets.
-func ComputeSellSLLimitPrice(triggerPrice, tickSize float64) float64 {
+func CalculateProtectiveLimitPriceBelowStop(triggerPrice, tickSize float64) float64 {
 	if tickSize <= 0 {
 		tickSize = 0.05
 	}

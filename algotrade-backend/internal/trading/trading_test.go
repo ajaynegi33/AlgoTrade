@@ -31,7 +31,7 @@ func TestStockMetricsAlignmentAndPhase2Math(t *testing.T) {
 	for _, px := range prices {
 		for _, atrPct := range atrPcts {
 			atr := px * atrPct
-			spec, err := ComputeStopAndBufferSpec(px, px-0.5*atr, atr, 0.05)
+			spec, err := CalculateInitialStopLoss(px, px-0.5*atr, atr, 0.05)
 			if err != nil {
 				t.Fatalf("unexpected error for px=%.2f atr=%.2f: %v", px, atr, err)
 			}
@@ -148,7 +148,7 @@ func TestPositionWorkerThreeStepScaleOutAndShadowStopMod25(t *testing.T) {
 	stock.LTP = worker.GetEntryPrice() + 1.60*worker.OneR
 	stock.RollingPeak = stock.LTP
 	stock.LastUpdatedUnix += 5
-	worker.OnTickHotPath(&stock)
+	worker.UpdateTrailingStopLossOnPriceTick(&stock)
 
 	time.Sleep(120 * time.Millisecond)
 	if !worker.hasTranche1Completed.Load() {
@@ -164,7 +164,7 @@ func TestPositionWorkerThreeStepScaleOutAndShadowStopMod25(t *testing.T) {
 	stock.LTP = worker.GetEntryPrice() + 3.0*worker.OneR
 	stock.RollingPeak = stock.LTP
 	stock.LastUpdatedUnix += 25
-	worker.OnTickHotPath(&stock)
+	worker.UpdateTrailingStopLossOnPriceTick(&stock)
 
 	shadow := worker.ToDTO().ShadowStop
 	if shadow <= worker.GetBreakevenStop() {
@@ -175,7 +175,7 @@ func TestPositionWorkerThreeStepScaleOutAndShadowStopMod25(t *testing.T) {
 	stock.LTP = shadow - 0.15
 	stock.FastAggressorEMA = 0.30
 	stock.LastUpdatedUnix += 2
-	worker.OnTickHotPath(&stock)
+	worker.UpdateTrailingStopLossOnPriceTick(&stock)
 
 	select {
 	case <-closedCh:
@@ -347,7 +347,7 @@ func TestPhase26FalsificationSuite_BugsB1ToB5(t *testing.T) {
 	bel.AggressorBuyRatio = 0.34
 	bel.FastAggressorEMA = 0.33
 	bel.LastUpdatedUnix = nowUnix + 35
-	worker.OnTickHotPath(&bel)
+	worker.UpdateTrailingStopLossOnPriceTick(&bel)
 	time.Sleep(60 * time.Millisecond)
 
 	tightenedStop := worker.ToDTO().CurrentStop
@@ -638,7 +638,7 @@ func TestSLGapThroughBreachAndFlatten(t *testing.T) {
 	// Now simulate price falling directly to 58.81 (below initial stop 58.83)
 	stock.LTP = 58.81
 	stock.LastUpdatedUnix += 5
-	worker.OnTickHotPath(&stock)
+	worker.UpdateTrailingStopLossOnPriceTick(&stock)
 
 	select {
 	case <-closedCh:
@@ -824,7 +824,7 @@ func TestPositionWorker_EarlyHarvestAt065RAnd5mClose(t *testing.T) {
 
 	// 1. Tick at 802.60 (+0.52R): verify stop does NOT ratchet to Breakeven yet (Breakeven triggers at >= +1.0R per Quant Laws)
 	stock.LTP = 802.60
-	worker.OnTickHotPath(stock)
+	worker.UpdateTrailingStopLossOnPriceTick(stock)
 	shadow := math.Float64frombits(worker.shadowStopBits.Load())
 	if shadow >= 800.80 {
 		t.Fatalf("expected shadow stop to NOT ratchet to Breakeven 800.80 at +0.52R, got %.2f", shadow)
@@ -832,7 +832,7 @@ func TestPositionWorker_EarlyHarvestAt065RAnd5mClose(t *testing.T) {
 
 	// 2. Tick at 805.20 (+1.04R): verify stop ratchets to Breakeven (800.80)
 	stock.LTP = 805.20
-	worker.OnTickHotPath(stock)
+	worker.UpdateTrailingStopLossOnPriceTick(stock)
 	shadow = math.Float64frombits(worker.shadowStopBits.Load())
 	if shadow < 800.80 {
 		t.Fatalf("expected shadow stop to ratchet to Breakeven 800.80 at +1.04R, got %.2f", shadow)
@@ -840,14 +840,14 @@ func TestPositionWorker_EarlyHarvestAt065RAnd5mClose(t *testing.T) {
 
 	// 3. Tick at 807.60 (+1.52R): verify Tranche 1 50% scale-out is triggered
 	stock.LTP = 807.60
-	worker.OnTickHotPath(stock)
+	worker.UpdateTrailingStopLossOnPriceTick(stock)
 	if !worker.isTranche1Pending.Load() {
 		t.Fatalf("expected isTranche1Pending to be TRUE at +1.52R for profit harvest, got false")
 	}
 
 	// 3. Intra-candle dip does NOT panic-dump if 5m bar hasn't closed below InitialStop
 	stock.LTP = 796.00
-	worker.OnTickHotPath(stock)
+	worker.UpdateTrailingStopLossOnPriceTick(stock)
 	if worker.isClosed.Load() {
 		t.Fatalf("expected position to hold during intra-candle wick above InitialStop (795.00), but was closed prematurely")
 	}
@@ -856,7 +856,7 @@ func TestPositionWorker_EarlyHarvestAt065RAnd5mClose(t *testing.T) {
 	stock.CurrentBarIdx = 3
 	stock.SessionBars[2] = market.OHLCVBar{High: 798.0, Low: 793.0, Open: 797.0, Close: 794.0} // Closed below 795.00!
 	stock.LTP = 794.00
-	worker.OnTickHotPath(stock)
+	worker.UpdateTrailingStopLossOnPriceTick(stock)
 	if !worker.isMarketExitPending.Load() {
 		t.Fatalf("expected isMarketExitPending to be TRUE after completed 5m candle closed below InitialStop (794.00 < 795.00)")
 	}
@@ -886,9 +886,9 @@ func TestDecoupledStopLossAndSizing(t *testing.T) {
 	atr := 4.0
 	tick := 0.05
 
-	spec, err := ComputeStopAndBufferSpec(entryPrice, signalLow, atr, tick)
+	spec, err := CalculateInitialStopLoss(entryPrice, signalLow, atr, tick)
 	if err != nil {
-		t.Fatalf("ComputeStopAndBufferSpec failed: %v", err)
+		t.Fatalf("CalculateInitialStopLoss failed: %v", err)
 	}
 	if spec.InitialStop >= entryPrice {
 		t.Fatalf("initial stop %.2f must be below entry price %.2f", spec.InitialStop, entryPrice)
@@ -898,19 +898,19 @@ func TestDecoupledStopLossAndSizing(t *testing.T) {
 	}
 
 	// Overextended check (> 1.25x DeltaMax)
-	_, overextErr := ComputeStopAndBufferSpec(500.0, 470.0, 4.0, 0.05)
+	_, overextErr := CalculateInitialStopLoss(500.0, 470.0, 4.0, 0.05)
 	if overextErr == nil {
 		t.Fatalf("expected error for overextended setup, got nil")
 	}
 
-	// BreakevenTriggerPrice check
-	bePrice := BreakevenTriggerPrice(500.0, 100, 50, 0.05)
+	// CalculateTaxCoveringBreakevenStop check
+	bePrice := CalculateTaxCoveringBreakevenStop(500.0, 100, 50, 0.05)
 	if bePrice <= 500.0 {
 		t.Fatalf("breakeven trigger price %.2f must be above entry price 500.00 to cover taxes", bePrice)
 	}
 
-	// ComputeSellSLLimitPrice check
-	slLimit := ComputeSellSLLimitPrice(495.0, 0.05)
+	// CalculateProtectiveLimitPriceBelowStop check
+	slLimit := CalculateProtectiveLimitPriceBelowStop(495.0, 0.05)
 	if slLimit >= 495.0 {
 		t.Fatalf("SL limit price %.2f must be strictly below trigger price 495.00", slLimit)
 	}
@@ -1321,14 +1321,14 @@ func TestRunawayPriceGuard(t *testing.T) {
 	// Now price runs away to 103.0 (+1.5R above entry 100.0, > 1.2R threshold of 102.40)
 	stock.LTP = 103.0
 	// Tick 1: runaway begins
-	worker.OnTickHotPath(stock)
+	worker.UpdateTrailingStopLossOnPriceTick(stock)
 	if worker.runawaySinceUnix.Load() == 0 {
 		t.Fatalf("Expected runaway timer to start")
 	}
 
 	// Advance clock by 35 seconds
 	stock.LastUpdatedUnix += 35
-	worker.OnTickHotPath(stock)
+	worker.UpdateTrailingStopLossOnPriceTick(stock)
 
 	// Position worker should receive emergency exit
 	time.Sleep(100 * time.Millisecond)
@@ -1903,7 +1903,7 @@ func TestPositionWorker_SingleShareScaleOutProtection(t *testing.T) {
 	stock.LTP = worker.GetEntryPrice() + 1.60*worker.OneR
 	stock.RollingPeak = stock.LTP
 	stock.LastUpdatedUnix += 5
-	worker.OnTickHotPath(stock)
+	worker.UpdateTrailingStopLossOnPriceTick(stock)
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -2053,7 +2053,7 @@ func TestBreakevenStrictTaxCoverMath(t *testing.T) {
 	qty := 25
 	tickSize := 0.05
 
-	// 1. Calculate BreakevenTriggerPrice: Must strictly cover EntryPrice + (Taxes / Qty)
+	// 1. Calculate CalculateTaxCoveringBreakevenStop: Must strictly cover EntryPrice + (Taxes / Qty)
 	roundTripCharges := CalculateRoundTripCharges(entryPrice, entryPrice, qty)
 	perShareTax := roundTripCharges.TotalCharges / float64(qty)
 	expectedBreakeven := RoundUpToTick(entryPrice+perShareTax, tickSize)
@@ -2061,7 +2061,7 @@ func TestBreakevenStrictTaxCoverMath(t *testing.T) {
 		expectedBreakeven = RoundUpToTick(entryPrice+tickSize, tickSize)
 	}
 
-	calculatedBreakeven := BreakevenTriggerPrice(entryPrice, qty, qty, tickSize)
+	calculatedBreakeven := CalculateTaxCoveringBreakevenStop(entryPrice, qty, qty, tickSize)
 	if math.Abs(calculatedBreakeven-expectedBreakeven) > 1e-4 {
 		t.Fatalf("expected breakeven price %.2f, got %.2f", expectedBreakeven, calculatedBreakeven)
 	}

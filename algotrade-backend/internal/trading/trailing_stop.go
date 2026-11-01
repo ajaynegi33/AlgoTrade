@@ -7,8 +7,8 @@ import (
 	"github.com/ajaynegi33/AlgoTrade/internal/market"
 )
 
-// OnTickHotPath is executed by the Actor on every incoming tick for this position's instrument.
-func (worker *PositionWorker) OnTickHotPath(stockMetrics *market.StockMetrics) {
+// UpdateTrailingStopLossOnPriceTick is executed by the Actor on every incoming tick for this position's instrument.
+func (worker *PositionWorker) UpdateTrailingStopLossOnPriceTick(stockMetrics *market.StockMetrics) {
 	if worker.isClosed.Load() {
 		return
 	}
@@ -181,12 +181,12 @@ func (worker *PositionWorker) OnTickHotPath(stockMetrics *market.StockMetrics) {
 
 	safeCandidateStop := math.Min(unclampedCandidateStop, maxLegalTrigger)
 	if safeCandidateStop > confirmedStopLoss {
-		worker.ProposeStopRatchet(safeCandidateStop, safeATR, false)
+		worker.RaiseStopLossOrder(safeCandidateStop, safeATR, false)
 	}
 }
 
-// ProposeStopRatchet governs Mods 1–18 (Agile), Mods 19–24 (Coarse), and Gear 4 (Mod 24 Shadow Stop)
-func (worker *PositionWorker) ProposeStopRatchet(candidateStop, safeATR float64, isUrgentShockClamp bool) {
+// RaiseStopLossOrder governs Mods 1–18 (Agile), Mods 19–24 (Coarse), and Gear 4 (Mod 24 Shadow Stop)
+func (worker *PositionWorker) RaiseStopLossOrder(candidateStop, safeATR float64, isUrgentShockClamp bool) {
 	modificationCount := worker.modCount.Load()
 
 	// Always advance Shadow Stop in RAM

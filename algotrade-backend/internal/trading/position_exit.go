@@ -33,8 +33,8 @@ func (worker *PositionWorker) ForceEmergencyExit(reason string) {
 	case worker.emergReasonCh <- reason:
 		worker.wakeWorker()
 	default:
-		// If emergReasonCh is already full or workerLoop has terminated, execute emergency flatten directly
-		go worker.executeEmergencyFlatten(reason)
+		// If emergReasonCh is already full or workerLoop has terminated, execute emergency exit directly
+		go worker.EmergencySellAllAndClosePosition(reason)
 	}
 }
 
@@ -51,14 +51,14 @@ func (worker *PositionWorker) processPendingWork() {
 		worker.mu.RUnlock()
 		filledEntryQuantity := int(worker.filledEntryQty.Load())
 		if !hasStopLossOrder {
-			worker.ensureInitialSLPlaced()
+			worker.PlaceInitialStopLossOrderIfNotPlaced()
 			if worker.isClosed.Load() || worker.isMarketExitPending.Load() {
 				return
 			}
 		} else if filledEntryQuantity > stopLossOrderQuantity && worker.state != StateScaleOutPending && !worker.hasTranche1Completed.Load() && worker.modCount.Load() < MaxSafetyModifications {
 			// Incremental fill arrived while SL is active: resize SL to cover all filled shares
 			confirmedStopLossPrice := math.Float64frombits(worker.confirmedStopBits.Load())
-			sellLimitPrice := ComputeSellSLLimitPrice(confirmedStopLossPrice, worker.TickSize)
+			sellLimitPrice := CalculateProtectiveLimitPriceBelowStop(confirmedStopLossPrice, worker.TickSize)
 			lastTradedPrice := worker.LatestLTP()
 			worker.mu.RLock()
 			stopLossOrderID := worker.slOrderID
@@ -77,7 +77,7 @@ func (worker *PositionWorker) processPendingWork() {
 
 	// 2. Execute +1.0R 3-Step Race-Free Scale-Out if triggered
 	if worker.isTranche1Pending.Load() && !worker.hasTranche1Completed.Load() {
-		worker.executeThreeStepScaleOut()
+		worker.SellHalfSharesAtProfitTarget()
 		if worker.isClosed.Load() || worker.isMarketExitPending.Load() {
 			return
 		}
@@ -109,7 +109,7 @@ func (worker *PositionWorker) processPendingWork() {
 		return
 	}
 
-	sellLimitPrice := ComputeSellSLLimitPrice(targetTriggerPrice, worker.TickSize)
+	sellLimitPrice := CalculateProtectiveLimitPriceBelowStop(targetTriggerPrice, worker.TickSize)
 	err := worker.broker.ModifySLOrder(worker.ctx, stopLossOrderID, remainingQuantity, targetTriggerPrice, sellLimitPrice, lastTradedPrice, worker.TickSize)
 	if err != nil {
 		slog.Warn("SL ratchet modification rejected by broker", "symbol", worker.Symbol, "target", targetTriggerPrice, "error", err)
@@ -131,7 +131,7 @@ func (worker *PositionWorker) processPendingWork() {
 	worker.persistPositionState()
 }
 
-func (worker *PositionWorker) ensureInitialSLPlaced() {
+func (worker *PositionWorker) PlaceInitialStopLossOrderIfNotPlaced() {
 	worker.mu.RLock()
 	if worker.slOrderID != "" || worker.isClosed.Load() {
 		worker.mu.RUnlock()
@@ -149,16 +149,16 @@ func (worker *PositionWorker) ensureInitialSLPlaced() {
 	if lastTradedPrice > 0 && lastTradedPrice <= worker.InitialStop+worker.TickSize {
 		slog.Warn("LTP already at or below InitialStop upon entry fill; executing immediate flatten",
 			"symbol", worker.Symbol, "ltp", lastTradedPrice, "initial_stop", worker.InitialStop)
-		worker.executeEmergencyFlatten("INITIAL_SL_BREACHED_ON_FILL")
+		worker.EmergencySellAllAndClosePosition("INITIAL_SL_BREACHED_ON_FILL")
 		return
 	}
 
-	sellLimitPrice := ComputeSellSLLimitPrice(worker.InitialStop, worker.TickSize)
+	sellLimitPrice := CalculateProtectiveLimitPriceBelowStop(worker.InitialStop, worker.TickSize)
 	stopLossOrderID, err := worker.broker.PlaceSLOrder(worker.ctx, worker.Symbol, worker.Token, remainingQuantity, worker.InitialStop, sellLimitPrice, lastTradedPrice, worker.TickSize)
 	if err != nil {
 		slog.Error("Initial SL placement failed; executing immediate protective flatten",
 			"symbol", worker.Symbol, "error", err)
-		worker.executeEmergencyFlatten("INITIAL_SL_REJECTED_BY_OMS")
+		worker.EmergencySellAllAndClosePosition("INITIAL_SL_REJECTED_BY_OMS")
 		return
 	}
 
@@ -173,8 +173,8 @@ func (worker *PositionWorker) ensureInitialSLPlaced() {
 	worker.persistPositionState()
 }
 
-// executeThreeStepScaleOut performs the Race-Free 3-Step Scale-Out at +1.0R with Compensating Rollback
-func (worker *PositionWorker) executeThreeStepScaleOut() {
+// SellHalfSharesAtProfitTarget performs the Race-Free 3-Step Scale-Out at +1.0R with Compensating Rollback
+func (worker *PositionWorker) SellHalfSharesAtProfitTarget() {
 	// Guard against racing entry limit buy: if entry is still resting, cancel it and freeze InitialQty
 	worker.mu.RLock()
 	entryOrderID := worker.entryOrderID
@@ -196,7 +196,7 @@ func (worker *PositionWorker) executeThreeStepScaleOut() {
 		worker.hasTranche1Completed.Store(true)
 		worker.isTranche1Pending.Store(false)
 		worker.currentGear.Store(GearDynamicTrail)
-		worker.ProposeStopRatchet(worker.BreakevenStop, worker.OneR, true)
+		worker.RaiseStopLossOrder(worker.BreakevenStop, worker.OneR, true)
 		return
 	}
 
@@ -206,7 +206,7 @@ func (worker *PositionWorker) executeThreeStepScaleOut() {
 	worker.mu.Unlock()
 
 	if stopLossOrderID == "" {
-		worker.ensureInitialSLPlaced()
+		worker.PlaceInitialStopLossOrderIfNotPlaced()
 		worker.mu.RLock()
 		stopLossOrderID = worker.slOrderID
 		worker.mu.RUnlock()
@@ -218,7 +218,7 @@ func (worker *PositionWorker) executeThreeStepScaleOut() {
 	scaleOutQty := remainingQuantity / 2
 	runnerQty := remainingQuantity - scaleOutQty
 	confirmedStopLossPrice := math.Float64frombits(worker.confirmedStopBits.Load())
-	currentLimitPrice := ComputeSellSLLimitPrice(confirmedStopLossPrice, worker.TickSize)
+	currentLimitPrice := CalculateProtectiveLimitPriceBelowStop(confirmedStopLossPrice, worker.TickSize)
 	lastTradedPrice := worker.LatestLTP()
 
 	// STEP 1: Shrink resting SL quantity from remainingQuantity -> runnerQty while KEEPING confirmedStopLossPrice trigger unchanged
@@ -253,7 +253,7 @@ func (worker *PositionWorker) executeThreeStepScaleOut() {
 		fullRemainingQuantity := worker.RemainingQty()
 		if fullRemainingQuantity > 0 && worker.modCount.Load() < MaxSafetyModifications {
 			if rbErr := worker.broker.ModifySLOrder(worker.ctx, stopLossOrderID, fullRemainingQuantity, confirmedStopLossPrice, currentLimitPrice, worker.LatestLTP(), worker.TickSize); rbErr != nil {
-				worker.executeEmergencyFlatten("SCALE_OUT_ROLLBACK_FAILED")
+				worker.EmergencySellAllAndClosePosition("SCALE_OUT_ROLLBACK_FAILED")
 				return
 			}
 			worker.mu.Lock()
@@ -295,7 +295,7 @@ func (worker *PositionWorker) executeThreeStepScaleOut() {
 	}
 
 	// STEP 3: Raise the remaining runner's SL trigger to Tax-Free Breakeven (Entry + Taxes + 0.15%)
-	breakevenTriggerPrice := BreakevenTriggerPrice(worker.GetEntryPrice(), int(worker.filledEntryQty.Load()), remainingRunnerQuantity, worker.TickSize)
+	breakevenTriggerPrice := CalculateTaxCoveringBreakevenStop(worker.GetEntryPrice(), int(worker.filledEntryQty.Load()), remainingRunnerQuantity, worker.TickSize)
 	worker.breakevenStopBits.Store(math.Float64bits(breakevenTriggerPrice))
 	worker.hasTranche1Completed.Store(true)
 	worker.isTranche1Pending.Store(false)
@@ -308,8 +308,8 @@ func (worker *PositionWorker) executeThreeStepScaleOut() {
 
 	currentLastTradedPrice := worker.LatestLTP()
 	if currentLastTradedPrice <= breakevenTriggerPrice+2.0*worker.TickSize {
-		// Price whipped back down to Breakeven during scale-out -> Flatten runner to lock net profit!
-		worker.executeEmergencyFlatten("RUNNER_BREAKEVEN_LOCK")
+		// Price whipped back down to Breakeven during scale-out -> Exit runner to lock net profit!
+		worker.EmergencySellAllAndClosePosition("RUNNER_BREAKEVEN_LOCK")
 		return
 	}
 
@@ -319,7 +319,7 @@ func (worker *PositionWorker) executeThreeStepScaleOut() {
 		worker.shadowStopBits.Store(math.Float64bits(breakevenTriggerPrice))
 		worker.proposedStopBits.Store(math.Float64bits(breakevenTriggerPrice))
 		if worker.modCount.Load() < MaxSafetyModifications {
-			breakevenLimitPrice := ComputeSellSLLimitPrice(breakevenTriggerPrice, worker.TickSize)
+			breakevenLimitPrice := CalculateProtectiveLimitPriceBelowStop(breakevenTriggerPrice, worker.TickSize)
 			if err := worker.broker.ModifySLOrder(worker.ctx, stopLossOrderID, remainingRunnerQuantity, breakevenTriggerPrice, breakevenLimitPrice, currentLastTradedPrice, worker.TickSize); err == nil {
 				worker.modCount.Add(1)
 				worker.lastModUnixMs.Store(time.Now().UnixMilli())
@@ -333,8 +333,8 @@ func (worker *PositionWorker) executeThreeStepScaleOut() {
 	worker.persistPositionState()
 }
 
-// executeEmergencyFlatten runs the 3-Stage Bulletproof Exit Protocol until RemainingQty() == 0
-func (worker *PositionWorker) executeEmergencyFlatten(reason string) {
+// EmergencySellAllAndClosePosition runs the 3-Stage Bulletproof Exit Protocol until RemainingQty() == 0
+func (worker *PositionWorker) EmergencySellAllAndClosePosition(reason string) {
 	emergencyFlattenStartTime := time.Now()
 	defer func() {
 		flattenElapsedDuration := time.Since(emergencyFlattenStartTime)

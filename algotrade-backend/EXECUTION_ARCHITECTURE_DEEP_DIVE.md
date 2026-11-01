@@ -18,7 +18,7 @@ Imagine a high-speed submarine navigating stormy seas:
 
 #### 2. Senior Quant & Systems Engineering Pillars
 1. **Single-Writer Actor Model (`internal/market`)**: Eliminates read/write mutex contention on tick ingestion. All tick processing, technical indicator calculation, and state updates occur inside a single goroutine running on a contiguous array of stock metrics (`[512]StockMetrics`) with **zero heap allocations** and **< 250ns** per-tick processing time.
-2. **Lock-Free Atomic Hot Path (`internal/trading/trailing_stop.go`)**: Active position monitoring, high-water mark tracking, and stop-loss breach detection (`OnTickHotPath`) are executed directly from the Actor's tick loop using hardware-level atomic operations (bit-cast IEEE-754 floats to `uint64`), running with **zero mutex locks** and zero heap allocations.
+2. **Lock-Free Atomic Hot Path (`internal/trading/trailing_stop.go`)**: Active position monitoring, high-water mark tracking, and stop-loss breach detection (`UpdateTrailingStopLossOnPriceTick`) are executed directly from the Actor's tick loop using hardware-level atomic operations (bit-cast IEEE-754 floats to `uint64`), running with **zero mutex locks** and zero heap allocations.
 3. **Fail-Safe Autonomous Execution (`internal/trading`)**: Each active position runs on its own dedicated worker goroutine (`PositionWorker`), managing order lifecycles with strict bounds on exchange modification limits (NSE maximum 25 modifications per order), 5-minute limit order timeouts with viable partial-fill promotion, 3-step race-free scale-outs, and a 4-stage anti-orphan exit recovery protocol.
 4. **Continuous Portfolio Heat Engine & EOD Optimization Engine (`internal/trading`, `internal/monitoring`)**: Account equity is guarded by a hard $2.0\%$ Portfolio Heat Cap. Once a winning position ratchets its stop to Breakeven (or above), its open downside risk drops to ₹0.00, releasing portfolio heat and allowing the engine to spawn new continuous trades during the day. All signals—both filled trades and rejected candidate setups—are logged asynchronously via a ring buffer to compute Maximum Favorable Excursion (MFE), Maximum Adverse Excursion (MAE), shadow outcomes, and automated 15:45 IST diagnostic reports emailed via Resend.
 
@@ -40,7 +40,7 @@ flowchart TB
         SNAP -->|Market Breadth & Regime| REG["Bottom-Up F&O Breadth Classifier (>=58% / <=40%)"]
         SNAP -->|11 Sectors| SEC["Granular Sector Health & Circuit Breakers"]
         SNAP -->|Quant Ranking| SCR["Quicksort Active Indices by BullishScore (~2µs)"]
-        SW -->|O(1) Lock-Free Dispatch| HP["worker.OnTickHotPath()"]
+        SW -->|O(1) Lock-Free Dispatch| HP["worker.UpdateTrailingStopLossOnPriceTick()"]
         SNAP -->|Execution Hook (1.0s)| MGR["execution_manager.go: OnSecondTick()"]
     end
 
@@ -109,7 +109,7 @@ Kite Ticker WebSocket
       ──[ParsedTick]──> actor.tickChan (Buffered 65,536)
         ──[Worker Goroutine]──> internal/market/market_hub.go: Actor.runLoop()
           ──[In-Memory Mutation]──> internal/market/tick_ingestion.go: Actor.processTick()
-            ──[O(1) Hot Path]──> internal/trading/trailing_stop.go: PositionWorker.OnTickHotPath()
+            ──[O(1) Hot Path]──> internal/trading/trailing_stop.go: PositionWorker.UpdateTrailingStopLossOnPriceTick()
 ```
 
 #### Zerodha Level 2 Binary Wire Layout (184 Bytes per Packet)
@@ -274,7 +274,7 @@ How many shares should we buy? A rookie asks: "How much money do I have?" A prof
 ```
 internal/trading/entry_gatekeeper.go: PickBestLongCandidate()
   ──> internal/trading/position_sizer.go: ComputePositionSize()
-        ├── internal/trading/stoploss.go: ComputeStopAndBufferSpec()
+        ├── internal/trading/stoploss.go: CalculateInitialStopLoss()
         ├── Check Scale-Invariant Risk Curve: EffectiveRiskPerTradePct()
         ├── Check Portfolio Heat Budget: min(RiskBudget, RemainingHeatBudgetRupees)
         ├── Apply 4 Institutional Sizing Constraints (Min across all 4)
@@ -367,16 +367,16 @@ if filled <= 0 {
 
 if filled < worker.DustFloorQty {
     // Unviable dust fill: flatten immediately
-    worker.executeEmergencyFlatten("PARTIAL_FILL_DUST_GUARD")
+    worker.EmergencySellAllAndClosePosition("PARTIAL_FILL_DUST_GUARD")
     return
 }
 
 // Viable partial fill: promote to active trade!
 runnerQty := max(1, filled - (filled / 2))
-beStop := BreakevenTriggerPrice(worker.GetEntryPrice(), filled, runnerQty, worker.TickSize)
+beStop := CalculateTaxCoveringBreakevenStop(worker.GetEntryPrice(), filled, runnerQty, worker.TickSize)
 worker.InitialQty = filled
 worker.BreakevenStop = beStop
-worker.ensureInitialSLPlaced()
+worker.PlaceInitialStopLossOrderIfNotPlaced()
 ```
 
 ---
@@ -393,7 +393,7 @@ Our engine solves this using **Mechanical Gears**:
 #### Exact Calling Chain & Flow
 ```
 internal/market/tick_ingestion.go: Actor.processTick()
-  ──[<250ns Hot Path]──> internal/trading/trailing_stop.go: PositionWorker.OnTickHotPath()
+  ──[<250ns Hot Path]──> internal/trading/trailing_stop.go: PositionWorker.UpdateTrailingStopLossOnPriceTick()
     ├── Update High-Water Mark (HWM) & Low-Water Mark (LWM) via atomic CAS
     ├── Guard A: 200ms SL breach latency watchdog
     ├── Guard B: Gear 4 Virtual Shadow Stop check (modCount >= 24)
@@ -401,8 +401,8 @@ internal/market/tick_ingestion.go: Actor.processTick()
     ├── Guard D: Breakeven Ratchet at +1.00R (avoids Brownian noise stop-out)
     ├── Guard E: 45-Minute In-Trade Alpha Decay Stagnation Watchdog (HWM < +0.50R)
     ├── Compute Dynamic Multipliers (M_flow, C_climax)
-    └── Call ProposeStopRatchet() ──[wakeWorker()]──> workerLoop
-          └── internal/trading/position_exit.go: executeThreeStepScaleOut()
+    └── Call RaiseStopLossOrder() ──[wakeWorker()]──> workerLoop
+          └── internal/trading/position_exit.go: SellHalfSharesAtProfitTarget()
 ```
 
 #### Trailing Stop Loss Gears Specification
@@ -412,9 +412,9 @@ internal/market/tick_ingestion.go: Actor.processTick()
 | **Gear 3: Coarse**| Mods 19–24| $\ge \max(0.40 \times \text{BaseBuffer}, 0.35 \times \text{ATR})$ | **1500 ms** | Preserves exchange modifications by anchoring to 5m structural lows |
 | **Gear 4: Shadow**| Mod $\ge 24$| Virtual in RAM (`shadowStopBits`) | **0 ms (In-Memory)**| **Preserves Modification #25** exclusively for emergency market exit |
 
-#### Race-Free 3-Step Scale-Out Protocol (`executeThreeStepScaleOut`)
+#### Race-Free 3-Step Scale-Out Protocol (`SellHalfSharesAtProfitTarget`)
 Triggered when trade reaches $+1.50R$ (Tranche 1 Asymmetric Profit Harvest per Dr. Samir Varma):
-- **Single-Share Position Invariant**: If $Q_{\text{remaining}} < 2$ (e.g. 1-share position), position halving is mathematically impossible ($1 / 2 = 0$). The engine marks Tranche 1 as complete, transitions to Gear 2 (`GearDynamicTrail`), and immediately ratchets the resting stop to Tax-Free Breakeven directly via `worker.ProposeStopRatchet`, allowing the single share to run safely without invalid zero-quantity exchange orders.
+- **Single-Share Position Invariant**: If $Q_{\text{remaining}} < 2$ (e.g. 1-share position), position halving is mathematically impossible ($1 / 2 = 0$). The engine marks Tranche 1 as complete, transitions to Gear 2 (`GearDynamicTrail`), and immediately ratchets the resting stop to Tax-Free Breakeven directly via `worker.RaiseStopLossOrder`, allowing the single share to run safely without invalid zero-quantity exchange orders.
 1. **Step 1 (Shrink SL)**: Shrink resting SL order quantity from $Q \to Q_{\text{runner}}$ while keeping trigger price unchanged.
 2. **Step 2 (Marketable Sell)**: Place marketable limit sell for $Q_{\text{scale}} = Q / 2$.
    - **Compensating Rollback**: If Step 2 fails, immediately re-expands resting SL quantity back to $Q$.
@@ -425,7 +425,7 @@ Triggered when trade reaches $+1.50R$ (Tranche 1 Asymmetric Profit Harvest per D
 - **Dr. Samir Varma & Rishi Narang Quant Law**: Intraday momentum signals have an information half-life $\lambda$ of 15–25 minutes. If a position has been active for $\ge 45\text{ minutes}$ and its peak favorable excursion has not even reached $+0.50R$, the edge has decayed into random walk transaction friction.
 - **Action**: Flatten immediately at market with exit reason `ALPHA_DECAY_45M_STAGNATION`, reclaiming margin and risk budget for fresh institutional setups.
 
-#### 4-Stage Bulletproof Exit Protocol (`executeEmergencyFlatten`)
+#### 4-Stage Bulletproof Exit Protocol (`EmergencySellAllAndClosePosition`)
 - **Stage A (Mutate to Market)**: Mutate resting SL order directly into `MARKET` (consumes reserved Modification #25). Awaits fill for up to **900ms**.
 - **Stage B & C (Escalating LPP Limit Sweeps)**: Cancel resting SL $\to$ Reconcile $\to$ 4-attempt escalating Liquidity Protection Price (LPP) sweep sell:
   - Attempt 1: $0.75\%$ slippage band (waits up to **900ms**)
@@ -546,13 +546,13 @@ Every wait, pause, sleep, and timer in the engine is purpose-built to handle net
 | **1.0 second** | `market/market_hub.go:449` | `snapshotTicker` | Periodic quant heartbeat. Balances sub-second market breadth recalculation and sorting with CPU cache efficiency. |
 | **5 minutes (300s)** | `trading/position_worker.go:432` | `entryTimeout` | Prevents resting limit orders from remaining open indefinitely as stale liquidity, while providing institutional pullback setups sufficient auction time to fill without chasing. |
 | **500 milliseconds** | `trading/position_worker.go:493` | `handleEntryTimeout` (`time.Sleep`) | **Cancellation Drain Window**: After sending cancel request to Zerodha/NSE, absorbs in-flight fill updates racing across the network before taking a final partial-fill inventory. |
-| **350 milliseconds** | `trading/trailing_stop.go:210` | `ProposeStopRatchet` (Gear 1) | **Agile Ratchet Cooldown**: Enforces debounce window on fast tick noise, preserving exchange modification quota (NSE max 25 per order). |
-| **1500 milliseconds** | `trading/trailing_stop.go:212` | `ProposeStopRatchet` (Gear 3) | **Coarse Trail Cooldown**: Dampens stop movements during the runner phase, allowing 5m candle low support to develop. |
-| **800 milliseconds** | `trading/position_exit.go:276` | `executeThreeStepScaleOut` (`waitTimer`) | **Scale-Out Fill Timer**: Awaits marketable sell fill notification from exchange; if unconfirmed at 800ms, triggers coalesced broker sync. |
-| **900 milliseconds** | `trading/position_exit.go:381` | `executeEmergencyFlatten` (`waitA`) | **Stage A Market Order Execution Window**: Gives exchange matching engine time to fill mutated market order before escalating to Stage B cancel-and-sweep. |
-| **900 milliseconds** | `trading/position_exit.go:420` | `executeEmergencyFlatten` (`waitB`) | **Stage B/C Sweep Execution Window**: Allows 900ms for exchange matching engine to fill escalating LPP sweep sells before escalating to the next liquidity band. |
-| **900 milliseconds** | `trading/position_exit.go:473` | `executeEmergencyFlatten` (`waitRec`)| **Stage D Recovery Execution Window**: Allows 900ms for recovery sweep order to fill during persistent recovery probing. |
-| **2.0 seconds** | `trading/position_exit.go:445` | `executeEmergencyFlatten` (`recoveryTicker`) | **Anti-Orphan Recovery Cadence**: Probes order book liquidity repeatedly during lower circuit freezes without violating Zerodha 10 req/s rate limits. |
+| **350 milliseconds** | `trading/trailing_stop.go:210` | `RaiseStopLossOrder` (Gear 1) | **Agile Ratchet Cooldown**: Enforces debounce window on fast tick noise, preserving exchange modification quota (NSE max 25 per order). |
+| **1500 milliseconds** | `trading/trailing_stop.go:212` | `RaiseStopLossOrder` (Gear 3) | **Coarse Trail Cooldown**: Dampens stop movements during the runner phase, allowing 5m candle low support to develop. |
+| **800 milliseconds** | `trading/position_exit.go:276` | `SellHalfSharesAtProfitTarget` (`waitTimer`) | **Scale-Out Fill Timer**: Awaits marketable sell fill notification from exchange; if unconfirmed at 800ms, triggers coalesced broker sync. |
+| **900 milliseconds** | `trading/position_exit.go:381` | `EmergencySellAllAndClosePosition` (`waitA`) | **Stage A Market Order Execution Window**: Gives exchange matching engine time to fill mutated market order before escalating to Stage B cancel-and-sweep. |
+| **900 milliseconds** | `trading/position_exit.go:420` | `EmergencySellAllAndClosePosition` (`waitB`) | **Stage B/C Sweep Execution Window**: Allows 900ms for exchange matching engine to fill escalating LPP sweep sells before escalating to the next liquidity band. |
+| **900 milliseconds** | `trading/position_exit.go:473` | `EmergencySellAllAndClosePosition` (`waitRec`)| **Stage D Recovery Execution Window**: Allows 900ms for recovery sweep order to fill during persistent recovery probing. |
+| **2.0 seconds** | `trading/position_exit.go:445` | `EmergencySellAllAndClosePosition` (`recoveryTicker`) | **Anti-Orphan Recovery Cadence**: Probes order book liquidity repeatedly during lower circuit freezes without violating Zerodha 10 req/s rate limits. |
 | **10 seconds** | `trading/execution_manager.go:399` | `orderSyncTicker` | Background broker reconciliation loop that detects external manual broker interventions or dropped WebSocket postbacks. |
 | **30 seconds** | `trading/execution_manager.go:401` | `marginRefreshTicker` | Refreshes live Zerodha RMS equity margins and cash collateral balances. |
 | **15 minutes** | `trading/entry_gatekeeper.go:82` | `symbolCooldowns` | Post-exit psychological & algorithmic churn lockout; prevents immediate re-entry into a freshly exited symbol. |
@@ -571,7 +571,7 @@ Every wait, pause, sleep, and timer in the engine is purpose-built to handle net
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │ TIER 1: Lock-Free Atomic Hot Path (<250ns, Zero Heap Allocations)      │
-│ Called directly by Single-Writer Actor: worker.OnTickHotPath()         │
+│ Called directly by Single-Writer Actor: worker.UpdateTrailingStopLossOnPriceTick() │
 │ - Reads/Writes: latestLTPBits, highWaterMarkBits, confirmedStopBits,   │
 │   shadowStopBits, proposedStopBits via atomic.Uint64 bitcasts          │
 │ - Ratchets in-memory shadow stops via CAS loops                        │
@@ -613,13 +613,13 @@ Every wait, pause, sleep, and timer in the engine is purpose-built to handle net
 | `internal/trading/session_clock.go` | `EvaluateGlobalSessionClocks()` | `Manager.OnSecondTick` | Computes DST-aware global clocks and selects 1 of 6 NSE intraday phases. |
 | `internal/trading/entry_gatekeeper.go` | `PickBestLongCandidate()` | `Manager.OnSecondTick` | Executes Gates 0–5, evaluates VWAP Pullback Reclaim, Bear Trap Spring, & 15m ORB Retest, emits shadow signals. |
 | `internal/trading/position_sizer.go` | `ComputePositionSize()` | `PickBestLongCandidate` | Computes 4 constraints (Risk, Margin, Concentration, Liquidity) and enforces 1.5x tax net profit gate. |
-| `internal/trading/stoploss.go` | `ComputeStopAndBufferSpec()` | `ComputePositionSize` | Calculates non-inverting stop bounds [DeltaMin, DeltaMax], BaseBuffer, and checks No-Chase rule. |
+| `internal/trading/stoploss.go` | `CalculateInitialStopLoss()` | `ComputePositionSize` | Calculates non-inverting stop bounds [DeltaMin, DeltaMax], BaseBuffer, and checks No-Chase rule. |
 | `internal/trading/tax_calculator.go` | `CalculateRoundTripCharges()` | `position_sizer.go`, `trade_history.go` | Computes exact Indian Cash MIS statutory taxes (STT, Exch, SEBI, Stamp, GST, Brokerage). |
 | `internal/trading/position_worker.go` | `Start()` | `Manager.spawnCandidateWorker` | Places limit buy order via broker, sets 5m timeout, and starts `go workerLoop()`. |
 | `internal/trading/position_worker.go` | `handleEntryTimeout()` | `workerLoop` (at 5m) | Cancels unfilled entry, waits 500ms drain window, promotes partial fills $\ge$ DustFloorQty. |
-| `internal/trading/trailing_stop.go` | `OnTickHotPath()` | `Actor.processTick` | Lock-free HWM update, SL breach watchdog, Gear 4 shadow stop, ProposeStopRatchet. |
-| `internal/trading/position_exit.go` | `executeThreeStepScaleOut()` | `workerLoop` | Executes race-free 3-step scale-out at +1.50R with compensating rollback and 800ms timer. |
-| `internal/trading/position_exit.go` | `executeEmergencyFlatten()` | `workerLoop`, `TriggerEmergencyExit` | 4-stage exit protocol: Mutate to Market $\to$ Escalating LPP sweeps $\to$ 2s anti-orphan recovery. |
+| `internal/trading/trailing_stop.go` | `UpdateTrailingStopLossOnPriceTick()` | `Actor.processTick` | Lock-free HWM update, SL breach watchdog, Gear 4 shadow stop, RaiseStopLossOrder. |
+| `internal/trading/position_exit.go` | `SellHalfSharesAtProfitTarget()` | `workerLoop` | Executes race-free 3-step scale-out at +1.50R with compensating rollback and 800ms timer. |
+| `internal/trading/position_exit.go` | `EmergencySellAllAndClosePosition()` | `workerLoop`, `TriggerEmergencyExit` | 4-stage exit protocol: Mutate to Market $\to$ Escalating LPP sweeps $\to$ 2s anti-orphan recovery. |
 | `internal/trading/order_reconciler.go` | `ProcessOrderEvent()` | Broker / WebSocket / Postback | Deduplicates fills, updates `lastFilledByOrd`, computes positive incremental fill deltas. |
 | `internal/trading/risk_manager.go` | `ComputeCapitalSummary()` | `Manager.OnSecondTick` | Computes NetEquity, FreeMargin, BuyingPower5x, DrawdownMult, and checks 3 circuit breakers. |
 | `internal/monitoring/collector.go` | `EmitSignalEvent()`, `EmitTradeEvent()` | Execution Engine | Non-blocking ring buffer event ingestion and 500ms batch persistence. |

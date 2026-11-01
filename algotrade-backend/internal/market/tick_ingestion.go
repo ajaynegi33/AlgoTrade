@@ -78,7 +78,7 @@ func (actor *Actor) processTick(tick *ParsedTick) {
 			stock.BaselineCumVolume = actor.slotBaselines[stockIndex][barIdx].MedianCumVol
 		}
 		if listener := actor.positionTickListeners[stockIndex]; listener != nil {
-			listener.OnTickHotPath(stock)
+			listener.UpdateTrailingStopLossOnPriceTick(stock)
 		}
 		return
 	}
@@ -239,9 +239,9 @@ func (actor *Actor) processTick(tick *ParsedTick) {
 		stock.WasExtended = false
 	}
 
-	// O(1) lock-free hot-path dispatch to active PositionWorker if bound
+	// O(1) lock-free dispatch to active PositionWorker if bound
 	if listener := actor.positionTickListeners[stockIndex]; listener != nil {
-		listener.OnTickHotPath(stock)
+		listener.UpdateTrailingStopLossOnPriceTick(stock)
 	}
 }
 

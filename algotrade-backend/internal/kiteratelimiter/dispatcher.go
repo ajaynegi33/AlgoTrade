@@ -278,13 +278,33 @@ func (dispatcher *CentralKiteDispatcher) processStandardEnvelope(envelope KiteRe
 		return
 	}
 
-	tokenAcquireError := dispatcher.orderTokenBucket.Acquire(envelope.ExecutionContext)
-	if tokenAcquireError != nil {
-		dispatcher.droppedStaleCount.Add(1)
-		dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
-			ResponseError: tokenAcquireError,
-		})
-		return
+	for {
+		if envelope.ExecutionContext.Err() != nil {
+			dispatcher.droppedStaleCount.Add(1)
+			dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+				ResponseError: envelope.ExecutionContext.Err(),
+			})
+			return
+		}
+
+		if dispatcher.orderTokenBucket.TryAcquire() {
+			break
+		}
+
+		waitDuration := dispatcher.orderTokenBucket.WaitDurationForNextToken()
+		select {
+		case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
+			dispatcher.processEmergencyEnvelope(emergencyEnvelope)
+		case <-time.After(waitDuration):
+		case <-envelope.ExecutionContext.Done():
+			dispatcher.droppedStaleCount.Add(1)
+			dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+				ResponseError: envelope.ExecutionContext.Err(),
+			})
+			return
+		case <-dispatcher.dispatcherContext.Done():
+			return
+		}
 	}
 
 	dispatcher.executeWithGrantedToken(envelope)
@@ -314,13 +334,35 @@ func (dispatcher *CentralKiteDispatcher) processBackgroundEnvelope(envelope Kite
 		tokenBucket = dispatcher.generalTokenBucket
 	}
 
-	tokenAcquireError := tokenBucket.Acquire(envelope.ExecutionContext)
-	if tokenAcquireError != nil {
-		dispatcher.droppedStaleCount.Add(1)
-		dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
-			ResponseError: tokenAcquireError,
-		})
-		return
+	for {
+		if envelope.ExecutionContext.Err() != nil {
+			dispatcher.droppedStaleCount.Add(1)
+			dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+				ResponseError: envelope.ExecutionContext.Err(),
+			})
+			return
+		}
+
+		if tokenBucket.TryAcquire() {
+			break
+		}
+
+		waitDuration := tokenBucket.WaitDurationForNextToken()
+		select {
+		case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
+			dispatcher.processEmergencyEnvelope(emergencyEnvelope)
+		case standardEnvelope := <-dispatcher.standardOrderChannel:
+			dispatcher.processStandardEnvelope(standardEnvelope)
+		case <-time.After(waitDuration):
+		case <-envelope.ExecutionContext.Done():
+			dispatcher.droppedStaleCount.Add(1)
+			dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+				ResponseError: envelope.ExecutionContext.Err(),
+			})
+			return
+		case <-dispatcher.dispatcherContext.Done():
+			return
+		}
 	}
 
 	dispatcher.executeWithGrantedToken(envelope)

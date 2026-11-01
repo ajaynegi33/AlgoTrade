@@ -286,7 +286,7 @@ func (broker *ZerodhaLiveBroker) PlaceSLOrder(
 		return "", fmt.Errorf("%w: trigger=%.2f, ltp=%.2f", ErrTriggerAboveLTP, triggerPrice, currentLTP)
 	}
 	if limitPrice <= 0 || limitPrice > triggerPrice {
-		limitPrice = ComputeSellSLLimitPrice(triggerPrice, tickSize)
+		limitPrice = CalculateProtectiveLimitPriceBelowStop(triggerPrice, tickSize)
 	}
 	client := broker.kiteService.GetClient()
 	session := broker.kiteService.GetSession()
@@ -354,7 +354,7 @@ func (broker *ZerodhaLiveBroker) ModifySLOrder(
 		return fmt.Errorf("%w: newTrigger=%.2f, ltp=%.2f", ErrTriggerAboveLTP, newTrigger, currentLTP)
 	}
 	if newLimit <= 0 || newLimit > newTrigger {
-		newLimit = ComputeSellSLLimitPrice(newTrigger, tickSize)
+		newLimit = CalculateProtectiveLimitPriceBelowStop(newTrigger, tickSize)
 	}
 	apiCallStartTime := time.Now()
 	_, err := broker.kiteService.RawModifyOrderPUT(ctx, DefaultVariety, orderID, "SL", newQty, newLimit, newTrigger)
@@ -894,7 +894,7 @@ func (broker *PaperBroker) PlaceSLOrder(
 		return "", fmt.Errorf("%w: trigger=%.2f, ltp=%.2f", ErrTriggerAboveLTP, triggerPrice, currentLTP)
 	}
 	if limitPrice <= 0 || limitPrice > triggerPrice {
-		limitPrice = ComputeSellSLLimitPrice(triggerPrice, tickSize)
+		limitPrice = CalculateProtectiveLimitPriceBelowStop(triggerPrice, tickSize)
 	}
 
 	orderID := broker.generateNextOrderID()
@@ -938,7 +938,7 @@ func (broker *PaperBroker) ModifySLOrder(
 		return fmt.Errorf("%w: newTrigger=%.2f, ltp=%.2f", ErrTriggerAboveLTP, newTrigger, currentLTP)
 	}
 	if newLimit <= 0 || newLimit > newTrigger {
-		newLimit = ComputeSellSLLimitPrice(newTrigger, tickSize)
+		newLimit = CalculateProtectiveLimitPriceBelowStop(newTrigger, tickSize)
 	}
 
 	broker.mu.Lock()

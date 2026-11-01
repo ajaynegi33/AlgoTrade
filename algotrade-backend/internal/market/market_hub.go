@@ -23,9 +23,9 @@ type BarFlushItem struct {
 	Bar   OHLCVBar
 }
 
-// PositionTickListener is the lock-free O(1) hot-path interface for active position workers
+// PositionTickListener is the lock-free O(1) interface for active position workers to update trailing stops
 type PositionTickListener interface {
-	OnTickHotPath(stockMetrics *StockMetrics)
+	UpdateTrailingStopLossOnPriceTick(stockMetrics *StockMetrics)
 }
 
 // ExecutionHook is invoked once per second inside the Actor loop with zero lock contention

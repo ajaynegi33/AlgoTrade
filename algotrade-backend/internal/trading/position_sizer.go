@@ -121,7 +121,7 @@ func ComputePositionSize(
 	entryLimitPrice := RoundUpToTick(refAsk+tickSize, tickSize)
 
 	// 2. Delegate Stop Loss & 1R calculation to stoploss.go
-	stopSpec, err := ComputeStopAndBufferSpec(entryLimitPrice, signalBarLow, stockMetrics.ATR14, tickSize)
+	stopSpec, err := CalculateInitialStopLoss(entryLimitPrice, signalBarLow, stockMetrics.ATR14, tickSize)
 	if err != nil {
 		return SizingDecision{
 			IsApproved:   false,
@@ -251,7 +251,7 @@ func ComputePositionSize(
 
 	// Calculate Breakeven Stop on runner tranche using stoploss.go
 	runnerQty := allocatedQuantity // 100% runner policy to prevent double-brokerage and tax churn
-	beStop := BreakevenTriggerPrice(entryLimitPrice, allocatedQuantity, runnerQty, tickSize)
+	beStop := CalculateTaxCoveringBreakevenStop(entryLimitPrice, allocatedQuantity, runnerQty, tickSize)
 	reqMargin := (float64(allocatedQuantity) * entryLimitPrice) / misIntradayLeverageMultiplier
 
 	// Target Projections: R1 target at +0.65R (scale-out), R2 target at +1.65R (runner expansion)
