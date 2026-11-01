@@ -86,7 +86,6 @@ func (worker *PositionWorker) UpdateTrailingStopLossOnPriceTick(stockMetrics *ma
 		lowWaterMark = lastTradedPrice
 		worker.lowWaterMarkBits.Store(math.Float64bits(lowWaterMark))
 	}
-	currentRMultiple := (lastTradedPrice - entryPrice) / worker.OneR
 	maxFavorableRMultiple := (highWaterMark - entryPrice) / worker.OneR
 	confirmedStopLoss := math.Float64frombits(worker.confirmedStopBits.Load())
 
@@ -125,16 +124,7 @@ func (worker *PositionWorker) UpdateTrailingStopLossOnPriceTick(stockMetrics *ma
 		effectiveAggressorBuy = stockMetrics.FastAggressorEMA
 	}
 
-	// 5. GUARD D: +1.50R Asymmetric Profit Scale-Out Trigger (Tranche 1 Early Harvest)
-	// Per Dr. Samir Varma ("You can go broke taking a profit"): premature scale-out at +0.65R destroys expected value.
-	// We allow winners to breathe through noise and harvest 50% only when the trade reaches >= +1.50R.
-	if !worker.hasTranche1Completed.Load() && !worker.isTranche1Pending.Load() && currentRMultiple >= 1.50 {
-		worker.isTranche1Pending.Store(true)
-		worker.wakeWorker()
-		return
-	}
-
-	// 6. Compute Dynamic Order-Flow Multiplier M_flow & Parabolic Climax Factor C_climax
+	// 5. Compute Dynamic Order-Flow Multiplier M_flow & Parabolic Climax Factor C_climax
 	currentBar := stockMetrics.SessionBars[stockMetrics.CurrentBarIdx]
 	var closeLocationValue float64 = 0.50
 	if currentBar.High > currentBar.Low {
@@ -160,9 +150,9 @@ func (worker *PositionWorker) UpdateTrailingStopLossOnPriceTick(stockMetrics *ma
 		parabolicClimaxFactor = math.Max(0.35, 1.0-0.22*(vwapExtensionMultiple-1.8))
 	}
 
-	// 7. Dynamic Breathing Buffer & High-Frequency Breakeven Ratchet
+	// 6. Dynamic Breathing Buffer & High-Frequency Breakeven Ratchet
 	effectiveBaseBuffer := worker.BaseBuffer
-	if !worker.hasTranche1Completed.Load() && flowScore < 0.55 {
+	if !worker.hasBreakevenCompleted.Load() && flowScore < 0.55 {
 		effectiveBaseBuffer = math.Min(worker.BaseBuffer, worker.OneR)
 	}
 
@@ -173,14 +163,15 @@ func (worker *PositionWorker) UpdateTrailingStopLossOnPriceTick(stockMetrics *ma
 	// Per Rishi Narang & Dr. Samir Varma: Ratcheting to breakeven at +0.50R suffocated trades in normal Brownian noise.
 	// Moving to BE at +1.00R guarantees market noise cannot stop out valid trending moves prematurely.
 	if maxFavorableRMultiple >= 1.00 {
+		worker.hasBreakevenCompleted.Store(true)
 		unclampedCandidateStop = math.Max(unclampedCandidateStop, breakevenStop)
 	}
-	if worker.hasTranche1Completed.Load() && stockMetrics.CurrentBarIdx > worker.EntryBarIdx && stockMetrics.CurrentBarIdx >= 1 {
+	if worker.hasBreakevenCompleted.Load() && stockMetrics.CurrentBarIdx > worker.EntryBarIdx && stockMetrics.CurrentBarIdx >= 1 {
 		prev5mLow := stockMetrics.SessionBars[stockMetrics.CurrentBarIdx-1].Low - 2.0*worker.TickSize
 		unclampedCandidateStop = math.Max(unclampedCandidateStop, RoundToTick(prev5mLow, worker.TickSize))
 	}
 
-	// 8. OrderBlock Rule: Judge the Zone on Completed 5-Minute Candle Closes (Never on Intra-Candle Wicks)
+	// 7. OrderBlock Rule: Judge the Zone on Completed 5-Minute Candle Closes (Never on Intra-Candle Wicks)
 	if stockMetrics.CurrentBarIdx > worker.EntryBarIdx && stockMetrics.CurrentBarIdx >= 1 {
 		previousBar := stockMetrics.SessionBars[stockMetrics.CurrentBarIdx-1]
 		if previousBar.Close > 0 && previousBar.Close < worker.InitialStop {

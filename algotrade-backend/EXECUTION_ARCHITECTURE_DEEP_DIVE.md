@@ -397,23 +397,20 @@ internal/market/tick_ingestion.go: Actor.processTick()
     ├── Update High-Water Mark (HWM) & Low-Water Mark (LWM) via atomic CAS
     ├── Guard A: 200ms SL breach latency watchdog
     ├── Guard B: Gear 4 Virtual Shadow Stop check (modCount >= 24)
-    ├── Guard C: +1.50R Scale-out trigger (isTranche1Pending = true)
-    ├── Guard D: Breakeven Ratchet at +1.00R (avoids Brownian noise stop-out)
-    ├── Guard E: 45-Minute In-Trade Alpha Decay Stagnation Watchdog (HWM < +0.50R)
+    ├── Guard C: Breakeven Ratchet at +1.00R (avoids Brownian noise stop-out)
+    ├── Guard D: 45-Minute In-Trade Alpha Decay Stagnation Watchdog (HWM < +0.50R)
     ├── Compute Dynamic Multipliers (M_flow, C_climax)
     └── Call RaiseStopLossOrder() ──[wakeWorker()]──> workerLoop
-          └── internal/trading/position_exit.go: SellHalfSharesAtProfitTarget()
 ```
 
 #### Detailed Step-by-Step Tick Lifecycle (`UpdateTrailingStopLossOnPriceTick`)
-Every live tick runs through this 7-step sequence:
+Every live tick runs through this 6-step sequence:
 * **Step 1: Update High-Water Mark (`highWaterMark`)**: If price rises from ₹500 $\to$ ₹510 $\to$ ₹525, `highWaterMark` updates to ₹525.
 * **Step 2: Guard A (Gapped-Through SL Watchdog)**: If market gaps below stop loss without Zerodha executing, detects within 1 second and immediately fires an emergency market exit.
-* **Step 3: Guard D (The +1.50R Profit Scale-Out Trigger)**: If price reaches $+1.50R$ ($₹500 + 1.5 \times ₹10 = ₹515$), triggers `SellHalfSharesAtProfitTarget()` to lock in gains.
-* **Step 4: Check Buyer Strength vs Seller Pressure (`orderFlowMultiplier`)**: If buyers dominate the tape, allows more breathing room so winners aren't shaken out. If volume dries up, tightens the buffer to protect profits.
-* **Step 5: Parabolic Climax Tightener (`parabolicClimaxFactor`)**: If a stock surges vertically ($>2.2R$ and $>1.8\text{ ATR}$ above VWAP), moves like that snap back violently. Clamps the stop right behind price to capture the peak.
-* **Step 6: The +1.0R Tax-Free Breakeven Ratchet**: Once trade reaches $+1.0R$ (e.g. ₹510), stop-loss is raised to **Tax-Free Breakeven** via `CalculateTaxCoveringBreakevenStop()`. Downside risk drops to **₹0.00**.
-* **Step 7: Propose Higher Stop (`RaiseStopLossOrder`)**: If the candidate stop is higher than the exchange order, raises the resting stop using the 4 Mechanical Gears.
+* **Step 3: Check Buyer Strength vs Seller Pressure (`orderFlowMultiplier`)**: If buyers dominate the tape, allows more breathing room so winners aren't shaken out. If volume dries up, tightens the buffer to protect profits.
+* **Step 4: Parabolic Climax Tightener (`parabolicClimaxFactor`)**: If a stock surges vertically ($>2.2R$ and $>1.8\text{ ATR}$ above VWAP), moves like that snap back violently. Clamps the stop right behind price to capture the peak.
+* **Step 5: The +1.0R Tax-Free Breakeven Ratchet**: Once trade reaches $+1.0R$ (e.g. ₹510), stop-loss is raised to **Tax-Free Breakeven** via `CalculateTaxCoveringBreakevenStop()`. Downside risk drops to **₹0.00** for 100% of the position.
+* **Step 6: Propose Higher Stop (`RaiseStopLossOrder`)**: If the candidate stop is higher than the exchange order, raises the resting stop using the 4 Mechanical Gears.
 
 #### Trailing Stop Loss Gears Specification
 | Gear | Mod Quota | Minimum Advance Requirement | Minimum Cooldown | Architectural Objective |
@@ -422,14 +419,14 @@ Every live tick runs through this 7-step sequence:
 | **Gear 3: Coarse**| Mods 19–24| $\ge \max(0.40 \times \text{BaseBuffer}, 0.35 \times \text{ATR})$ | **1500 ms** | Preserves exchange modifications by anchoring to 5m structural lows |
 | **Gear 4: Shadow**| Mod $\ge 24$| Virtual in RAM (`shadowStopBits`) | **0 ms (In-Memory)**| **Preserves Modification #25** exclusively for emergency market exit |
 
-#### Race-Free 3-Step Scale-Out Protocol (`SellHalfSharesAtProfitTarget`)
-Triggered when trade reaches $+1.50R$ (Tranche 1 Asymmetric Profit Harvest per Dr. Samir Varma):
-- **Single-Share Position Invariant**: If $Q_{\text{remaining}} < 2$ (e.g. 1-share position), position halving is mathematically impossible ($1 / 2 = 0$). The engine marks Tranche 1 as complete, transitions to Gear 2 (`GearDynamicTrail`), and immediately ratchets the resting stop to Tax-Free Breakeven directly via `worker.RaiseStopLossOrder`, allowing the single share to run safely without invalid zero-quantity exchange orders.
-1. **Step 1 (Shrink SL)**: Shrink resting SL order quantity from $Q \to Q_{\text{runner}}$ while keeping trigger price unchanged.
-2. **Step 2 (Marketable Sell)**: Place marketable limit sell for $Q_{\text{scale}} = Q / 2$.
-   - **Compensating Rollback**: If Step 2 fails, immediately re-expands resting SL quantity back to $Q$.
-3. **Step 3 (Raise to Tax-Free Breakeven)**: Awaits fill confirmation for up to **800ms**. Cancels any unfilled remainder, reconciles, and raises runner SL trigger to **Tax-Free Breakeven**:
-   $$\text{BreakevenStop} = \text{EntryPrice} + \frac{\text{TotalTaxesEntireTrade}}{Q_{\text{runner}}} + \max(2\text{ ticks}, 0.15\% \times \text{EntryPrice})$$
+#### 100% Full-Position Dynamic Trailing Protocol
+AlgoTrade protects 100% of open shares with a single cohesive trailing defense:
+1. **Zero Double-Brokerage**: Avoids splitting the trade into two executions (which would incur double Zerodha ₹20 brokerage fees and double contract taxes).
+2. **Convex Trend Capture**: 100% of shares participate in massive trend expansions (+3R, +5R, +7R).
+3. **Tax-Free Breakeven at +1.00R**:
+   $$\text{BreakevenStop} = \text{EntryPrice} + \frac{\text{TotalTaxesEntireTrade}}{Q_{\text{initial}}} + \max(2\text{ ticks}, 0.15\% \times \text{EntryPrice})$$
+   Once the price reaches $+1.00R$, the stop is ratcheted to Breakeven for all shares, eliminating downside risk completely.
+4. **Single-Order Exit**: When the trailing stop or climax trigger fires, all shares exit in one clean market sweep.
 
 #### In-Trade Alpha Decay Stagnation Guard
 - **Dr. Samir Varma & Rishi Narang Quant Law**: Intraday momentum signals have an information half-life $\lambda$ of 15–25 minutes. If a position has been active for $\ge 45\text{ minutes}$ and its peak favorable excursion has not even reached $+0.50R$, the edge has decayed into random walk transaction friction.
@@ -558,7 +555,6 @@ Every wait, pause, sleep, and timer in the engine is purpose-built to handle net
 | **500 milliseconds** | `trading/position_worker.go:493` | `handleEntryTimeout` (`time.Sleep`) | **Cancellation Drain Window**: After sending cancel request to Zerodha/NSE, absorbs in-flight fill updates racing across the network before taking a final partial-fill inventory. |
 | **350 milliseconds** | `trading/trailing_stop.go:210` | `RaiseStopLossOrder` (Gear 1) | **Agile Ratchet Cooldown**: Enforces debounce window on fast tick noise, preserving exchange modification quota (NSE max 25 per order). |
 | **1500 milliseconds** | `trading/trailing_stop.go:212` | `RaiseStopLossOrder` (Gear 3) | **Coarse Trail Cooldown**: Dampens stop movements during the runner phase, allowing 5m candle low support to develop. |
-| **800 milliseconds** | `trading/position_exit.go:276` | `SellHalfSharesAtProfitTarget` (`waitTimer`) | **Scale-Out Fill Timer**: Awaits marketable sell fill notification from exchange; if unconfirmed at 800ms, triggers coalesced broker sync. |
 | **900 milliseconds** | `trading/position_exit.go:381` | `EmergencySellAllAndClosePosition` (`waitA`) | **Stage A Market Order Execution Window**: Gives exchange matching engine time to fill mutated market order before escalating to Stage B cancel-and-sweep. |
 | **900 milliseconds** | `trading/position_exit.go:420` | `EmergencySellAllAndClosePosition` (`waitB`) | **Stage B/C Sweep Execution Window**: Allows 900ms for exchange matching engine to fill escalating LPP sweep sells before escalating to the next liquidity band. |
 | **900 milliseconds** | `trading/position_exit.go:473` | `EmergencySellAllAndClosePosition` (`waitRec`)| **Stage D Recovery Execution Window**: Allows 900ms for recovery sweep order to fill during persistent recovery probing. |
@@ -628,7 +624,6 @@ Every wait, pause, sleep, and timer in the engine is purpose-built to handle net
 | `internal/trading/position_worker.go` | `Start()` | `Manager.spawnCandidateWorker` | Places limit buy order via broker, sets 5m timeout, and starts `go workerLoop()`. |
 | `internal/trading/position_worker.go` | `handleEntryTimeout()` | `workerLoop` (at 5m) | Cancels unfilled entry, waits 500ms drain window, promotes partial fills $\ge$ DustFloorQty. |
 | `internal/trading/trailing_stop.go` | `UpdateTrailingStopLossOnPriceTick()` | `Actor.processTick` | Lock-free HWM update, SL breach watchdog, Gear 4 shadow stop, RaiseStopLossOrder. |
-| `internal/trading/position_exit.go` | `SellHalfSharesAtProfitTarget()` | `workerLoop` | Executes race-free 3-step scale-out at +1.50R with compensating rollback and 800ms timer. |
 | `internal/trading/position_exit.go` | `EmergencySellAllAndClosePosition()` | `workerLoop`, `TriggerEmergencyExit` | 4-stage exit protocol: Mutate to Market $\to$ Escalating LPP sweeps $\to$ 2s anti-orphan recovery. |
 | `internal/trading/order_reconciler.go` | `ProcessOrderEvent()` | Broker / WebSocket / Postback | Deduplicates fills, updates `lastFilledByOrd`, computes positive incremental fill deltas. |
 | `internal/trading/risk_manager.go` | `ComputeCapitalSummary()` | `Manager.OnSecondTick` | Computes NetEquity, FreeMargin, BuyingPower5x, DrawdownMult, and checks 3 circuit breakers. |

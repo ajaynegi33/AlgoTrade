@@ -16,7 +16,6 @@ import (
 const (
 	StateEntryPlaced      = "ENTRY_PLACED"
 	StateProtectedActive  = "PROTECTED_ACTIVE"
-	StateScaleOutPending  = "SCALE_OUT_PENDING"
 	StateRunnerActive     = "RUNNER_ACTIVE"
 	StateShadowStopActive = "SHADOW_STOP_ACTIVE"
 	StateEmergencyFlatten = "EMERGENCY_FLATTENING"
@@ -66,8 +65,7 @@ type PositionWorker struct {
 	filledExitQty         atomic.Int64
 	modCount              atomic.Int32
 	currentGear           atomic.Int32
-	hasTranche1Completed  atomic.Bool
-	isTranche1Pending     atomic.Bool
+	hasBreakevenCompleted atomic.Bool
 	isMarketExitPending   atomic.Bool
 	isClosed              atomic.Bool
 	hasClosedNotified     atomic.Bool
@@ -553,13 +551,12 @@ func (worker *PositionWorker) handleEntryTimeout() {
 	hasSL := worker.slOrderID != ""
 	slOrderID := worker.slOrderID
 	slQty := worker.slOrderQty
-	workerState := worker.state
 	worker.mu.Unlock()
 	worker.breakevenStopBits.Store(math.Float64bits(beStop))
 
 	if !hasSL {
 		worker.PlaceInitialStopLossOrderIfNotPlaced()
-	} else if filled > slQty && !worker.hasTranche1Completed.Load() && workerState != StateScaleOutPending && worker.modCount.Load() < MaxSafetyModifications {
+	} else if filled > slQty && !worker.hasBreakevenCompleted.Load() && worker.modCount.Load() < MaxSafetyModifications {
 		curStop := math.Float64frombits(worker.confirmedStopBits.Load())
 		limitPx := CalculateProtectiveLimitPriceBelowStop(curStop, worker.TickSize)
 		ltp := worker.LatestLTP()
@@ -596,7 +593,7 @@ func (worker *PositionWorker) ToDTO() market.ActivePositionDTO {
 	remQty := worker.RemainingQty()
 	mods := int(worker.modCount.Load())
 	gear := int(worker.currentGear.Load())
-	hasTranche1Completed := worker.hasTranche1Completed.Load()
+	hasTranche1Completed := worker.hasBreakevenCompleted.Load()
 
 	var rMult, mfeR, maeR float64
 	if worker.OneR > 0 {

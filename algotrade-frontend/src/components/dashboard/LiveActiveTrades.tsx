@@ -197,7 +197,7 @@ export const LiveActiveTrades = memo(function LiveActiveTrades({
 
                   <div className="p-2.5 rounded-xl bg-white border border-slate-200/80">
                     <span className="text-[10px] text-slate-400 block uppercase">
-                      {pos.tranche1_done ? "Runner Buffer (Δ)" : "1R Scale-Out"}
+                      {pos.tranche1_done ? "Runner Buffer (Δ)" : "Target +1.0R"}
                     </span>
                     <strong className="text-indigo-700 font-black">
                       ₹{(pos.tranche1_done ? pos.base_buffer : target1R).toFixed(2)}
@@ -363,7 +363,7 @@ export const LiveActiveTrades = memo(function LiveActiveTrades({
                       NSE Order Modification Budget ({pos.mod_count}/{pos.max_mods || 25})
                     </span>
                     <span className="text-slate-500">
-                      {pos.tranche1_done ? "50% Banked at +1R • Runner Active" : "Pre-1R Loss-Minimizer Active"}
+                      {pos.tranche1_done ? "Breakeven Locked (₹0 Risk) • 100% Runner Active" : "Pre-1R Initial Risk Active"}
                     </span>
                   </div>
                   <div className="w-full h-1.5 rounded-full bg-slate-200 overflow-hidden">

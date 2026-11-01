@@ -144,19 +144,18 @@ func TestPositionWorkerThreeStepScaleOutAndShadowStopMod25(t *testing.T) {
 		t.Fatalf("expected RemainingQty=%d, got %d", sizing.Quantity, worker.RemainingQty())
 	}
 
-	// Simulate rally to +1.60R -> triggers 3-Step Scale-Out (50% sold, runner SL moved to Breakeven)
+	// Simulate rally to +1.60R -> locks in Tax-Free Breakeven for 100% full position
 	stock.LTP = worker.GetEntryPrice() + 1.60*worker.OneR
 	stock.RollingPeak = stock.LTP
 	stock.LastUpdatedUnix += 5
 	worker.UpdateTrailingStopLossOnPriceTick(&stock)
 
 	time.Sleep(120 * time.Millisecond)
-	if !worker.hasTranche1Completed.Load() {
-		t.Fatalf("expected hasTranche1Completed == true after +1.60R")
+	if !worker.hasBreakevenCompleted.Load() {
+		t.Fatalf("expected hasBreakevenCompleted == true after +1.60R")
 	}
-	expectedRunner := sizing.Quantity - (sizing.Quantity / 2)
-	if worker.RemainingQty() != expectedRunner {
-		t.Fatalf("expected runner qty %d, got %d", expectedRunner, worker.RemainingQty())
+	if worker.RemainingQty() != sizing.Quantity {
+		t.Fatalf("expected 100%% position qty %d to remain intact, got %d", sizing.Quantity, worker.RemainingQty())
 	}
 
 	// Simulate Gear 4 (modCount == 24) and rally to +3.0R -> Virtual Shadow Stop ratchets in RAM
@@ -838,11 +837,11 @@ func TestPositionWorker_EarlyHarvestAt065RAnd5mClose(t *testing.T) {
 		t.Fatalf("expected shadow stop to ratchet to Breakeven 800.80 at +1.04R, got %.2f", shadow)
 	}
 
-	// 3. Tick at 807.60 (+1.52R): verify Tranche 1 50% scale-out is triggered
+	// 3. Tick at 807.60 (+1.52R): verify 100% position continues trailing with breakeven locked
 	stock.LTP = 807.60
 	worker.UpdateTrailingStopLossOnPriceTick(stock)
-	if !worker.isTranche1Pending.Load() {
-		t.Fatalf("expected isTranche1Pending to be TRUE at +1.52R for profit harvest, got false")
+	if !worker.hasBreakevenCompleted.Load() {
+		t.Fatalf("expected hasBreakevenCompleted to be TRUE at +1.52R, got false")
 	}
 
 	// 3. Intra-candle dip does NOT panic-dump if 5m bar hasn't closed below InitialStop
@@ -1907,9 +1906,9 @@ func TestPositionWorker_SingleShareScaleOutProtection(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	// Since remaining qty is 1, Tranche 1 must be marked completed WITHOUT placing an invalid 0-qty order
-	if !worker.hasTranche1Completed.Load() {
-		t.Fatalf("expected hasTranche1Completed to be true for 1-share position")
+	// Since remaining qty is 1, position remains intact with breakeven locked
+	if !worker.hasBreakevenCompleted.Load() {
+		t.Fatalf("expected hasBreakevenCompleted to be true for 1-share position")
 	}
 	if worker.RemainingQty() != 1 {
 		t.Fatalf("expected 1 share to remain intact, got %d", worker.RemainingQty())

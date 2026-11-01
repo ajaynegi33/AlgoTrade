@@ -55,7 +55,7 @@ func (worker *PositionWorker) processPendingWork() {
 			if worker.isClosed.Load() || worker.isMarketExitPending.Load() {
 				return
 			}
-		} else if filledEntryQuantity > stopLossOrderQuantity && worker.state != StateScaleOutPending && !worker.hasTranche1Completed.Load() && worker.modCount.Load() < MaxSafetyModifications {
+		} else if filledEntryQuantity > stopLossOrderQuantity && !worker.hasBreakevenCompleted.Load() && worker.modCount.Load() < MaxSafetyModifications {
 			// Incremental fill arrived while SL is active: resize SL to cover all filled shares
 			confirmedStopLossPrice := math.Float64frombits(worker.confirmedStopBits.Load())
 			sellLimitPrice := CalculateProtectiveLimitPriceBelowStop(confirmedStopLossPrice, worker.TickSize)
@@ -75,15 +75,7 @@ func (worker *PositionWorker) processPendingWork() {
 		}
 	}
 
-	// 2. Execute +1.0R 3-Step Race-Free Scale-Out if triggered
-	if worker.isTranche1Pending.Load() && !worker.hasTranche1Completed.Load() {
-		worker.SellHalfSharesAtProfitTarget()
-		if worker.isClosed.Load() || worker.isMarketExitPending.Load() {
-			return
-		}
-	}
-
-	// 3. Apply pending Stop Ratchet if proposedStop > confirmedStop and modCount < 24
+	// 2. Apply pending Stop Ratchet if proposedStop > confirmedStop and modCount < 24
 	worker.mu.RLock()
 	stopLossOrderID := worker.slOrderID
 	worker.mu.RUnlock()
@@ -170,166 +162,6 @@ func (worker *PositionWorker) PlaceInitialStopLossOrderIfNotPlaced() {
 	worker.mu.Unlock()
 
 	worker.reconciler.RegisterOrder(stopLossOrderID, worker.PositionID, "SL", worker.Symbol, "SELL", "SL", remainingQuantity, sellLimitPrice, worker.InitialStop, OrderStatusTrigPending)
-	worker.persistPositionState()
-}
-
-// SellHalfSharesAtProfitTarget performs the Race-Free 3-Step Scale-Out at +1.0R with Compensating Rollback
-func (worker *PositionWorker) SellHalfSharesAtProfitTarget() {
-	// Guard against racing entry limit buy: if entry is still resting, cancel it and freeze InitialQty
-	worker.mu.RLock()
-	entryOrderID := worker.entryOrderID
-	initialQuantity := worker.InitialQty
-	worker.mu.RUnlock()
-	filledEntryQuantity := int(worker.filledEntryQty.Load())
-	if entryOrderID != "" && filledEntryQuantity < initialQuantity {
-		_ = worker.broker.CancelOrder(worker.ctx, entryOrderID)
-		_, _ = worker.reconciler.SyncOrdersCoalesced(worker.ctx, worker.broker)
-		filledEntryQuantity = int(worker.filledEntryQty.Load())
-		worker.mu.Lock()
-		worker.InitialQty = filledEntryQuantity
-		worker.mu.Unlock()
-	}
-
-	remainingQuantity := worker.RemainingQty()
-	if remainingQuantity < 2 {
-		// Position is 1 share: cannot split; lock Breakeven stop directly
-		worker.hasTranche1Completed.Store(true)
-		worker.isTranche1Pending.Store(false)
-		worker.currentGear.Store(GearDynamicTrail)
-		worker.RaiseStopLossOrder(worker.BreakevenStop, worker.OneR, true)
-		return
-	}
-
-	worker.mu.Lock()
-	stopLossOrderID := worker.slOrderID
-	worker.state = StateScaleOutPending
-	worker.mu.Unlock()
-
-	if stopLossOrderID == "" {
-		worker.PlaceInitialStopLossOrderIfNotPlaced()
-		worker.mu.RLock()
-		stopLossOrderID = worker.slOrderID
-		worker.mu.RUnlock()
-		if stopLossOrderID == "" {
-			return
-		}
-	}
-
-	scaleOutQty := remainingQuantity / 2
-	runnerQty := remainingQuantity - scaleOutQty
-	confirmedStopLossPrice := math.Float64frombits(worker.confirmedStopBits.Load())
-	currentLimitPrice := CalculateProtectiveLimitPriceBelowStop(confirmedStopLossPrice, worker.TickSize)
-	lastTradedPrice := worker.LatestLTP()
-
-	// STEP 1: Shrink resting SL quantity from remainingQuantity -> runnerQty while KEEPING confirmedStopLossPrice trigger unchanged
-	// (Prevents resting SL from firing at Breakeven during the 3ms window while Step 2 is in flight!)
-	if worker.modCount.Load() >= MaxSafetyModifications {
-		worker.isTranche1Pending.Store(false)
-		return
-	}
-	if err := worker.broker.ModifySLOrder(worker.ctx, stopLossOrderID, runnerQty, confirmedStopLossPrice, currentLimitPrice, lastTradedPrice, worker.TickSize); err != nil {
-		slog.Warn("Scale-out Step 1 (shrink SL qty) failed; keeping 100% SL intact", "symbol", worker.Symbol, "error", err)
-		worker.mu.Lock()
-		worker.state = StateProtectedActive
-		worker.mu.Unlock()
-		worker.isTranche1Pending.Store(false)
-		return
-	}
-	worker.mu.Lock()
-	worker.slOrderQty = runnerQty
-	worker.mu.Unlock()
-	worker.modCount.Add(1)
-	worker.lastModUnixMs.Store(time.Now().UnixMilli())
-
-	// STEP 2: Place Protected Marketable-Limit Sell for scaleOutQty (50%)
-	var stockPtr *market.StockMetrics
-	if worker.getStockPtr != nil {
-		stockPtr = worker.getStockPtr()
-	}
-	scaleOutOrderID, scaleOutSellErr := worker.broker.PlaceProtectedMarketSell(worker.ctx, worker.Symbol, worker.Token, scaleOutQty, lastTradedPrice, worker.TickSize, stockPtr)
-	if scaleOutSellErr != nil {
-		slog.Error("Scale-out Step 2 sell failed; rolling back resting SL to full quantity", "symbol", worker.Symbol, "error", scaleOutSellErr)
-		// COMPENSATING ROLLBACK: Restore resting SL quantity back to full RemainingQty()
-		fullRemainingQuantity := worker.RemainingQty()
-		if fullRemainingQuantity > 0 && worker.modCount.Load() < MaxSafetyModifications {
-			if rbErr := worker.broker.ModifySLOrder(worker.ctx, stopLossOrderID, fullRemainingQuantity, confirmedStopLossPrice, currentLimitPrice, worker.LatestLTP(), worker.TickSize); rbErr != nil {
-				worker.EmergencySellAllAndClosePosition("SCALE_OUT_ROLLBACK_FAILED")
-				return
-			}
-			worker.mu.Lock()
-			worker.slOrderQty = fullRemainingQuantity
-			worker.mu.Unlock()
-			worker.modCount.Add(1)
-		}
-		worker.mu.Lock()
-		worker.state = StateProtectedActive
-		worker.mu.Unlock()
-		worker.isTranche1Pending.Store(false)
-		return
-	}
-
-	worker.mu.Lock()
-	worker.scaleOutOrderID = scaleOutOrderID
-	worker.mu.Unlock()
-	worker.reconciler.RegisterOrder(scaleOutOrderID, worker.PositionID, "SCALE_OUT", worker.Symbol, "SELL", "LIMIT", scaleOutQty, lastTradedPrice, 0, OrderStatusOpen)
-
-	// Wait up to 800ms for scale-out fill confirmation
-	waitTimer := time.NewTimer(800 * time.Millisecond)
-	select {
-	case <-worker.fillNotifyCh:
-	case <-waitTimer.C:
-		_, _ = worker.reconciler.SyncOrdersCoalesced(worker.ctx, worker.broker)
-	}
-	waitTimer.Stop()
-
-	// Falsification Guard (Bug #14): If scale-out limit order did not fully fill within 800ms,
-	// cancel the unfilled remainder and reconcile before resizing the resting SL order so both cannot fill!
-	if worker.RemainingQty() > runnerQty && scaleOutOrderID != "" {
-		_ = worker.broker.CancelOrder(worker.ctx, scaleOutOrderID)
-		_, _ = worker.reconciler.SyncOrdersCoalesced(worker.ctx, worker.broker)
-	}
-
-	remainingRunnerQuantity := worker.RemainingQty()
-	if remainingRunnerQuantity <= 0 || worker.isClosed.Load() {
-		return
-	}
-
-	// STEP 3: Raise the remaining runner's SL trigger to Tax-Free Breakeven (Entry + Taxes + 0.15%)
-	breakevenTriggerPrice := CalculateTaxCoveringBreakevenStop(worker.GetEntryPrice(), int(worker.filledEntryQty.Load()), remainingRunnerQuantity, worker.TickSize)
-	worker.breakevenStopBits.Store(math.Float64bits(breakevenTriggerPrice))
-	worker.hasTranche1Completed.Store(true)
-	worker.isTranche1Pending.Store(false)
-	worker.currentGear.Store(GearDynamicTrail)
-
-	worker.mu.Lock()
-	worker.BreakevenStop = breakevenTriggerPrice
-	worker.state = StateRunnerActive
-	worker.mu.Unlock()
-
-	currentLastTradedPrice := worker.LatestLTP()
-	if currentLastTradedPrice <= breakevenTriggerPrice+2.0*worker.TickSize {
-		// Price whipped back down to Breakeven during scale-out -> Exit runner to lock net profit!
-		worker.EmergencySellAllAndClosePosition("RUNNER_BREAKEVEN_LOCK")
-		return
-	}
-
-	if breakevenTriggerPrice > confirmedStopLossPrice {
-		// Always record breakevenTriggerPrice in shadowStopBits & proposedStopBits so if ModifySLOrder is transiently
-		// rejected right now, processPendingWork() ratchets the SL to breakevenTriggerPrice on the next eligible tick.
-		worker.shadowStopBits.Store(math.Float64bits(breakevenTriggerPrice))
-		worker.proposedStopBits.Store(math.Float64bits(breakevenTriggerPrice))
-		if worker.modCount.Load() < MaxSafetyModifications {
-			breakevenLimitPrice := CalculateProtectiveLimitPriceBelowStop(breakevenTriggerPrice, worker.TickSize)
-			if err := worker.broker.ModifySLOrder(worker.ctx, stopLossOrderID, remainingRunnerQuantity, breakevenTriggerPrice, breakevenLimitPrice, currentLastTradedPrice, worker.TickSize); err == nil {
-				worker.modCount.Add(1)
-				worker.lastModUnixMs.Store(time.Now().UnixMilli())
-				worker.confirmedStopBits.Store(math.Float64bits(breakevenTriggerPrice))
-				worker.mu.Lock()
-				worker.slOrderQty = remainingRunnerQuantity
-				worker.mu.Unlock()
-			}
-		}
-	}
 	worker.persistPositionState()
 }
 

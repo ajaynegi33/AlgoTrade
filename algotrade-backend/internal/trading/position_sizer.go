@@ -89,10 +89,10 @@ func EffectiveRiskPerTradePct(netEquity, configuredRiskPct float64) float64 {
 		return 0.0100 // 1.00%
 	case netEquity <= UpperMidAccountEquityThreshold: // Rs 2,00,000
 		return 0.0075 // 0.75%
-	case netEquity <= LargeAccountEquityThreshold: // Rs 50,00,000
+	case netEquity <= LargeAccountEquityThreshold:
 		return 0.0050 // 0.50%
 	default:
-		return 0.0050 // 0.50% for ₹50L to ₹10Cr+
+		return 0.0035 // 0.35% for ₹50L to ₹10Cr+
 	}
 }
 

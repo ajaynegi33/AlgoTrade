@@ -570,7 +570,7 @@ func (manager *Manager) rehydrateOpenPositionsFromDB() {
 		worker.highWaterMarkBits.Store(math.Float64bits(positionRecord.highWaterMark))
 		worker.modCount.Store(int32(positionRecord.modCount))
 		worker.currentGear.Store(int32(positionRecord.gear))
-		worker.hasTranche1Completed.Store(positionRecord.hasTranche1CompletedInt != 0)
+		worker.hasBreakevenCompleted.Store(positionRecord.hasTranche1CompletedInt != 0)
 		remainingTimeout := 5 * time.Minute
 		if positionRecord.openedAtStr != "" {
 			if t, err := time.Parse(time.RFC3339, positionRecord.openedAtStr); err == nil {
