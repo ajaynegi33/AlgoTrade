@@ -311,9 +311,21 @@ func (service *Service) GetProfile() (*UserProfileData, error) {
 		}, nil
 	}
 
-	profile, err := service.client.GetUserProfile()
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch user profile from kite: %w", err)
+	var profile kiteconnect.UserProfile
+	if service.rateLimiter != nil {
+		profileResult, dispatchErr := service.rateLimiter.ExecuteAccountSync(context.Background(), func() (interface{}, error) {
+			return service.client.GetUserProfile()
+		})
+		if dispatchErr != nil {
+			return nil, fmt.Errorf("failed to fetch user profile from kite: %w", dispatchErr)
+		}
+		profile = profileResult.(kiteconnect.UserProfile)
+	} else {
+		var err error
+		profile, err = service.client.GetUserProfile()
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch user profile from kite: %w", err)
+		}
 	}
 
 	res := &UserProfileData{
@@ -332,8 +344,21 @@ func (service *Service) GetProfile() (*UserProfileData, error) {
 	}
 
 	// Fetch real-time margins
-	margins, err := service.client.GetUserMargins()
-	if err == nil {
+	var margins kiteconnect.AllMargins
+	var marginsErr error
+	if service.rateLimiter != nil {
+		marginsResult, dispatchErr := service.rateLimiter.ExecuteAccountSync(context.Background(), func() (interface{}, error) {
+			return service.client.GetUserMargins()
+		})
+		if dispatchErr != nil {
+			marginsErr = dispatchErr
+		} else {
+			margins = marginsResult.(kiteconnect.AllMargins)
+		}
+	} else {
+		margins, marginsErr = service.client.GetUserMargins()
+	}
+	if marginsErr == nil {
 		res.EquityMargin = &EquityMargins{
 			Net:            margins.Equity.Net,
 			AvailableCash:  margins.Equity.Available.Cash,
@@ -348,7 +373,7 @@ func (service *Service) GetProfile() (*UserProfileData, error) {
 			M2MUnrealised:  margins.Equity.Used.M2MUnrealised,
 		}
 	} else {
-		slog.Warn("Failed to fetch equity margins from kite", "error", err)
+		slog.Warn("Failed to fetch equity margins from kite", "error", marginsErr)
 	}
 
 	return res, nil
@@ -444,7 +469,16 @@ func (service *Service) RawModifyOrderPUT(
 	var responseObj *http.Response
 	if service.rateLimiter != nil {
 		result, dispatchError := service.rateLimiter.ExecuteEmergencyOrder(ctx, func() (interface{}, error) {
-			return service.httpClient.Do(request)
+			resp, doErr := service.httpClient.Do(request)
+			if doErr != nil {
+				return nil, doErr
+			}
+			if resp.StatusCode == http.StatusTooManyRequests {
+				defer resp.Body.Close()
+				bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+				return nil, fmt.Errorf("kite HTTP 429 too many requests: %s", string(bodyBytes))
+			}
+			return resp, nil
 		})
 		if dispatchError != nil {
 			return "", fmt.Errorf("kite modify PUT rate limiter error: %w", dispatchError)

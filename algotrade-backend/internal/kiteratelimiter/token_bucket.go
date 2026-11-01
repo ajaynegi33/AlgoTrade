@@ -50,6 +50,24 @@ func (bucket *TokenBucket) TryAcquire() bool {
 	return false
 }
 
+// WaitDurationForNextToken returns the duration until at least 1.0 token is available.
+// Returns 0 if a token is already available.
+func (bucket *TokenBucket) WaitDurationForNextToken() time.Duration {
+	bucket.bucketMutex.Lock()
+	defer bucket.bucketMutex.Unlock()
+
+	currentTime := time.Now()
+	elapsedSeconds := currentTime.Sub(bucket.lastRefillTime).Seconds()
+	bucket.currentTokens = math.Min(bucket.burstCapacity, bucket.currentTokens+elapsedSeconds*bucket.refillRatePerSecond)
+	bucket.lastRefillTime = currentTime
+
+	if bucket.currentTokens >= 1.0 {
+		return 0
+	}
+	remainingTokensNeeded := 1.0 - bucket.currentTokens
+	return time.Duration((remainingTokensNeeded / bucket.refillRatePerSecond) * float64(time.Second))
+}
+
 // Acquire blocks until one token becomes available or the context is cancelled
 func (bucket *TokenBucket) Acquire(executionContext context.Context) error {
 	for {

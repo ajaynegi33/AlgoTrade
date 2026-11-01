@@ -30,6 +30,7 @@ type CentralKiteDispatcher struct {
 	dispatcherContext context.Context
 	cancelDispatcher  context.CancelFunc
 	shutdownWaitGroup sync.WaitGroup
+	inFlightWaitGroup sync.WaitGroup
 	isStopped         atomic.Bool
 }
 
@@ -64,6 +65,7 @@ func (dispatcher *CentralKiteDispatcher) Stop() {
 	if dispatcher.isStopped.CompareAndSwap(false, true) {
 		dispatcher.cancelDispatcher()
 		dispatcher.shutdownWaitGroup.Wait()
+		dispatcher.inFlightWaitGroup.Wait()
 		slog.Info("Centralized Kite Channel Rate Limiter stopped")
 	}
 }
@@ -126,7 +128,7 @@ func (dispatcher *CentralKiteDispatcher) runLoop() {
 		// Tier 1: Check emergency channel immediately
 		select {
 		case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
-			dispatcher.processEnvelope(emergencyEnvelope)
+			dispatcher.processEmergencyEnvelope(emergencyEnvelope)
 			continue
 		case <-dispatcher.dispatcherContext.Done():
 			return
@@ -136,33 +138,109 @@ func (dispatcher *CentralKiteDispatcher) runLoop() {
 		// Tier 2: Check standard order channel
 		select {
 		case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
-			dispatcher.processEnvelope(emergencyEnvelope)
+			dispatcher.processEmergencyEnvelope(emergencyEnvelope)
 			continue
-		case standardEnvelope := <-dispatcher.standardOrderChannel:
-			dispatcher.processEnvelope(standardEnvelope)
-			continue
-		case <-dispatcher.dispatcherContext.Done():
-			return
 		default:
 		}
 
-		// Tier 3: Block on all three priority channels simultaneously
+		if len(dispatcher.standardOrderChannel) > 0 {
+			if dispatcher.orderTokenBucket.TryAcquire() {
+				select {
+				case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
+					dispatcher.processEmergencyEnvelope(emergencyEnvelope)
+					continue
+				case standardEnvelope := <-dispatcher.standardOrderChannel:
+					dispatcher.executeWithGrantedToken(standardEnvelope)
+					continue
+				default:
+				}
+			} else {
+				waitDuration := dispatcher.orderTokenBucket.WaitDurationForNextToken()
+				select {
+				case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
+					dispatcher.processEmergencyEnvelope(emergencyEnvelope)
+					continue
+				case <-time.After(waitDuration):
+					continue
+				case <-dispatcher.dispatcherContext.Done():
+					return
+				}
+			}
+		}
+
+		// Tier 3: Check background sync channel
 		select {
 		case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
-			dispatcher.processEnvelope(emergencyEnvelope)
+			dispatcher.processEmergencyEnvelope(emergencyEnvelope)
+			continue
 		case standardEnvelope := <-dispatcher.standardOrderChannel:
-			dispatcher.processEnvelope(standardEnvelope)
+			dispatcher.processStandardEnvelope(standardEnvelope)
+			continue
+		default:
+		}
+
+		if len(dispatcher.backgroundSyncChannel) > 0 {
+			if dispatcher.generalTokenBucket.TryAcquire() {
+				select {
+				case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
+					dispatcher.processEmergencyEnvelope(emergencyEnvelope)
+					continue
+				case standardEnvelope := <-dispatcher.standardOrderChannel:
+					dispatcher.processStandardEnvelope(standardEnvelope)
+					continue
+				case backgroundEnvelope := <-dispatcher.backgroundSyncChannel:
+					dispatcher.executeWithGrantedToken(backgroundEnvelope)
+					continue
+				default:
+				}
+			} else {
+				waitDuration := dispatcher.generalTokenBucket.WaitDurationForNextToken()
+				select {
+				case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
+					dispatcher.processEmergencyEnvelope(emergencyEnvelope)
+					continue
+				case standardEnvelope := <-dispatcher.standardOrderChannel:
+					dispatcher.processStandardEnvelope(standardEnvelope)
+					continue
+				case <-time.After(waitDuration):
+					continue
+				case <-dispatcher.dispatcherContext.Done():
+					return
+				}
+			}
+		}
+
+		// Tier 4: Block on all three priority channels simultaneously when idle
+		select {
+		case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
+			dispatcher.processEmergencyEnvelope(emergencyEnvelope)
+		case standardEnvelope := <-dispatcher.standardOrderChannel:
+			select {
+			case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
+				dispatcher.processEmergencyEnvelope(emergencyEnvelope)
+				_ = dispatcher.EnqueueRequest(standardEnvelope)
+			default:
+				dispatcher.processStandardEnvelope(standardEnvelope)
+			}
 		case backgroundEnvelope := <-dispatcher.backgroundSyncChannel:
-			dispatcher.processEnvelope(backgroundEnvelope)
+			select {
+			case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
+				dispatcher.processEmergencyEnvelope(emergencyEnvelope)
+				_ = dispatcher.EnqueueRequest(backgroundEnvelope)
+			case standardEnvelope := <-dispatcher.standardOrderChannel:
+				dispatcher.processStandardEnvelope(standardEnvelope)
+				_ = dispatcher.EnqueueRequest(backgroundEnvelope)
+			default:
+				dispatcher.processBackgroundEnvelope(backgroundEnvelope)
+			}
 		case <-dispatcher.dispatcherContext.Done():
 			return
 		}
 	}
 }
 
-// processEnvelope validates context, acquires rate tokens, and executes the action safely
-func (dispatcher *CentralKiteDispatcher) processEnvelope(envelope KiteRequestEnvelope) {
-	// 1. Just-In-Time Context Expiration Check (Drop stale requests without wasting rate limit tokens)
+// processEmergencyEnvelope immediately acquires order tokens and launches critical emergency actions
+func (dispatcher *CentralKiteDispatcher) processEmergencyEnvelope(envelope KiteRequestEnvelope) {
 	if envelope.ExecutionContext.Err() != nil {
 		dispatcher.droppedStaleCount.Add(1)
 		dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
@@ -171,32 +249,71 @@ func (dispatcher *CentralKiteDispatcher) processEnvelope(envelope KiteRequestEnv
 		return
 	}
 
-	// 2. Check for active HTTP 429 Circuit Pause
-	pauseDuration := dispatcher.getActiveCircuitPauseDuration()
-	if pauseDuration > 0 {
-		if envelope.PriorityLevel == PriorityEmergencyCritical {
-			// For emergency orders, wait out the remaining cooldown rather than dropping
-			time.Sleep(pauseDuration)
-		} else {
-			dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
-				ResponseError: ErrCircuitPaused,
-			})
-			return
-		}
+	tokenAcquireError := dispatcher.orderTokenBucket.Acquire(envelope.ExecutionContext)
+	if tokenAcquireError != nil {
+		dispatcher.droppedStaleCount.Add(1)
+		dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+			ResponseError: tokenAcquireError,
+		})
+		return
 	}
 
-	// 3. Select endpoint-specific token bucket
+	dispatcher.executeWithGrantedToken(envelope)
+}
+
+// processStandardEnvelope handles standard order token acquisition and dispatch
+func (dispatcher *CentralKiteDispatcher) processStandardEnvelope(envelope KiteRequestEnvelope) {
+	if envelope.ExecutionContext.Err() != nil {
+		dispatcher.droppedStaleCount.Add(1)
+		dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+			ResponseError: ErrRequestTimedOutInQueue,
+		})
+		return
+	}
+
+	if dispatcher.getActiveCircuitPauseDuration() > 0 {
+		dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+			ResponseError: ErrCircuitPaused,
+		})
+		return
+	}
+
+	tokenAcquireError := dispatcher.orderTokenBucket.Acquire(envelope.ExecutionContext)
+	if tokenAcquireError != nil {
+		dispatcher.droppedStaleCount.Add(1)
+		dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+			ResponseError: tokenAcquireError,
+		})
+		return
+	}
+
+	dispatcher.executeWithGrantedToken(envelope)
+}
+
+// processBackgroundEnvelope handles background task token acquisition and dispatch
+func (dispatcher *CentralKiteDispatcher) processBackgroundEnvelope(envelope KiteRequestEnvelope) {
+	if envelope.ExecutionContext.Err() != nil {
+		dispatcher.droppedStaleCount.Add(1)
+		dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+			ResponseError: ErrRequestTimedOutInQueue,
+		})
+		return
+	}
+
+	if dispatcher.getActiveCircuitPauseDuration() > 0 {
+		dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+			ResponseError: ErrCircuitPaused,
+		})
+		return
+	}
+
 	var tokenBucket *TokenBucket
-	switch envelope.Category {
-	case CategoryHistorical:
+	if envelope.Category == CategoryHistorical {
 		tokenBucket = dispatcher.historicalTokenBucket
-	case CategoryOrder:
-		tokenBucket = dispatcher.orderTokenBucket
-	default:
+	} else {
 		tokenBucket = dispatcher.generalTokenBucket
 	}
 
-	// 4. Block until rate token is available
 	tokenAcquireError := tokenBucket.Acquire(envelope.ExecutionContext)
 	if tokenAcquireError != nil {
 		dispatcher.droppedStaleCount.Add(1)
@@ -206,7 +323,47 @@ func (dispatcher *CentralKiteDispatcher) processEnvelope(envelope KiteRequestEnv
 		return
 	}
 
-	// 5. Execute action closure safely with panic recovery
+	dispatcher.executeWithGrantedToken(envelope)
+}
+
+// executeWithGrantedToken launches the action closure in an asynchronous worker goroutine
+func (dispatcher *CentralKiteDispatcher) executeWithGrantedToken(envelope KiteRequestEnvelope) {
+	dispatcher.inFlightWaitGroup.Add(1)
+	go func(requestEnvelope KiteRequestEnvelope) {
+		defer dispatcher.inFlightWaitGroup.Done()
+		dispatcher.executeWorker(requestEnvelope)
+	}(envelope)
+}
+
+// executeWorker handles circuit pauses, panic recovery, and returns responses
+func (dispatcher *CentralKiteDispatcher) executeWorker(envelope KiteRequestEnvelope) {
+	// 1. Check for active HTTP 429 Circuit Pause with interruptible wait for emergency orders
+	pauseDuration := dispatcher.getActiveCircuitPauseDuration()
+	if pauseDuration > 0 {
+		if envelope.PriorityLevel == PriorityEmergencyCritical {
+			select {
+			case <-time.After(pauseDuration):
+			case <-envelope.ExecutionContext.Done():
+				dispatcher.droppedStaleCount.Add(1)
+				dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+					ResponseError: envelope.ExecutionContext.Err(),
+				})
+				return
+			case <-dispatcher.dispatcherContext.Done():
+				dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+					ResponseError: ErrDispatcherStopped,
+				})
+				return
+			}
+		} else {
+			dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+				ResponseError: ErrCircuitPaused,
+			})
+			return
+		}
+	}
+
+	// 2. Execute action closure safely with panic recovery
 	executionStartTime := time.Now()
 	var responseData interface{}
 	var responseError error
@@ -222,7 +379,7 @@ func (dispatcher *CentralKiteDispatcher) processEnvelope(envelope KiteRequestEnv
 
 	executionDuration := time.Since(executionStartTime)
 
-	// 6. Inspect error for HTTP 429 rate limit backoff
+	// 3. Inspect error for HTTP 429 rate limit backoff
 	if responseError != nil {
 		errorString := strings.ToLower(responseError.Error())
 		if strings.Contains(errorString, "429") || strings.Contains(errorString, "too many requests") {

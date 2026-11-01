@@ -36,22 +36,16 @@ func TestDispatcher_PriorityPreemption(t *testing.T) {
 	dispatcher := NewCentralKiteDispatcher()
 	defer dispatcher.Stop()
 
+	// Drain general token bucket burst capacity so background tasks must queue waiting for tokens
+	for drainIndex := 0; drainIndex < 4; drainIndex++ {
+		dispatcher.generalTokenBucket.TryAcquire()
+	}
+
 	var executionOrder []string
 	var orderMutex sync.Mutex
 
-	// Block the dispatcher with a slow task so queues can fill
-	blockerReleaseChannel := make(chan struct{})
-	go func() {
-		_, _ = dispatcher.ExecuteBackgroundSync(context.Background(), func() (interface{}, error) {
-			<-blockerReleaseChannel
-			return "blocker_finished", nil
-		})
-	}()
-
-	time.Sleep(20 * time.Millisecond) // Let blocker engage
-
-	// Fill the background queue with 10 background tasks
-	for backgroundIndex := 1; backgroundIndex <= 10; backgroundIndex++ {
+	// Fill the background queue with 5 background tasks
+	for backgroundIndex := 1; backgroundIndex <= 5; backgroundIndex++ {
 		taskName := fmt.Sprintf("BACKGROUND-%d", backgroundIndex)
 		go func(name string) {
 			_, _ = dispatcher.ExecuteBackgroundSync(context.Background(), func() (interface{}, error) {
@@ -63,7 +57,7 @@ func TestDispatcher_PriorityPreemption(t *testing.T) {
 		}(taskName)
 	}
 
-	time.Sleep(30 * time.Millisecond) // Ensure background tasks are queued
+	time.Sleep(15 * time.Millisecond) // Ensure background tasks are queued in backgroundSyncChannel
 
 	// Now enqueue 1 emergency critical order
 	emergencyDoneChannel := make(chan struct{})
@@ -77,9 +71,6 @@ func TestDispatcher_PriorityPreemption(t *testing.T) {
 		})
 	}()
 
-	time.Sleep(10 * time.Millisecond)
-	close(blockerReleaseChannel) // Unblock the dispatcher
-
 	select {
 	case <-emergencyDoneChannel:
 	case <-time.After(3 * time.Second):
@@ -91,7 +82,7 @@ func TestDispatcher_PriorityPreemption(t *testing.T) {
 	if len(executionOrder) == 0 {
 		t.Fatalf("expected executions, got none")
 	}
-	// The very first item executed after unblocking must be the emergency stop-loss!
+	// The very first item executed must be the emergency stop-loss!
 	if executionOrder[0] != "EMERGENCY-STOP-LOSS" {
 		t.Fatalf("expected EMERGENCY-STOP-LOSS to preempt background tasks, but got: %s (full order: %v)", executionOrder[0], executionOrder)
 	}
@@ -227,5 +218,83 @@ func TestDispatcher_ExecuteAccountSyncAndHistorical(t *testing.T) {
 	stats := dispatcher.GetStats()
 	if stats.TotalDispatchedCount < 2 {
 		t.Fatalf("expected at least 2 processed requests, got %d", stats.TotalDispatchedCount)
+	}
+}
+
+func TestDispatcher_EmergencyPreemptionDuringSlowBackgroundCall(t *testing.T) {
+	dispatcher := NewCentralKiteDispatcher()
+	defer dispatcher.Stop()
+
+	backgroundFinishedChannel := make(chan struct{})
+	emergencyFinishedChannel := make(chan struct{})
+
+	// 1. Launch a slow background task (simulating 200ms historical download)
+	go func() {
+		_, _ = dispatcher.ExecuteBackgroundSync(context.Background(), func() (interface{}, error) {
+			time.Sleep(200 * time.Millisecond)
+			close(backgroundFinishedChannel)
+			return "slow_background_done", nil
+		})
+	}()
+
+	// Give a tiny moment for the background task to be picked up by the dispatcher
+	time.Sleep(20 * time.Millisecond)
+
+	// 2. Launch an emergency stop loss order while background task is still in flight across the network
+	startTime := time.Now()
+	go func() {
+		_, _ = dispatcher.ExecuteEmergencyOrder(context.Background(), func() (interface{}, error) {
+			close(emergencyFinishedChannel)
+			return "emergency_stop_done", nil
+		})
+	}()
+
+	// 3. The emergency order must finish BEFORE the slow background task finishes
+	select {
+	case <-emergencyFinishedChannel:
+		emergencyElapsed := time.Since(startTime)
+		// Emergency order was dispatched and completed without waiting for the 200ms background call
+		if emergencyElapsed > 150*time.Millisecond {
+			t.Fatalf("emergency order was blocked by slow background call, elapsed: %v", emergencyElapsed)
+		}
+	case <-backgroundFinishedChannel:
+		t.Fatalf("slow background call finished before emergency order! Head-of-line blocking occurred.")
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for execution")
+	}
+
+	<-backgroundFinishedChannel
+}
+
+func TestDispatcher_InterruptibleCircuitPauseOnContextCancel(t *testing.T) {
+	dispatcher := NewCentralKiteDispatcher()
+	defer dispatcher.Stop()
+
+	// 1. Trigger an upstream 429 to engage 1500ms circuit pause
+	_, _ = dispatcher.ExecuteStandardOrder(context.Background(), func() (interface{}, error) {
+		return nil, errors.New("429 Too Many Requests: Rate limit exceeded")
+	})
+
+	stats := dispatcher.GetStats()
+	if !stats.IsCircuitPaused {
+		t.Fatalf("expected circuit to be paused")
+	}
+
+	// 2. Submit an emergency order with a short 30ms context timeout
+	shortContext, cancelTimeout := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancelTimeout()
+
+	startTime := time.Now()
+	_, executionError := dispatcher.ExecuteEmergencyOrder(shortContext, func() (interface{}, error) {
+		return "should_not_run", nil
+	})
+
+	elapsedDuration := time.Since(startTime)
+	if executionError == nil {
+		t.Fatalf("expected context timeout error, got nil")
+	}
+	// The wait should abort in ~30ms, not hang for the full 1500ms cooldown
+	if elapsedDuration > 200*time.Millisecond {
+		t.Fatalf("circuit pause sleep was not interrupted by context cancellation, elapsed: %v", elapsedDuration)
 	}
 }
