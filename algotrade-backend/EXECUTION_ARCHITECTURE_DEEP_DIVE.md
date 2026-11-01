@@ -405,6 +405,16 @@ internal/market/tick_ingestion.go: Actor.processTick()
           └── internal/trading/position_exit.go: SellHalfSharesAtProfitTarget()
 ```
 
+#### Detailed Step-by-Step Tick Lifecycle (`UpdateTrailingStopLossOnPriceTick`)
+Every live tick runs through this 7-step sequence:
+* **Step 1: Update High-Water Mark (`highWaterMark`)**: If price rises from ₹500 $\to$ ₹510 $\to$ ₹525, `highWaterMark` updates to ₹525.
+* **Step 2: Guard A (Gapped-Through SL Watchdog)**: If market gaps below stop loss without Zerodha executing, detects within 1 second and immediately fires an emergency market exit.
+* **Step 3: Guard D (The +1.50R Profit Scale-Out Trigger)**: If price reaches $+1.50R$ ($₹500 + 1.5 \times ₹10 = ₹515$), triggers `SellHalfSharesAtProfitTarget()` to lock in gains.
+* **Step 4: Check Buyer Strength vs Seller Pressure (`orderFlowMultiplier`)**: If buyers dominate the tape, allows more breathing room so winners aren't shaken out. If volume dries up, tightens the buffer to protect profits.
+* **Step 5: Parabolic Climax Tightener (`parabolicClimaxFactor`)**: If a stock surges vertically ($>2.2R$ and $>1.8\text{ ATR}$ above VWAP), moves like that snap back violently. Clamps the stop right behind price to capture the peak.
+* **Step 6: The +1.0R Tax-Free Breakeven Ratchet**: Once trade reaches $+1.0R$ (e.g. ₹510), stop-loss is raised to **Tax-Free Breakeven** via `CalculateTaxCoveringBreakevenStop()`. Downside risk drops to **₹0.00**.
+* **Step 7: Propose Higher Stop (`RaiseStopLossOrder`)**: If the candidate stop is higher than the exchange order, raises the resting stop using the 4 Mechanical Gears.
+
 #### Trailing Stop Loss Gears Specification
 | Gear | Mod Quota | Minimum Advance Requirement | Minimum Cooldown | Architectural Objective |
 | :--- | :--- | :--- | :--- | :--- |
