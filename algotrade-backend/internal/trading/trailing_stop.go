@@ -7,7 +7,27 @@ import (
 	"github.com/ajaynegi33/AlgoTrade/internal/market"
 )
 
+
 // UpdateTrailingStopLossOnPriceTick is executed by the Actor on every incoming tick for this position's instrument.
+
+// Step 1: Update the High-Water Mark (highWaterMark): If the stock price rises from ₹500 → ₹510 → ₹525, highWaterMark updates to ₹525.
+
+// Step 2: Guard A — Gapped-Through Stop-Loss Watchdog: If the market gaps down below our stop-loss without Zerodha executing it, the watchdog detects the breach within 1 second and immediately fires an emergency market exit.
+
+// Step 3: Guard D — The +1.50R Profit Scale-Out Trigger: If the price reaches +1.50R ( ₹ 500 + 1.5 × ₹ 10 = ₹ 515 ₹500+1.5×₹10=₹515), it triggers SellHalfSharesAtProfitTarget() to lock in gains.
+
+// Step 4: Check Buyer Strength vs Seller Pressure (orderFlowMultiplier):
+// - If buyers are aggressively dominating the tape, the algorithm gives the stock more breathing room so it doesn't get shaken out.
+// - If buyer volume dries up and sellers start hitting bids, the algorithm tightens the buffer to protect profits.
+
+
+// Step 5: Parabolic Climax Tightener (parabolicClimaxFactor)
+// If the stock shoots up vertically like a rocket ( > 2.2 𝑅 >2.2R and far above VWAP), moves like that usually pull back violently. The algorithm tightens the stop right behind the price to capture the peak.
+
+
+// Step 6: The +1.0R Tax-Free Breakeven Ratchet: As soon as the trade reaches +1.0R (e.g., ₹510), the stop-loss is raised to Tax-Free Breakeven via CalculateTaxCoveringBreakevenStop(). At this point, your downside risk becomes ₹0.00. You cannot lose money on this trade.
+
+// Step 7: Propose the New Higher Stop Price: If the candidate stop is higher than the current stop on the exchange, it calls RaiseStopLossOrder().
 func (worker *PositionWorker) UpdateTrailingStopLossOnPriceTick(stockMetrics *market.StockMetrics) {
 	if worker.isClosed.Load() {
 		return
@@ -185,7 +205,11 @@ func (worker *PositionWorker) UpdateTrailingStopLossOnPriceTick(stockMetrics *ma
 	}
 }
 
+// This function manages the NSE 25-Modification Law using 4 Mechanical Gears
 // RaiseStopLossOrder governs Mods 1–18 (Agile), Mods 19–24 (Coarse), and Gear 4 (Mod 24 Shadow Stop)
+// Gear 1 (Agile, Mods 1–18): Moves quickly. Only requires a 350-millisecond pause between edits. Its job is to move your stop out of the danger zone as soon as possible.
+// Gear 3 (Coarse, Mods 19–24): Slows down. Enforces a 1,500-millisecond pause and requires a larger price jump (
+// Gear 4 (Virtual Shadow Stop in RAM, Mod ≥ 24): When modification count reaches 24, it stops sending modification orders to Zerodha completely! The stop-loss continues trailing virtually in computer memory (RAM). If the price drops and breaches the virtual shadow stop, the system uses its strictly preserved 25th modification to convert the resting stop-loss into an immediate market sell order, closing the position cleanly.
 func (worker *PositionWorker) RaiseStopLossOrder(candidateStop, safeATR float64, isUrgentShockClamp bool) {
 	modificationCount := worker.modCount.Load()
 

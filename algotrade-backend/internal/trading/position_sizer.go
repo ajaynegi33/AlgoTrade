@@ -83,31 +83,22 @@ func EffectiveRiskPerTradePct(netEquity, configuredRiskPct float64) float64 {
 		return configuredRiskPct
 	}
 	switch {
-	case netEquity <= SmallAccountEquityThreshold:
+	case netEquity <= SmallAccountEquityThreshold: // Rs 15,000
 		return 0.0125 // 1.25% (₹125 on ₹10k equity -> cleanly utilizes 5x MIS buying power)
-	case netEquity <= MidAccountEquityThreshold:
+	case netEquity <= MidAccountEquityThreshold: // Rs 50,000
 		return 0.0100 // 1.00%
-	case netEquity <= UpperMidAccountEquityThreshold:
+	case netEquity <= UpperMidAccountEquityThreshold: // Rs 2,00,000
 		return 0.0075 // 0.75%
-	case netEquity <= LargeAccountEquityThreshold:
+	case netEquity <= LargeAccountEquityThreshold: // Rs 50,00,000
 		return 0.0050 // 0.50%
 	default:
-		return 0.0035 // 0.35% for ₹50L to ₹10Cr+
+		return 0.0050 // 0.50% for ₹50L to ₹10Cr+
 	}
 }
 
 // ComputePositionSize evaluates the 4 institutional sizing constraints (Risk, Margin, Concentration, Liquidity)
 // from ₹500 to ₹10Cr+ accounts and enforces the Mandatory Net-Profitability Gate at +1.0R.
-func ComputePositionSize(
-	stockMetrics *market.StockMetrics,
-	signalBarLow float64,
-	netEquity float64,
-	freeMargin float64,
-	riskPerTradePct float64,
-	sessionSizeMult float64,
-	drawdownMult float64,
-	remainingHeatBudgetRupees float64,
-) SizingDecision {
+func ComputePositionSize( stockMetrics *market.StockMetrics, signalBarLow float64, netEquity float64, freeMargin float64, riskPerTradePct float64, sessionSizeMult float64, drawdownMult float64, remainingHeatBudgetRupees float64 ) SizingDecision {
 	tickSize := float64(stockMetrics.TickSize)
 	if tickSize <= 0 {
 		tickSize = 0.05
