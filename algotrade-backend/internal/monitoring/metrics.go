@@ -17,6 +17,8 @@ func ComputeEODMetrics(db *sql.DB, tradingDate string) (*EODReportSummary, error
 	report := &EODReportSummary{
 		TradingDate:        tradingDate,
 		GeneratedAt:        time.Now(),
+		ExecutionMode:      "PAPER",
+		IsAutoExecuteArmed: true,
 		SlippageRecords:    make([]SlippageAuditRecord, 0),
 		ToxicSymbols:       make([]string, 0),
 		ProbabilityBuckets: make([]ProbabilityBucket, 0),
@@ -25,7 +27,23 @@ func ComputeEODMetrics(db *sql.DB, tradingDate string) (*EODReportSummary, error
 		TradeLedger:        make([]PositionReportRecord, 0),
 		ShadowSummary: ShadowComparisonSummary{
 			RejectionBreakdown: make(map[string]int),
+			RejectedSignals:    make([]ShadowSignalDetail, 0),
 		},
+	}
+
+	// Query system execution settings and circuit breaker status
+	var activeMode string
+	var autoExecInt int
+	if scanErr := db.QueryRow("SELECT mode, auto_execute FROM execution_settings LIMIT 1").Scan(&activeMode, &autoExecInt); scanErr == nil {
+		report.ExecutionMode = activeMode
+		report.IsAutoExecuteArmed = (autoExecInt == 1)
+	}
+
+	var circuitBreakerInt int
+	var circuitBreakerLockReason string
+	if scanErr := db.QueryRow("SELECT circuit_breaker_locked, lock_reason FROM daily_risk_ledger WHERE trading_date = ? LIMIT 1", tradingDate).Scan(&circuitBreakerInt, &circuitBreakerLockReason); scanErr == nil {
+		report.IsCircuitBreakerLocked = (circuitBreakerInt == 1)
+		report.CircuitBreakerReason = circuitBreakerLockReason
 	}
 
 	// 1. Fetch Closed and Active Positions for Today
@@ -50,11 +68,11 @@ func ComputeEODMetrics(db *sql.DB, tradingDate string) (*EODReportSummary, error
 	var winnerMAEs []float64
 
 	slippageMap := make(map[string]*struct {
-		count         int
-		sumIntended   float64
-		sumActual     float64
-		sumSlippage   float64
-		maxSlippage   float64
+		count       int
+		sumIntended float64
+		sumActual   float64
+		sumSlippage float64
+		maxSlippage float64
 	})
 
 	gearMap := make(map[int]*struct {
@@ -389,33 +407,63 @@ func ComputeEODMetrics(db *sql.DB, tradingDate string) (*EODReportSummary, error
 	}
 
 	// 8. Shadow Signals Tracking Comparison
-	sRows, sErr := db.Query(`
-		SELECT rejection_reason, outcome, simulated_r
+	shadowRows, queryShadowErr := db.Query(`
+		SELECT
+			signal_time, symbol, pattern_type, bullish_score, rejection_reason,
+			entry_price, hypothetical_stop, one_r, target_1r, outcome, simulated_r
 		FROM shadow_signals
 		WHERE trading_date = ?
+		ORDER BY signal_time ASC
 	`, tradingDate)
-	if sErr == nil {
-		defer sRows.Close()
-		var shadowWins int
-		var sumShadowR float64
-		for sRows.Next() {
-			var reason, outcome string
-			var simR float64
-			if sScanErr := sRows.Scan(&reason, &outcome, &simR); sScanErr == nil {
+	if queryShadowErr == nil {
+		defer shadowRows.Close()
+		var shadowWinningCount int
+		var sumShadowRMultiple float64
+		for shadowRows.Next() {
+			var rawSignalTime, symbol, patternType, rejectionReason, outcome string
+			var bullishScore, entryPrice, hypotheticalStop, oneR, target1R, simulatedR float64
+			if scanErr := shadowRows.Scan(
+				&rawSignalTime, &symbol, &patternType, &bullishScore, &rejectionReason,
+				&entryPrice, &hypotheticalStop, &oneR, &target1R, &outcome, &simulatedR,
+			); scanErr == nil {
 				report.ShadowSummary.ShadowSignalCount++
-				report.ShadowSummary.RejectionBreakdown[reason]++
-				if outcome == "WIN_1R" || simR > 0 {
-					shadowWins++
+				report.ShadowSummary.RejectionBreakdown[rejectionReason]++
+				if outcome == "WIN_1R" || simulatedR > 0 {
+					shadowWinningCount++
 				}
-				sumShadowR += simR
+				sumShadowRMultiple += simulatedR
+
+				formattedSignalTime := rawSignalTime
+				if parsedTime, parseErr := time.Parse(time.RFC3339, rawSignalTime); parseErr == nil {
+					formattedSignalTime = parsedTime.Format("15:04:05")
+				} else if parsedTime, parseErr := time.Parse("2006-01-02 15:04:05", rawSignalTime); parseErr == nil {
+					formattedSignalTime = parsedTime.Format("15:04:05")
+				} else if parsedTime, parseErr := time.Parse("2006-01-02T15:04:05", rawSignalTime); parseErr == nil {
+					formattedSignalTime = parsedTime.Format("15:04:05")
+				}
+
+				shadowDetail := ShadowSignalDetail{
+					SignalTime:       formattedSignalTime,
+					Symbol:           symbol,
+					PatternType:      patternType,
+					BullishScore:     math.Round(bullishScore*10.0) / 10.0,
+					RejectionReason:  rejectionReason,
+					EntryPrice:       math.Round(entryPrice*100.0) / 100.0,
+					HypotheticalStop: math.Round(hypotheticalStop*100.0) / 100.0,
+					OneR:             math.Round(oneR*100.0) / 100.0,
+					Target1R:         math.Round(target1R*100.0) / 100.0,
+					Outcome:          outcome,
+					SimulatedR:       math.Round(simulatedR*100.0) / 100.0,
+				}
+				report.ShadowSummary.RejectedSignals = append(report.ShadowSummary.RejectedSignals, shadowDetail)
 			}
 		}
-		if err := sRows.Err(); err != nil {
+		if err := shadowRows.Err(); err != nil {
 			return nil, fmt.Errorf("error iterating shadow signals: %w", err)
 		}
 		if report.ShadowSummary.ShadowSignalCount > 0 {
-			report.ShadowSummary.ShadowWinRatePct = math.Round((float64(shadowWins)/float64(report.ShadowSummary.ShadowSignalCount))*1000.0) / 10.0
-			report.ShadowSummary.ShadowAverageR = math.Round((sumShadowR/float64(report.ShadowSummary.ShadowSignalCount))*100.0) / 100.0
+			report.ShadowSummary.ShadowWinRatePct = math.Round((float64(shadowWinningCount)/float64(report.ShadowSummary.ShadowSignalCount))*1000.0) / 10.0
+			report.ShadowSummary.ShadowAverageR = math.Round((sumShadowRMultiple/float64(report.ShadowSummary.ShadowSignalCount))*100.0) / 100.0
 		}
 		report.ShadowSummary.ActualTradeCount = report.TotalTrades
 		report.ShadowSummary.ActualWinRatePct = report.WinRatePct
@@ -430,6 +478,26 @@ func ComputeEODMetrics(db *sql.DB, tradingDate string) (*EODReportSummary, error
 		}
 	}
 
+	// 9. Zero-Trade Diagnostic Synthesis
+	if report.TotalTrades == 0 {
+		if report.IsCircuitBreakerLocked {
+			report.ZeroTradeVerdict = fmt.Sprintf("Circuit Breaker Tripped (%s) — trading was suspended to protect capital.", report.CircuitBreakerReason)
+		} else if !report.IsAutoExecuteArmed {
+			report.ZeroTradeVerdict = "Engine Auto-Execute is PAUSED / DISARMED — setups were detected but execution was suppressed by operator configuration."
+		} else if report.ShadowSummary.ShadowSignalCount > 0 {
+			dominantReason := ""
+			dominantCount := 0
+			for rejectionReason, occurrenceCount := range report.ShadowSummary.RejectionBreakdown {
+				if occurrenceCount > dominantCount {
+					dominantCount = occurrenceCount
+					dominantReason = rejectionReason
+				}
+			}
+			report.ZeroTradeVerdict = fmt.Sprintf("0 trades executed — %d qualified candidates detected but filtered by risk & portfolio barriers (Primary constraint: %s on %d setups). 100%% Capital Preserved.", report.ShadowSummary.ShadowSignalCount, dominantReason, dominantCount)
+		} else {
+			report.ZeroTradeVerdict = "0 trades executed — market regime was inactive or no candidate setups met entry confluence thresholds today. 100% Capital Preserved."
+		}
+	}
+
 	return report, nil
 }
-

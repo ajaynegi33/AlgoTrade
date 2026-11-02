@@ -125,6 +125,22 @@ func setupTestDB(t *testing.T) *sql.DB {
 			scan_date TEXT NOT NULL,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);`,
+		`CREATE TABLE IF NOT EXISTS execution_settings (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			mode TEXT NOT NULL DEFAULT 'PAPER',
+			auto_execute INTEGER NOT NULL DEFAULT 1,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE TABLE IF NOT EXISTS daily_risk_ledger (
+			trading_date TEXT NOT NULL,
+			mode TEXT NOT NULL,
+			opening_capital REAL NOT NULL,
+			realised_pnl REAL NOT NULL DEFAULT 0,
+			peak_net_pnl REAL NOT NULL DEFAULT 0,
+			circuit_breaker_locked INTEGER NOT NULL DEFAULT 0,
+			lock_reason TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (trading_date, mode)
+		);`,
 	}
 
 	for _, migrationQuery := range queries {
@@ -406,4 +422,85 @@ type mockRoundTripper func(req *http.Request) (*http.Response, error)
 
 func (f mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func TestGenerateReport_ZeroTradeDiagnosticMode(t *testing.T) {
+	testDatabase := setupTestDB(t)
+	defer testDatabase.Close()
+
+	tradingDate := "2026-11-02"
+
+	// Configure execution mode as PAPER and armed
+	_, executionSettingsErr := testDatabase.Exec(`
+		INSERT INTO execution_settings (id, mode, auto_execute)
+		VALUES (1, 'PAPER', 1)
+	`)
+	if executionSettingsErr != nil {
+		t.Fatalf("Failed to insert execution settings: %v", executionSettingsErr)
+	}
+
+	// Insert 8 rejected setups matching today's scenario
+	sampleRejectedSymbols := []string{"INFY", "TCS", "RELIANCE", "HDFCBANK", "ICICIBANK", "SBIN", "LT", "BHARTIARTL"}
+	for indexNumber, symbol := range sampleRejectedSymbols {
+		signalTime := time.Date(2026, 11, 2, 9, 30+indexNumber*5, 0, 0, time.UTC)
+		rejectionReason := "Max Portfolio Heat 2.0% reached"
+		if indexNumber%2 == 1 {
+			rejectionReason = "Sector Risk Limit (Financial Services 4.0% Cap)"
+		}
+		_, insertShadowErr := testDatabase.Exec(`
+			INSERT INTO shadow_signals (
+				trading_date, signal_time, symbol, instrument_token, pattern_type,
+				bullish_score, rejection_reason, entry_price, hypothetical_stop,
+				one_r, target_1r, outcome, simulated_r
+			) VALUES (?, ?, ?, ?, 'VWAP_PULLBACK_RECLAIM', 78.5, ?, 1500.0, 1485.0, 15.0, 1515.0, 'PENDING', 0.0)
+		`, tradingDate, signalTime.Format(time.RFC3339), symbol, 1000+indexNumber, rejectionReason)
+		if insertShadowErr != nil {
+			t.Fatalf("Failed to insert shadow signal %s: %v", symbol, insertShadowErr)
+		}
+	}
+
+	reportSummary, computeMetricsErr := ComputeEODMetrics(testDatabase, tradingDate)
+	if computeMetricsErr != nil {
+		t.Fatalf("ComputeEODMetrics failed: %v", computeMetricsErr)
+	}
+
+	if reportSummary.TotalTrades != 0 {
+		t.Errorf("Expected 0 total trades, got %d", reportSummary.TotalTrades)
+	}
+	if reportSummary.ShadowSummary.ShadowSignalCount != 8 {
+		t.Errorf("Expected 8 shadow signals, got %d", reportSummary.ShadowSummary.ShadowSignalCount)
+	}
+	if len(reportSummary.ShadowSummary.RejectedSignals) != 8 {
+		t.Errorf("Expected 8 itemized rejected signals, got %d", len(reportSummary.ShadowSummary.RejectedSignals))
+	}
+	if !strings.Contains(reportSummary.ZeroTradeVerdict, "8 qualified candidates detected") {
+		t.Errorf("Expected ZeroTradeVerdict to detail the 8 candidates, got: %s", reportSummary.ZeroTradeVerdict)
+	}
+
+	// Generate HTML and verify content
+	htmlContent := GenerateHTMLReport(reportSummary)
+	if !strings.Contains(htmlContent, "100% Capital Preserved") {
+		t.Errorf("HTML missing Capital Preserved banner")
+	}
+	if !strings.Contains(htmlContent, "Pre-Trade Gate Audit") {
+		t.Errorf("HTML missing Pre-Trade Gate Audit section")
+	}
+	if !strings.Contains(htmlContent, "INFY") || !strings.Contains(htmlContent, "BHARTIARTL") {
+		t.Errorf("HTML missing rejected symbols")
+	}
+	if strings.Contains(htmlContent, "No trades executed today") {
+		t.Errorf("HTML should not render empty boilerplate tables on zero-trade days")
+	}
+
+	// Generate Markdown and verify content
+	markdownContent := GenerateMarkdownReport(reportSummary)
+	if !strings.Contains(markdownContent, "Capital Preservation Status") {
+		t.Errorf("Markdown missing Capital Preservation Status")
+	}
+	if !strings.Contains(markdownContent, "Pre-Trade Gate Audit") {
+		t.Errorf("Markdown missing Pre-Trade Gate Audit")
+	}
+	if !strings.Contains(markdownContent, "INFY") {
+		t.Errorf("Markdown missing INFY in table")
+	}
 }

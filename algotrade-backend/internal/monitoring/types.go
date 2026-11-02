@@ -71,40 +71,56 @@ type PositionReportRecord struct {
 
 // MFEvsMAESummary breaks down favorable and adverse excursions
 type MFEvsMAESummary struct {
-	AverageMAE         float64 `json:"average_mae"`          // Negative R, e.g. -0.35R
-	MedianMAEWinners   float64 `json:"median_mae_winners"`   // Negative R for winning trades
+	AverageMAE         float64 `json:"average_mae"`           // Negative R, e.g. -0.35R
+	MedianMAEWinners   float64 `json:"median_mae_winners"`    // Negative R for winning trades
 	PctWinnersUnder06R float64 `json:"pct_winners_under_06r"` // % of winners that never went past -0.6R
-	StopLossAlert      string  `json:"stop_loss_alert"`      // Diagnostic alert if stops are too wide
-	AverageMFE         float64 `json:"average_mfe"`          // Positive R, e.g. +2.40R
-	AverageRealisedR   float64 `json:"average_realised_r"`   // Realized R e.g. +1.10R
-	TrailingStopAlert  string  `json:"trailing_stop_alert"`  // Diagnostic alert if trailing stops are too loose
-	EdgeRatio          float64 `json:"edge_ratio"`           // Avg MFE / |Avg MAE|
-	CaptureEfficiency  float64 `json:"capture_efficiency"`   // Realized R / MFE R percentage
+	StopLossAlert      string  `json:"stop_loss_alert"`       // Diagnostic alert if stops are too wide
+	AverageMFE         float64 `json:"average_mfe"`           // Positive R, e.g. +2.40R
+	AverageRealisedR   float64 `json:"average_realised_r"`    // Realized R e.g. +1.10R
+	TrailingStopAlert  string  `json:"trailing_stop_alert"`   // Diagnostic alert if trailing stops are too loose
+	EdgeRatio          float64 `json:"edge_ratio"`            // Avg MFE / |Avg MAE|
+	CaptureEfficiency  float64 `json:"capture_efficiency"`    // Realized R / MFE R percentage
+}
+
+// ShadowSignalDetail records the full attributes of a rejected setup for diagnostic post-mortems
+type ShadowSignalDetail struct {
+	SignalTime       string  `json:"signal_time"`
+	Symbol           string  `json:"symbol"`
+	PatternType      string  `json:"pattern_type"`
+	BullishScore     float64 `json:"bullish_score"`
+	RejectionReason  string  `json:"rejection_reason"`
+	EntryPrice       float64 `json:"entry_price"`
+	HypotheticalStop float64 `json:"hypothetical_stop"`
+	OneR             float64 `json:"one_r"`
+	Target1R         float64 `json:"target_1r"`
+	Outcome          string  `json:"outcome"`
+	SimulatedR       float64 `json:"simulated_r"`
 }
 
 // ShadowComparisonSummary compares actual trades against rejected/shadow setups
 type ShadowComparisonSummary struct {
-	ActualTradeCount      int     `json:"actual_trade_count"`
-	ActualWinRatePct      float64 `json:"actual_win_rate_pct"`
-	ActualAverageR        float64 `json:"actual_average_r"`
-	ActualTotalNetPnL     float64 `json:"actual_total_net_pnl"`
-	ShadowSignalCount     int     `json:"shadow_signal_count"`
-	ShadowWinRatePct      float64 `json:"shadow_win_rate_pct"`
-	ShadowAverageR        float64 `json:"shadow_average_r"`
-	FilterEfficiencyAlert string  `json:"filter_efficiency_alert"` // Alert if shadow outperforms actual
-	RejectionBreakdown    map[string]int `json:"rejection_breakdown"`
+	ActualTradeCount      int                  `json:"actual_trade_count"`
+	ActualWinRatePct      float64              `json:"actual_win_rate_pct"`
+	ActualAverageR        float64              `json:"actual_average_r"`
+	ActualTotalNetPnL     float64              `json:"actual_total_net_pnl"`
+	ShadowSignalCount     int                  `json:"shadow_signal_count"`
+	ShadowWinRatePct      float64              `json:"shadow_win_rate_pct"`
+	ShadowAverageR        float64              `json:"shadow_average_r"`
+	FilterEfficiencyAlert string               `json:"filter_efficiency_alert"` // Alert if shadow outperforms actual
+	RejectionBreakdown    map[string]int       `json:"rejection_breakdown"`
+	RejectedSignals       []ShadowSignalDetail `json:"rejected_signals"`
 }
 
 // SlippageAuditRecord evaluates execution friction per stock
 type SlippageAuditRecord struct {
-	Symbol             string  `json:"symbol"`
-	TradeCount         int     `json:"trade_count"`
-	AvgIntendedPrice   float64 `json:"avg_intended_price"`
-	AvgFillPrice       float64 `json:"avg_fill_price"`
-	AvgSlippagePct     float64 `json:"avg_slippage_pct"`
-	MaxSlippagePct     float64 `json:"max_slippage_pct"`
-	IsToxicLiquidity   bool    `json:"is_toxic_liquidity"` // True if avg slippage > 0.15% or max > 0.30%
-	BlacklistReason    string  `json:"blacklist_reason,omitempty"`
+	Symbol           string  `json:"symbol"`
+	TradeCount       int     `json:"trade_count"`
+	AvgIntendedPrice float64 `json:"avg_intended_price"`
+	AvgFillPrice     float64 `json:"avg_fill_price"`
+	AvgSlippagePct   float64 `json:"avg_slippage_pct"`
+	MaxSlippagePct   float64 `json:"max_slippage_pct"`
+	IsToxicLiquidity bool    `json:"is_toxic_liquidity"` // True if avg slippage > 0.15% or max > 0.30%
+	BlacklistReason  string  `json:"blacklist_reason,omitempty"`
 }
 
 // ProbabilityBucket aggregates calibration metrics by pre-trade score bucket
@@ -121,14 +137,14 @@ type ProbabilityBucket struct {
 
 // TimeOfDayBucket aggregates performance by intraday trading window
 type TimeOfDayBucket struct {
-	SessionName   string  `json:"session_name"` // "Opening Drive (09:15-10:00)", etc.
-	TimeWindow    string  `json:"time_window"`
-	TradeCount    int     `json:"trade_count"`
-	WinningCount  int     `json:"winning_count"`
-	WinRatePct    float64 `json:"win_rate_pct"`
-	GrossPnL      float64 `json:"gross_pnl"`
-	NetPnL        float64 `json:"net_pnl"`
-	AverageR      float64 `json:"average_r"`
+	SessionName  string  `json:"session_name"` // "Opening Drive (09:15-10:00)", etc.
+	TimeWindow   string  `json:"time_window"`
+	TradeCount   int     `json:"trade_count"`
+	WinningCount int     `json:"winning_count"`
+	WinRatePct   float64 `json:"win_rate_pct"`
+	GrossPnL     float64 `json:"gross_pnl"`
+	NetPnL       float64 `json:"net_pnl"`
+	AverageR     float64 `json:"average_r"`
 }
 
 // GearAttributionRecord evaluates trailing stop performance across gears
@@ -141,25 +157,29 @@ type GearAttributionRecord struct {
 
 // EODReportSummary is the master structure containing all diagnostic analytics for the day
 type EODReportSummary struct {
-	TradingDate         string                   `json:"trading_date"`
-	GeneratedAt         time.Time                `json:"generated_at"`
-	TotalTrades         int                      `json:"total_trades"`
-	WinningTrades       int                      `json:"winning_trades"`
-	LosingTrades        int                      `json:"losing_trades"`
-	BreakevenTrades     int                      `json:"breakeven_trades"`
-	WinRatePct          float64                  `json:"win_rate_pct"`
-	RealisedGrossPnL    float64                  `json:"realised_gross_pnl"`
-	TotalCharges        float64                  `json:"total_charges"`
-	RealisedNetPnL      float64                  `json:"realised_net_pnl"`
-	ProfitFactor        float64                  `json:"profit_factor"`
-	AverageRMultiple    float64                  `json:"average_r_multiple"`
-	ExcursionSummary    MFEvsMAESummary          `json:"excursion_summary"`
-	ShadowSummary       ShadowComparisonSummary  `json:"shadow_summary"`
-	SlippageRecords     []SlippageAuditRecord    `json:"slippage_records"`
-	ToxicSymbols        []string                 `json:"toxic_symbols"`
-	ProbabilityBuckets  []ProbabilityBucket      `json:"probability_buckets"`
-	SessionBreakdowns   []TimeOfDayBucket        `json:"session_breakdowns"`
-	GearAttributions    []GearAttributionRecord  `json:"gear_attributions"`
-	TradeLedger         []PositionReportRecord   `json:"trade_ledger"`
+	TradingDate            string                  `json:"trading_date"`
+	GeneratedAt            time.Time               `json:"generated_at"`
+	TotalTrades            int                     `json:"total_trades"`
+	WinningTrades          int                     `json:"winning_trades"`
+	LosingTrades           int                     `json:"losing_trades"`
+	BreakevenTrades        int                     `json:"breakeven_trades"`
+	WinRatePct             float64                 `json:"win_rate_pct"`
+	RealisedGrossPnL       float64                 `json:"realised_gross_pnl"`
+	TotalCharges           float64                 `json:"total_charges"`
+	RealisedNetPnL         float64                 `json:"realised_net_pnl"`
+	ProfitFactor           float64                 `json:"profit_factor"`
+	AverageRMultiple       float64                 `json:"average_r_multiple"`
+	ExcursionSummary       MFEvsMAESummary         `json:"excursion_summary"`
+	ShadowSummary          ShadowComparisonSummary `json:"shadow_summary"`
+	SlippageRecords        []SlippageAuditRecord   `json:"slippage_records"`
+	ToxicSymbols           []string                `json:"toxic_symbols"`
+	ProbabilityBuckets     []ProbabilityBucket     `json:"probability_buckets"`
+	SessionBreakdowns      []TimeOfDayBucket       `json:"session_breakdowns"`
+	GearAttributions       []GearAttributionRecord `json:"gear_attributions"`
+	TradeLedger            []PositionReportRecord  `json:"trade_ledger"`
+	ExecutionMode          string                  `json:"execution_mode"`
+	IsAutoExecuteArmed     bool                    `json:"is_auto_execute_armed"`
+	IsCircuitBreakerLocked bool                    `json:"is_circuit_breaker_locked"`
+	CircuitBreakerReason   string                  `json:"circuit_breaker_reason"`
+	ZeroTradeVerdict       string                  `json:"zero_trade_verdict"`
 }
-
