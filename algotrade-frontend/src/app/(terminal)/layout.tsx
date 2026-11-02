@@ -228,7 +228,7 @@ export default function TerminalLayout({
         {/* Main Terminal Container */}
         <div className="flex-1 flex flex-col min-w-0 overflow-y-auto">
           {/* Top Header Bar */}
-          <header className="sticky top-0 z-30 bg-white/85 backdrop-blur-md border-b border-slate-200/80">
+          <header className="sticky top-0 z-30 bg-white/85 backdrop-blur-md border-b border-slate-200/80 pt-[env(safe-area-inset-top,0px)]">
             <div className="px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
               {/* Left: Mobile hamburger + Page Header Title/Subtitle */}
               <div className="flex items-center gap-3 min-w-0">

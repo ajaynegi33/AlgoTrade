@@ -54,7 +54,7 @@ export function PaperFundsModal({
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
-      <div className="bg-white border border-slate-200 rounded-3xl max-w-md w-full p-6 shadow-xl font-mono">
+      <div className="modal-surface bg-white border border-slate-200 rounded-3xl max-w-md w-full p-6 shadow-xl font-mono">
         <div className="flex items-center justify-between pb-3 border-b border-slate-100">
           <div>
             <h3 className="text-sm font-black text-slate-900 uppercase tracking-wider">
@@ -84,6 +84,9 @@ export function PaperFundsModal({
               </span>
               <input
                 type="number"
+                inputMode="numeric"
+                enterKeyHint="done"
+                autoComplete="off"
                 min={500}
                 max={1000000000}
                 step="100"

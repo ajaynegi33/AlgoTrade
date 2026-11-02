@@ -72,7 +72,7 @@ export default function DashboardSidebar({
           2. Sidenav Container (Responsive: Mobile Drawer + Desktop Collapsible)
           ========================================================================= */}
       <aside
-        className={`fixed md:sticky top-0 left-0 z-50 h-screen bg-white border-r border-slate-200/90 flex flex-col justify-between shrink-0 select-none transition-[width,transform] duration-250 ease-[cubic-bezier(0.23,1,0.32,1)] ${
+        className={`fixed md:sticky top-0 left-0 z-50 h-[100dvh] bg-white border-r border-slate-200/90 flex flex-col justify-between shrink-0 select-none transition-[width,transform] duration-250 ease-[cubic-bezier(0.23,1,0.32,1)] ${
           isMobileOpen ? "translate-x-0 w-72 shadow-2xl" : "-translate-x-full md:translate-x-0"
         } ${isCollapsed ? "md:w-20" : "md:w-50"}`}
       >
@@ -100,7 +100,7 @@ export default function DashboardSidebar({
         {/* =======================================================================
             Top Section: Brand Logo & Title
             ======================================================================= */}
-        <div className="p-4 sm:p-5 flex items-center justify-between border-b border-slate-100">
+        <div className="p-4 sm:p-5 pt-[calc(1rem+env(safe-area-inset-top,0px))] md:pt-4 sm:pt-5 flex items-center justify-between border-b border-slate-100">
           <Link href="/dashboard" className="flex items-center gap-3 overflow-hidden">
             <div className="w-10 h-10 flex items-center justify-center shadow-2xs shrink-0">
               <Image
@@ -143,7 +143,7 @@ export default function DashboardSidebar({
         {/* =======================================================================
             Middle Section: Navigation Links (Real Next.js Links)
             ======================================================================= */}
-        <nav className="flex-1 px-3 py-4 space-y-1.5 overflow-y-auto">
+        <nav className="flex-1 px-3 py-4 space-y-1.5 overflow-y-auto overscroll-contain">
           {/* 1. Autonomous Execution Desk */}
           <Link
             href="/dashboard"
@@ -320,7 +320,7 @@ export default function DashboardSidebar({
         {/* =======================================================================
             Bottom Section: Profile Link Card & Logout
             ======================================================================= */}
-        <div className="p-3 border-t border-slate-100 space-y-2">
+        <div className="p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))] md:pb-3 border-t border-slate-100 space-y-2">
           {/* User Profile Card (Clickable Link to /profile) */}
           <Link
             href="/profile"

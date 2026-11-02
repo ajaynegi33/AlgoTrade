@@ -145,29 +145,29 @@ export const LiveActiveTrades = memo(function LiveActiveTrades({
                 className="rounded-2xl border border-slate-200/90 bg-slate-50/40 p-4 sm:p-5 space-y-4"
               >
                 {/* Card Top: Symbol, Pattern, State, Gear Badge */}
-                <div className="flex flex-wrap items-start justify-between gap-2">
-                  <div>
-                    <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 min-w-0">
                       <Link
                         href={`/stock/${encodeURIComponent(pos.symbol)}`}
-                        className="text-base font-black text-slate-900 hover:text-emerald-700 hover:underline transition-colors cursor-pointer"
+                        className="text-base font-black text-slate-900 hover:text-emerald-700 hover:underline transition-colors cursor-pointer truncate"
                       >
                         {pos.symbol}
                       </Link>
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-900 text-white">
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-900 text-white shrink-0">
                         {pos.state}
                       </span>
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-200/80 text-slate-700">
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-200/80 text-slate-700 shrink-0">
                         {pos.pattern_type}
                       </span>
                     </div>
-                    <span className="text-[10px] text-slate-400 block mt-0.5">
+                    <span className="text-[10px] text-slate-400 block mt-0.5 truncate">
                       ID: {pos.position_id} • {pos.mode} • Opened {pos.opened_at || "Live"}
                     </span>
                   </div>
 
                   <span
-                    className={`text-[10px] font-bold px-2.5 py-1 rounded-full border ${gear.style}`}
+                    className={`text-[10px] font-bold px-2.5 py-1 rounded-full border shrink-0 ${gear.style}`}
                   >
                     {gear.label}
                   </span>
@@ -302,8 +302,10 @@ export const LiveActiveTrades = memo(function LiveActiveTrades({
                       {/* Trigger Progress Bar */}
                       <div className="w-full h-1.5 rounded-full bg-emerald-100 overflow-hidden mt-1">
                         <div
-                          className="h-full bg-emerald-600 transition-all duration-300"
-                          style={{ width: `${radar.triggerProgressPercent}%` }}
+                          className="h-full w-full bg-emerald-600 origin-left transition-transform duration-200 ease-out"
+                          style={{
+                            transform: `scaleX(${Math.min(1, Math.max(0, (radar.triggerProgressPercent || 0) / 100))})`,
+                          }}
                         />
                       </div>
                     </div>
@@ -332,20 +334,24 @@ export const LiveActiveTrades = memo(function LiveActiveTrades({
                   <div className="relative w-full h-2.5 rounded-full bg-slate-100 overflow-hidden border border-slate-200/80">
                     {/* Locked Stop Floor Marker */}
                     <div
-                      className="absolute top-0 bottom-0 left-0 bg-rose-200/70 border-r-2 border-rose-600 transition-all"
-                      style={{ width: `${stopProgressPct}%` }}
+                      className="absolute top-0 bottom-0 left-0 w-full bg-rose-200/70 border-r-2 border-rose-600 origin-left transition-transform duration-200 ease-out"
+                      style={{
+                        transform: `scaleX(${Math.min(1, Math.max(0, stopProgressPct / 100))})`,
+                      }}
                       title={`Active Stop Floor: ${stopR.toFixed(2)}R`}
                     />
                     {/* Live R Fill */}
                     <div
-                      className={`h-full transition-all ${
+                      className={`h-full w-full origin-left transition-transform duration-200 ease-out ${
                         pos.r_multiple >= 1.0
                           ? "bg-emerald-600"
                           : pos.r_multiple >= 0
                           ? "bg-teal-500"
                           : "bg-amber-500"
                       }`}
-                      style={{ width: `${rProgressPct}%` }}
+                      style={{
+                        transform: `scaleX(${Math.min(1, Math.max(0, rProgressPct / 100))})`,
+                      }}
                     />
                   </div>
                   <div className="flex justify-between text-[9px] text-slate-400 font-bold pt-0.5">
@@ -368,14 +374,16 @@ export const LiveActiveTrades = memo(function LiveActiveTrades({
                   </div>
                   <div className="w-full h-1.5 rounded-full bg-slate-200 overflow-hidden">
                     <div
-                      className={`h-full transition-all ${
+                      className={`h-full w-full origin-left transition-transform duration-200 ease-out ${
                         pos.mod_count >= 24
                           ? "bg-purple-600"
                           : pos.mod_count >= 19
                           ? "bg-amber-500"
                           : "bg-emerald-600"
                       }`}
-                      style={{ width: `${modPct}%` }}
+                      style={{
+                        transform: `scaleX(${Math.min(1, Math.max(0, modPct / 100))})`,
+                      }}
                     />
                   </div>
                 </div>

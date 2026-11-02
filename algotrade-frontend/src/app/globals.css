@@ -3,6 +3,8 @@
 :root {
   --background: #f8fafc;
   --foreground: #0f172a;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
 }
 
 @theme inline {
@@ -12,11 +14,85 @@
   --font-mono: var(--font-geist-mono);
 }
 
+/* Tabular figures for financial tickers and live telemetry */
+.font-mono, table, [data-tabular] {
+  font-variant-numeric: tabular-nums;
+}
+
+html {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior: none;
+}
+
 body {
   background-color: #f8fafc;
   color: #0f172a;
   font-family: var(--font-sans), system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+}
+
+/* 1. Prevent iOS Safari auto-zoom on input focus by guaranteeing 16px minimum font size on touch devices */
+@media (pointer: coarse) {
+  input, textarea, select {
+    font-size: 16px !important;
+  }
+}
+
+/* 2. Interactive control tap ergonomics & text-selection protection */
+button, a, [role="button"], .tab, .pill, .chip {
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* Tactile button press feedback following Apple Fluid Interface and Emil Kowalski guidelines */
+button:not(:disabled), [role="button"]:not([aria-disabled="true"]) {
+  transition: transform 120ms var(--ease-out), background-color 120ms, border-color 120ms, color 120ms;
+}
+
+button:not(:disabled):active, [role="button"]:not([aria-disabled="true"]):active {
+  transform: scale(0.97);
+}
+
+/* 3. Nested container scroll chaining containment */
+.overscroll-contain {
+  overscroll-behavior: contain;
+}
+
+/* 4. Origin-aware physical modal and dropdown entrances */
+@keyframes modalEnter {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.modal-surface {
+  animation: modalEnter 180ms var(--ease-out) forwards;
+  transform-origin: center center;
+}
+
+@keyframes dropdownEnter {
+  from {
+    opacity: 0;
+    transform: scaleY(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scaleY(1);
+  }
+}
+
+.dropdown-surface {
+  animation: dropdownEnter 140ms var(--ease-out) forwards;
+  transform-origin: top center;
 }
 
 @keyframes shimmer {

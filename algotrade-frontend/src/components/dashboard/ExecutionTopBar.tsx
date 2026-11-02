@@ -349,7 +349,7 @@ export const ExecutionTopBar = memo(function ExecutionTopBar({
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="bg-white border border-rose-200 rounded-3xl max-w-md w-full p-6 shadow-2xl font-mono space-y-4"
+            className="modal-surface bg-white border border-rose-200 rounded-3xl max-w-md w-full p-6 shadow-2xl font-mono space-y-4"
           >
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-2xl bg-rose-50 border border-rose-200 flex items-center justify-center text-rose-600 text-lg font-black shrink-0">

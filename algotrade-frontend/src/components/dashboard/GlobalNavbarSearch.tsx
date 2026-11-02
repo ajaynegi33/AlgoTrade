@@ -145,6 +145,10 @@ export function GlobalNavbarSearch() {
           ref={inputRef}
           type="text"
           value={query}
+          autoCapitalize="characters"
+          autoCorrect="off"
+          enterKeyHint="search"
+          spellCheck={false}
           onFocus={() => setIsOpen(true)}
           onChange={(e) => {
             setQuery(e.target.value);
@@ -190,7 +194,7 @@ export function GlobalNavbarSearch() {
 
       {/* Autocomplete Dropdown Modal (Flush Attached with Zero Lag) */}
       {isOpen && (
-        <div className="absolute top-full left-0 right-0 mt-0 bg-white border border-t-0 border-slate-300 rounded-b-xl shadow-2xl overflow-hidden z-50">
+        <div className="dropdown-surface absolute top-full left-0 right-0 mt-0 bg-white border border-t-0 border-slate-300 rounded-b-xl shadow-2xl overflow-hidden z-50">
           <div className="max-h-84 overflow-y-auto divide-y divide-slate-100/70 p-1.5">
             {filteredStocks.length === 0 ? (
               <div className="p-4 text-center text-xs font-mono text-slate-400">

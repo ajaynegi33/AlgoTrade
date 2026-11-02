@@ -256,14 +256,14 @@ export function FullRankedTable({ stocks, selectedSectorId }: FullRankedTablePro
 
       {/* Table with CSS Content-Visibility Containment to isolate 1Hz layout recalculations */}
       <div
-        className="overflow-x-auto rounded-2xl border border-slate-200/90 scrollbar-thin scrollbar-thumb-slate-200"
+        className="overflow-x-auto overscroll-contain rounded-2xl border border-slate-200/90 scrollbar-thin scrollbar-thumb-slate-200"
         style={{
           contentVisibility: "auto",
           containIntrinsicSize: "auto 900px auto 1200px",
           contain: "layout style paint",
         }}
       >
-        <table className="w-full text-left border-collapse text-xs">
+        <table className="w-full text-left border-collapse text-xs font-mono tabular-nums">
           <thead>
             <tr className="bg-slate-50/90 border-b border-slate-200 font-mono text-[11px] text-slate-500 font-bold uppercase tracking-wider">
               <th className="py-3 px-3.5 text-center w-12">Rk</th>
