@@ -62,3 +62,4 @@ algotrade-backend/traces/
 dist/
 algotrade-backend/dist/
 
+.agents
