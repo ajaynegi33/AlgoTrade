@@ -38,6 +38,10 @@ func (worker *PositionWorker) UpdateTrailingStopLossOnPriceTick(stockMetrics *ma
 		worker.paperBroker.EvaluateTickForToken(stockMetrics)
 	}
 
+	if worker.isClosed.Load() {
+		return
+	}
+
 	if worker.isMarketExitPending.Load() {
 		return
 	}

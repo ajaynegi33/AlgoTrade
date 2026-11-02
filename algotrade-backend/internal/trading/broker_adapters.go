@@ -662,7 +662,7 @@ func (broker *PaperBroker) emit(order *paperRestingOrder) {
 		Tag:             OrderTag,
 		OrderTimestamp:  order.UpdatedAt.Format("2006-01-02 15:04:05"),
 	}
-	go broker.onEvent(orderEvent)
+	broker.onEvent(orderEvent)
 }
 
 func (broker *PaperBroker) PlaceLimitBuy(
@@ -805,6 +805,16 @@ func (broker *PaperBroker) PlaceLimitBuy(
 
 	broker.mu.Lock()
 	broker.orders[orderID] = restingOrder
+	hasExistingByToken := false
+	for _, existingOrder := range broker.byToken[token] {
+		if existingOrder.OrderID == orderID {
+			hasExistingByToken = true
+			break
+		}
+	}
+	if !hasExistingByToken {
+		broker.byToken[token] = append(broker.byToken[token], restingOrder)
+	}
 	orderCopy := *restingOrder
 	broker.mu.Unlock()
 
@@ -870,6 +880,16 @@ func (broker *PaperBroker) PlaceEmergencySweepSell(
 
 	broker.mu.Lock()
 	broker.orders[orderID] = restingOrder
+	hasExistingByToken := false
+	for _, existingOrder := range broker.byToken[token] {
+		if existingOrder.OrderID == orderID {
+			hasExistingByToken = true
+			break
+		}
+	}
+	if !hasExistingByToken {
+		broker.byToken[token] = append(broker.byToken[token], restingOrder)
+	}
 	orderCopy := *restingOrder
 	broker.mu.Unlock()
 
@@ -1121,9 +1141,11 @@ func (broker *PaperBroker) EvaluateTickForToken(stockMetrics *market.StockMetric
 			if restingOrder.Status == OrderStatusTrigPending && restingOrder.TriggerPrice > 0 && ltp <= restingOrder.TriggerPrice {
 				hasPotentialTrigger = true
 				break
-			} else if restingOrder.Status == OrderStatusOpen && (restingOrder.Price == 0 || ltp >= restingOrder.Price) {
-				hasPotentialTrigger = true
-				break
+			} else if restingOrder.Status == OrderStatusOpen {
+				if restingOrder.OrderType == "SL" || restingOrder.OrderType == "MARKET" || restingOrder.Price == 0 || ltp >= restingOrder.Price {
+					hasPotentialTrigger = true
+					break
+				}
 			}
 		}
 	}
@@ -1173,26 +1195,27 @@ func (broker *PaperBroker) EvaluateTickForToken(stockMetrics *market.StockMetric
 			}
 		} else { // SELL (SL or LIMIT)
 			if restingOrder.Status == OrderStatusTrigPending && stockMetrics.LTP <= restingOrder.TriggerPrice {
-				// Check if current LTP gapped below the protective limit price
-				if restingOrder.Price > 0 && stockMetrics.LTP < restingOrder.Price {
-					restingOrder.Status = OrderStatusOpen
+				fillPrice := walkBidBook(restingOrder.Quantity, 0, stockMetrics)
+				restingOrder.Status = OrderStatusComplete
+				restingOrder.FilledQuantity = restingOrder.Quantity
+				restingOrder.AveragePrice = fillPrice
+				restingOrder.UpdatedAt = time.Now()
+				triggeredOrders = append(triggeredOrders, *restingOrder)
+			} else if restingOrder.Status == OrderStatusOpen {
+				isEligibleToFill := false
+				if restingOrder.OrderType == "SL" || restingOrder.OrderType == "MARKET" || restingOrder.Price == 0 {
+					isEligibleToFill = true
+				} else if restingOrder.OrderType == "LIMIT" && stockMetrics.LTP >= restingOrder.Price {
+					isEligibleToFill = true
+				}
+				if isEligibleToFill {
+					fillPrice := walkBidBook(restingOrder.Quantity, 0, stockMetrics)
+					restingOrder.Status = OrderStatusComplete
+					restingOrder.FilledQuantity = restingOrder.Quantity
+					restingOrder.AveragePrice = fillPrice
 					restingOrder.UpdatedAt = time.Now()
 					triggeredOrders = append(triggeredOrders, *restingOrder)
-					continue
 				}
-				fillPrice := walkBidBook(restingOrder.Quantity, restingOrder.Price, stockMetrics)
-				restingOrder.Status = OrderStatusComplete
-				restingOrder.FilledQuantity = restingOrder.Quantity
-				restingOrder.AveragePrice = fillPrice
-				restingOrder.UpdatedAt = time.Now()
-				triggeredOrders = append(triggeredOrders, *restingOrder)
-			} else if restingOrder.Status == OrderStatusOpen && (restingOrder.Price == 0 || stockMetrics.LTP >= restingOrder.Price) {
-				fillPrice := walkBidBook(restingOrder.Quantity, restingOrder.Price, stockMetrics)
-				restingOrder.Status = OrderStatusComplete
-				restingOrder.FilledQuantity = restingOrder.Quantity
-				restingOrder.AveragePrice = fillPrice
-				restingOrder.UpdatedAt = time.Now()
-				triggeredOrders = append(triggeredOrders, *restingOrder)
 			}
 		}
 	}

@@ -381,6 +381,11 @@ func (worker *PositionWorker) OnOrderDelta(legType string, orderEvent OrderUpdat
 				worker.mu.Unlock()
 				worker.persistPositionState()
 				worker.notifyClosed()
+				select {
+				case worker.fillNotifyCh <- struct{}{}:
+				default:
+				}
+				worker.wakeWorker()
 				return
 			}
 		}

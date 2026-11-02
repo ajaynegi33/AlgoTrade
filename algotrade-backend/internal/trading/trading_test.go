@@ -2153,5 +2153,138 @@ func TestZeroMarginRejection(t *testing.T) {
 	}
 }
 
+func TestPaperBroker_StopLossExecutionOnFallingLTP(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var stock market.StockMetrics
+	stock.InstrumentToken = 778899
+	stock.SetSymbol("TATAMOTORS")
+	stock.LTP = 500.00
+	stock.ExchangeVWAP = 499.00
+	stock.RollingPeak = 500.00
+	stock.Ask1Price = 500.05
+	stock.Bid1Price = 499.95
+	stock.TickSize = 0.05
+	stock.ATR14 = 5.00
+	stock.MISLeverage = 5.0
+	stock.SmoothedBuyerRatio = 0.65
+	stock.AggressorBuyRatio = 0.65
+	stock.FastAggressorEMA = 0.65
+	stock.LastUpdatedUnix = time.Now().Unix()
+	for index := 0; index < 5; index++ {
+		stock.AskLevels[index] = market.DepthLevel{Price: float32(500.05 + float64(index)*0.05), Qty: 10000}
+		stock.BidLevels[index] = market.DepthLevel{Price: float32(499.95 - float64(index)*0.05), Qty: 10000}
+	}
+
+	sizing := ComputePositionSize(&stock, 496.00, 200000.0, 200000.0, 0.005, 1.0, 1.0, 4000.0)
+	if !sizing.IsApproved {
+		t.Fatalf("sizing rejected: %s", sizing.RejectReason)
+	}
+
+	var positionWorker *PositionWorker
+	orderReconciler := NewOrderReconciler(nil, func(posID, legType string, orderEvent OrderUpdateEvent, deltaFilled int) {
+		if positionWorker != nil {
+			positionWorker.OnOrderDelta(legType, orderEvent, deltaFilled)
+		}
+	})
+	paperBroker := NewPaperBroker(func(orderEvent OrderUpdateEvent) {
+		orderReconciler.ProcessOrderEvent(orderEvent)
+	})
+
+	closedNotifyChannel := make(chan struct{}, 1)
+	positionWorker = NewPositionWorker(ctx, WorkerConfig{
+		PositionID:  "TEST-FALLING-SL-1",
+		TradingDate: "2026-11-02",
+		Mode:        "PAPER",
+		Symbol:      "TATAMOTORS",
+		Token:       778899,
+		PatternType: "VWAP_PULLBACK_RECLAIM",
+		TickSize:    0.05,
+		MISLeverage: 5.0,
+		Sizing:      sizing,
+		Broker:      paperBroker,
+		PaperBroker: paperBroker,
+		Reconciler:  orderReconciler,
+		GetStockPtr: func() *market.StockMetrics { return &stock },
+		OnClosed: func(closedWorker *PositionWorker) {
+			select {
+			case closedNotifyChannel <- struct{}{}:
+			default:
+			}
+		},
+	})
+
+	if err := positionWorker.Start(); err != nil {
+		t.Fatalf("worker.Start failed: %v", err)
+	}
+
+	// Wait up to 500ms for initial SL order to be placed
+	var stopLossOrderID string
+	for attempt := 0; attempt < 50; attempt++ {
+		positionWorker.mu.RLock()
+		stopLossOrderID = positionWorker.slOrderID
+		positionWorker.mu.RUnlock()
+		if stopLossOrderID != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if stopLossOrderID == "" {
+		positionWorker.processPendingWork()
+		positionWorker.mu.RLock()
+		stopLossOrderID = positionWorker.slOrderID
+		positionWorker.mu.RUnlock()
+	}
+	if stopLossOrderID == "" {
+		t.Fatalf("expected initial SL order to be placed, but got empty slOrderID")
+	}
+
+	// 1. Stock rises to 530.00, trailing stop is ratcheted up to 520.00
+	stock.LTP = 530.00
+	stock.RollingPeak = 530.00
+	positionWorker.confirmedStopBits.Store(math.Float64bits(520.00))
+	positionWorker.proposedStopBits.Store(math.Float64bits(520.00))
+	limitPriceBelowStop := CalculateProtectiveLimitPriceBelowStop(520.00, positionWorker.TickSize)
+	err := paperBroker.ModifySLOrder(ctx, stopLossOrderID, positionWorker.RemainingQty(), 520.00, limitPriceBelowStop, stock.LTP, positionWorker.TickSize)
+	if err != nil {
+		t.Fatalf("ModifySLOrder failed: %v", err)
+	}
+
+	// 2. Now market pulls back and gaps down through the stop-loss and limit price to 516.00
+	stock.LTP = 516.00
+	stock.Ask1Price = 516.05
+	stock.Bid1Price = 515.95
+	stock.LastUpdatedUnix += 5
+	for index := 0; index < 5; index++ {
+		stock.AskLevels[index] = market.DepthLevel{Price: float32(516.05 + float64(index)*0.05), Qty: 10000}
+		stock.BidLevels[index] = market.DepthLevel{Price: float32(515.95 - float64(index)*0.05), Qty: 10000}
+	}
+
+	// Feed the tick to the position worker
+	positionWorker.UpdateTrailingStopLossOnPriceTick(&stock)
+
+	// Wait for closed notification
+	select {
+	case <-closedNotifyChannel:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for position to close after stop-loss breached on falling LTP")
+	}
+
+	if !positionWorker.isClosed.Load() {
+		t.Fatalf("expected position worker isClosed to be true")
+	}
+	if positionWorker.RemainingQty() != 0 {
+		t.Fatalf("expected remaining quantity to be 0, got %d", positionWorker.RemainingQty())
+	}
+	positionDTO := positionWorker.ToDTO()
+	if positionDTO.RealisedGrossPnL <= 0 {
+		t.Fatalf("expected positive realised gross PnL from stop-loss trailing profit, got %.2f", positionDTO.RealisedGrossPnL)
+	}
+	if positionDTO.State != StateClosed {
+		t.Fatalf("expected worker state StateClosed, got %s", positionDTO.State)
+	}
+}
+
 
 
