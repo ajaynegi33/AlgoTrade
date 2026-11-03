@@ -63,3 +63,8 @@ dist/
 algotrade-backend/dist/
 
 .agents
+
+algotrade-frontend/src/lib/empirical_frontend_math.check.ts
+algotrade-backend/internal/trading/gate2_empirical_challenge_test.go
+algotrade-backend/internal/trading/empirical_math_test.go
+PROJECT.md
