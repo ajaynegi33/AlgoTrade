@@ -2,9 +2,12 @@ package market
 
 import (
 	"encoding/binary"
+	"math"
+	"path/filepath"
 	"testing"
 	"unsafe"
 
+	"github.com/ajaynegi33/AlgoTrade/internal/database"
 	"github.com/ajaynegi33/AlgoTrade/internal/kite"
 	"github.com/ajaynegi33/AlgoTrade/internal/screener"
 )
@@ -263,6 +266,77 @@ func TestSnapshotPublisher_FlashShockRegime(testingInstance *testing.T) {
 	breadthRatio := float64(aboveVWAPCount) / float64(activeQuotedCount)
 	if breadthRatio > 0.20 {
 		testingInstance.Fatalf("expected breadth <= 0.20, got %.2f", breadthRatio)
+	}
+}
+
+func TestDynamicStockQueryLeverageAndPushUniverseSync(testingInstance *testing.T) {
+	databasePath := filepath.Join(testingInstance.TempDir(), "test_leverage.db")
+	databaseConnection, err := database.Init(databasePath)
+	if err != nil {
+		testingInstance.Fatalf("failed to initialize test database: %v", err)
+	}
+	defer databaseConnection.Close()
+
+	// Insert a dynamic stock into scanned_stocks with 4.5x leverage
+	_, insertError := databaseConnection.Exec(`
+		INSERT INTO scanned_stocks (
+			instrument_token, tradingsymbol, name, exchange, segment, instrument_type,
+			lot_size, tick_size, last_price, scan_date, mis_leverage, mis_margin_pct
+		) VALUES (998877, 'TESTLEVERAGE', 'TEST LEVERAGE CO', 'NSE', 'NSE', 'EQ', 1, 0.05, 520.0, '2026-11-03', 4.5, 0.2222)
+	`)
+	if insertError != nil {
+		testingInstance.Fatalf("failed inserting test scanned stock: %v", insertError)
+	}
+
+	actor := NewActor(databaseConnection, nil, nil, nil, nil)
+	// Query detail to trigger dynamic fallback from SQLite
+	detailDTO, isFound := actor.getStockDetailInternal("TESTLEVERAGE")
+	if !isFound || detailDTO == nil {
+		testingInstance.Fatalf("expected getStockDetailInternal to dynamically find TESTLEVERAGE in SQLite")
+	}
+
+	targetIndex, exists := actor.stockIndexBySymbol["TESTLEVERAGE"]
+	if !exists {
+		testingInstance.Fatalf("expected TESTLEVERAGE to be registered in actor stockIndexBySymbol")
+	}
+	stockMetrics := &actor.stocks[targetIndex]
+	if math.Abs(float64(stockMetrics.MISLeverage)-4.5) > 0.01 {
+		testingInstance.Fatalf("expected stock MISLeverage 4.5, got %f", stockMetrics.MISLeverage)
+	}
+	if math.Abs(float64(stockMetrics.MISMarginFraction)-0.2222) > 0.01 {
+		testingInstance.Fatalf("expected stock MISMarginFraction 0.2222, got %f", stockMetrics.MISMarginFraction)
+	}
+
+	// Now simulate PushUniverseSync updating leverage to 5.0x
+	syncDoneChan := make(chan struct{})
+	actor.isRunning.Store(true)
+	go func() {
+		defer close(syncDoneChan)
+		select {
+		case scannedStocks := <-actor.universeSyncChan:
+			for _, scannedStock := range scannedStocks {
+				stockIdx := actor.stockIndexByToken[uint32(scannedStock.InstrumentToken)]
+				if scannedStock.MISLeverage > 0 {
+					actor.stocks[stockIdx].MISLeverage = float32(scannedStock.MISLeverage)
+					actor.stocks[stockIdx].MISMarginFraction = float32(1.0 / scannedStock.MISLeverage)
+				}
+			}
+		case <-actor.ctx.Done():
+		}
+	}()
+
+	actor.PushUniverseSync([]screener.ScannedStock{
+		{
+			InstrumentToken: 998877,
+			Tradingsymbol:   "TESTLEVERAGE",
+			MISLeverage:     5.0,
+			MISMarginPct:    0.20,
+		},
+	})
+
+	<-syncDoneChan
+	if math.Abs(float64(stockMetrics.MISLeverage)-5.0) > 0.01 {
+		testingInstance.Fatalf("expected PushUniverseSync to update MISLeverage to 5.0, got %f", stockMetrics.MISLeverage)
 	}
 }
 

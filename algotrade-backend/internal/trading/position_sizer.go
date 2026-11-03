@@ -155,13 +155,9 @@ func ComputePositionSize( stockMetrics *market.StockMetrics, signalBarLow float6
 
 	misIntradayLeverageMultiplier := float64(stockMetrics.MISLeverage)
 	if misIntradayLeverageMultiplier <= 0 {
-		// Stock not permitted for MIS margin by Zerodha / SEBI: reject setup
-		return SizingDecision{
-			IsApproved:   false,
-			RejectReason: fmt.Sprintf("stock %s has no MIS intraday margin permitted (leverage=0.0)", stockMetrics.SymbolString()),
-		}
-	}
-	if misIntradayLeverageMultiplier > 5.0 {
+		// If broker provides 0 leverage (unmarginable or MIS restricted), fall back to 1.0x cash (100% own capital)
+		misIntradayLeverageMultiplier = 1.0
+	} else if misIntradayLeverageMultiplier > 5.0 {
 		misIntradayLeverageMultiplier = 5.0
 	}
 
@@ -205,6 +201,12 @@ func ComputePositionSize( stockMetrics *market.StockMetrics, signalBarLow float6
 	// Final Allocated Quantity = Min across all 4 constraints
 	allocatedQuantity := min(sharesAllowedByRiskBudget, min(sharesAllowedByMarginLimit, min(concentrationCappedQuantity, liquidityCappedQuantity)))
 	if allocatedQuantity <= 0 {
+		if sharesAllowedByMarginLimit == 0 {
+			return SizingDecision{
+				IsApproved:   false,
+				RejectReason: fmt.Sprintf("insufficient free cash for entry: ₹%.2f available < ₹%.2f share price", freeMargin, entryLimitPrice),
+			}
+		}
 		return SizingDecision{
 			IsApproved:   false,
 			RejectReason: fmt.Sprintf("quantity constrained to 0 (qRisk=%d, qMargin=%d, qConc=%d, qLiq=%d)", sharesAllowedByRiskBudget, sharesAllowedByMarginLimit, concentrationCappedQuantity, liquidityCappedQuantity),

@@ -82,7 +82,22 @@ func NewManager( db *sql.DB, actor *market.Actor, kiteService *kite.Service, tic
 			_ = manager.capitalMgr.RefreshLiveMargins()
 			manager.capitalMgr.SyncUniverseLeverages(manager.ctx)
 		})
+
+		// Startup rehydration: If session was already restored from disk before boot, sync immediately
+		if kiteService.GetStatus().IsConnected {
+			go func() {
+				_ = manager.capitalMgr.RefreshLiveMargins()
+				manager.capitalMgr.SyncUniverseLeverages(manager.ctx)
+			}()
+		}
 	}
+
+	// Wire reactive leverage bridge from CapitalManager to Single-Writer Actor
+	manager.capitalMgr.SetOnLeveragesSynced(func() {
+		if manager.actor != nil {
+			manager.actor.ReloadUniverseFromDB()
+		}
+	})
 
 	// Load today's closed & open positions from SQLite for crash-recovery continuity across restarts
 	manager.loadClosedPositionsFromDB()

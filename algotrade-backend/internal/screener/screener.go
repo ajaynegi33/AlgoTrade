@@ -153,7 +153,7 @@ func (service *Service) GetUniverse(date string) (*UniverseSummary, error) {
 
 	query := `
 		SELECT instrument_token, tradingsymbol, name, exchange, segment, instrument_type,
-		       lot_size, tick_size, last_price, COALESCE(mis_leverage, 0.0), COALESCE(mis_margin_pct, 0.0), scan_date, updated_at
+		       lot_size, tick_size, last_price, COALESCE(mis_leverage, 5.0), COALESCE(mis_margin_pct, 0.20), scan_date, updated_at
 		FROM scanned_stocks
 		WHERE scan_date = ?
 		ORDER BY tradingsymbol ASC
@@ -187,6 +187,11 @@ func (service *Service) GetUniverse(date string) (*UniverseSummary, error) {
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
+		}
+
+		if scannedStock.MISLeverage <= 0 {
+			scannedStock.MISLeverage = 5.0
+			scannedStock.MISMarginPct = 0.20
 		}
 
 		if parsedTime, err := time.Parse(time.RFC3339, updatedStr); err == nil {

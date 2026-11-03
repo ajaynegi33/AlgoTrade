@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -2131,25 +2132,76 @@ func TestCircuitBreakerStrict3PctAndNoProfitGivebackLock(testingInstance *testin
 	_ = capDTO
 }
 
-func TestZeroMarginRejection(testingInstance *testing.T) {
+func TestZeroMarginCashFallback(testingInstance *testing.T) {
 	// A stock with MISLeverage = 0.0 (no MIS margin permitted by Zerodha / SEBI)
 	stockUnmarginable := market.StockMetrics{
 		InstrumentToken: 55555,
 		LTP:             500.0,
 		ATR14:           5.0,
 		TickSize:        0.05,
-		MISLeverage:     0.0, // Unavailable margin!
+		MISLeverage:     0.0, // Unavailable broker margin!
 		CurrentBarIdx:   3,
 	}
 	stockUnmarginable.SetSymbol("NOMARGIN")
 	stockUnmarginable.SessionBars[3] = market.OHLCVBar{Open: 498.0, High: 505.0, Low: 497.0, Close: 500.0}
 
-	sizing := ComputePositionSize(&stockUnmarginable, 497.0, 10000.0, 10000.0, 0.01, 1.0, 1.0, 300.0)
-	if sizing.IsApproved {
-		testingInstance.Fatalf("expected sizing to be REJECTED when MISLeverage=0.0, but got approved")
+	// Case A: Sufficient capital -> engine smoothly falls back to 1.0x cash (100% own money)
+	sizingCashApproved := ComputePositionSize(&stockUnmarginable, 497.0, 10000.0, 10000.0, 0.01, 1.0, 1.0, 300.0)
+	if !sizingCashApproved.IsApproved {
+		testingInstance.Fatalf("expected sizing to be APPROVED via 1.0x cash fallback when free margin covers entry, got rejected: %s", sizingCashApproved.RejectReason)
 	}
-	if sizing.RejectReason == "" {
-		testingInstance.Fatalf("expected descriptive rejection reason for 0.0 margin")
+	if sizingCashApproved.Quantity <= 0 {
+		testingInstance.Fatalf("expected positive quantity under 1.0x cash fallback, got %d", sizingCashApproved.Quantity)
+	}
+	expectedRequiredCash := float64(sizingCashApproved.Quantity) * sizingCashApproved.EntryLimitPrice
+	if math.Abs(sizingCashApproved.RequiredMargin-expectedRequiredCash) > 0.01 {
+		testingInstance.Fatalf("expected 100%% cash required margin ₹%.2f, got ₹%.2f", expectedRequiredCash, sizingCashApproved.RequiredMargin)
+	}
+
+	// Case B: Insufficient free capital to buy even 1 share at 1.0x cash -> rejected with clear diagnostic
+	sizingCashRejected := ComputePositionSize(&stockUnmarginable, 497.0, 10000.0, 200.0, 0.01, 1.0, 1.0, 300.0)
+	if sizingCashRejected.IsApproved {
+		testingInstance.Fatalf("expected sizing to be REJECTED when free cash (₹200) < share price (₹500), but got approved")
+	}
+	if !strings.Contains(sizingCashRejected.RejectReason, "insufficient free cash") {
+		testingInstance.Fatalf("expected 'insufficient free cash' in rejection reason, got: %s", sizingCashRejected.RejectReason)
+	}
+
+	// Case C: Marginable stock (5.0x leverage) uses broker leverage
+	stockMarginable := stockUnmarginable
+	stockMarginable.MISLeverage = 5.0
+	sizingMIS := ComputePositionSize(&stockMarginable, 497.0, 10000.0, 10000.0, 0.01, 1.0, 1.0, 300.0)
+	if !sizingMIS.IsApproved {
+		testingInstance.Fatalf("expected sizing to be APPROVED for 5.0x leverage stock, got: %s", sizingMIS.RejectReason)
+	}
+	expectedMISMargin := (float64(sizingMIS.Quantity) * sizingMIS.EntryLimitPrice) / 5.0
+	if math.Abs(sizingMIS.RequiredMargin-expectedMISMargin) > 0.01 {
+		testingInstance.Fatalf("expected 5x leveraged margin ₹%.2f, got ₹%.2f", expectedMISMargin, sizingMIS.RequiredMargin)
+	}
+}
+
+func TestDetermineOrderProduct(testingInstance *testing.T) {
+	// Case 1: Stock with 0 leverage (unmarginable) -> ProductCNC
+	stockZero := &market.StockMetrics{MISLeverage: 0.0}
+	if product := determineOrderProduct(stockZero); product != ProductCNC {
+		testingInstance.Fatalf("expected ProductCNC for MISLeverage=0.0, got %s", product)
+	}
+
+	// Case 2: Stock with 1.0x leverage (cash only) -> ProductCNC
+	stockOne := &market.StockMetrics{MISLeverage: 1.0}
+	if product := determineOrderProduct(stockOne); product != ProductCNC {
+		testingInstance.Fatalf("expected ProductCNC for MISLeverage=1.0, got %s", product)
+	}
+
+	// Case 3: Stock with 5.0x leverage -> ProductMIS
+	stockFive := &market.StockMetrics{MISLeverage: 5.0}
+	if product := determineOrderProduct(stockFive); product != ProductMIS {
+		testingInstance.Fatalf("expected ProductMIS for MISLeverage=5.0, got %s", product)
+	}
+
+	// Case 4: Nil stock pointer fallback -> ProductMIS
+	if product := determineOrderProduct(nil); product != ProductMIS {
+		testingInstance.Fatalf("expected default ProductMIS for nil stock, got %s", product)
 	}
 }
 
@@ -2309,7 +2361,7 @@ func (broker *mockModeTrackingBroker) PlaceEmergencySweepSell(_ context.Context,
 	return "MOCK-SWEEP-1", nil
 }
 
-func (broker *mockModeTrackingBroker) PlaceSLOrder(_ context.Context, _ string, _ uint32, _ int, _, _, _, _ float64) (string, error) {
+func (broker *mockModeTrackingBroker) PlaceSLOrder(_ context.Context, _ string, _ uint32, _ int, _, _, _, _ float64, _ *market.StockMetrics) (string, error) {
 	return "MOCK-SL-1", nil
 }
 

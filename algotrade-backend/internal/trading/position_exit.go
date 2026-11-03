@@ -147,7 +147,11 @@ func (worker *PositionWorker) PlaceInitialStopLossOrderIfNotPlaced() {
 	}
 
 	sellLimitPrice := CalculateProtectiveLimitPriceBelowStop(worker.InitialStop, worker.TickSize)
-	stopLossOrderID, err := worker.broker.PlaceSLOrder(worker.ctx, worker.Symbol, worker.Token, remainingQuantity, worker.InitialStop, sellLimitPrice, lastTradedPrice, worker.TickSize)
+	var stockMetrics *market.StockMetrics
+	if worker.getStockPtr != nil {
+		stockMetrics = worker.getStockPtr()
+	}
+	stopLossOrderID, err := worker.broker.PlaceSLOrder(worker.ctx, worker.Symbol, worker.Token, remainingQuantity, worker.InitialStop, sellLimitPrice, lastTradedPrice, worker.TickSize, stockMetrics)
 	if err != nil {
 		slog.Error("Initial SL placement failed; executing immediate protective flatten",
 			"symbol", worker.Symbol, "error", err)

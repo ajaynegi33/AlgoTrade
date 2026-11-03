@@ -78,13 +78,14 @@ func (actor *Actor) getStockDetailInternal(symbol string) (*StockDetailDTO, bool
 		var token uint32
 		var tradingsymbol string
 		var lotSize int
-		var tickSize, lastPrice float64
+		var tickSize, lastPrice, misLeverage, misMarginPct float64
 		err := actor.db.QueryRow(`
-			SELECT instrument_token, tradingsymbol, lot_size, tick_size, last_price
+			SELECT instrument_token, tradingsymbol, lot_size, tick_size, last_price,
+			       COALESCE(mis_leverage, 5.0), COALESCE(mis_margin_pct, 0.20)
 			FROM scanned_stocks
 			WHERE tradingsymbol = ?
 			ORDER BY scan_date DESC LIMIT 1
-		`, upperSym).Scan(&token, &tradingsymbol, &lotSize, &tickSize, &lastPrice)
+		`, upperSym).Scan(&token, &tradingsymbol, &lotSize, &tickSize, &lastPrice, &misLeverage, &misMarginPct)
 		if err == nil && token > 0 {
 			secID, _, _ := screener.ResolveSector(actor.db, tradingsymbol)
 			if tickSize <= 0 {
@@ -93,6 +94,17 @@ func (actor *Actor) getStockDetailInternal(symbol string) (*StockDetailDTO, bool
 			targetIdx = actor.registerTrackedStock(token, tradingsymbol, secID, float32(tickSize))
 			actor.stocks[targetIdx].LotSize = uint32(lotSize)
 			actor.stocks[targetIdx].PrevClose = lastPrice
+			if misLeverage > 0 {
+				actor.stocks[targetIdx].MISLeverage = float32(misLeverage)
+				if misMarginPct > 0 {
+					actor.stocks[targetIdx].MISMarginFraction = float32(misMarginPct)
+				} else {
+					actor.stocks[targetIdx].MISMarginFraction = float32(1.0 / misLeverage)
+				}
+			} else {
+				actor.stocks[targetIdx].MISLeverage = 5.0
+				actor.stocks[targetIdx].MISMarginFraction = 0.20
+			}
 			actor.stocks[targetIdx].IsTradeable = true
 			found = true
 		}

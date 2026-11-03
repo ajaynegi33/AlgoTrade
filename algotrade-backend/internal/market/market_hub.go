@@ -235,6 +235,28 @@ func (actor *Actor) GetStockPtrByIndex(stockIndex uint16) *StockMetrics {
 	return &actor.stocks[stockIndex]
 }
 
+// PushUniverseSync sends newly scanned or re-queried stocks to the Actor loop to update leverages and tokens
+func (actor *Actor) PushUniverseSync(stocks []screener.ScannedStock) {
+	if len(stocks) == 0 || !actor.isRunning.Load() {
+		return
+	}
+	select {
+	case actor.universeSyncChan <- stocks:
+	case <-actor.ctx.Done():
+	}
+}
+
+// ReloadUniverseFromDB re-queries scanned_stocks from SQLite and dispatches an in-memory sync to the actor loop
+func (actor *Actor) ReloadUniverseFromDB() {
+	if actor.scannerService == nil || !actor.isRunning.Load() {
+		return
+	}
+	universe, err := actor.scannerService.GetUniverse("")
+	if err == nil && universe != nil && len(universe.Stocks) > 0 {
+		actor.PushUniverseSync(universe.Stocks)
+	}
+}
+
 func (actor *Actor) initializeTodayEpoch() {
 	now := time.Now().In(istZone)
 	year, month, day := now.Date()
@@ -264,9 +286,9 @@ func (actor *Actor) seedUniverseFromScreener() error {
 					} else {
 						actor.stocks[idx].MISMarginFraction = float32(1.0 / scannedStock.MISLeverage)
 					}
-				} else {
-					actor.stocks[idx].MISLeverage = 0.0
-					actor.stocks[idx].MISMarginFraction = 0.0
+				} else if actor.stocks[idx].MISLeverage <= 0 {
+					actor.stocks[idx].MISLeverage = 5.0
+					actor.stocks[idx].MISMarginFraction = 0.20
 				}
 				actor.stocks[idx].IsTradeable = true
 			}
@@ -554,8 +576,8 @@ func (actor *Actor) runLoop() {
 						actor.stocks[idx].MISMarginFraction = float32(1.0 / scannedStock.MISLeverage)
 					}
 				} else if actor.stocks[idx].MISLeverage <= 0 {
-					actor.stocks[idx].MISLeverage = 0.0
-					actor.stocks[idx].MISMarginFraction = 0.0
+					actor.stocks[idx].MISLeverage = 5.0
+					actor.stocks[idx].MISMarginFraction = 0.20
 				}
 				actor.stocks[idx].IsTradeable = true
 				if !existed {

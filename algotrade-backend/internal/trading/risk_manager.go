@@ -54,6 +54,8 @@ type CapitalManager struct {
 	realisedGrossByMode map[string]float64
 	totalChargesByMode  map[string]float64
 	realisedNetByMode   map[string]float64
+
+	onLeveragesSynced func()
 }
 
 func NewCapitalManager(db *sql.DB, kiteService *kite.Service) *CapitalManager {
@@ -79,6 +81,13 @@ func NewCapitalManager(db *sql.DB, kiteService *kite.Service) *CapitalManager {
 
 	capitalManager.loadFromDatabase()
 	return capitalManager
+}
+
+// SetOnLeveragesSynced registers a callback invoked after live MIS leverages have been written to SQLite
+func (capitalManager *CapitalManager) SetOnLeveragesSynced(callbackFunction func()) {
+	capitalManager.mu.Lock()
+	defer capitalManager.mu.Unlock()
+	capitalManager.onLeveragesSynced = callbackFunction
 }
 
 func (capitalManager *CapitalManager) loadFromDatabase() {
@@ -718,5 +727,11 @@ func (capitalManager *CapitalManager) SyncUniverseLeverages(ctx context.Context)
 
 	if updatedCount > 0 {
 		slog.Info("Synchronized live Zerodha MIS leverages for stock universe", "updated_stocks", updatedCount)
+		capitalManager.mu.RLock()
+		callbackFunction := capitalManager.onLeveragesSynced
+		capitalManager.mu.RUnlock()
+		if callbackFunction != nil {
+			callbackFunction()
+		}
 	}
 }

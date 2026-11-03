@@ -120,7 +120,9 @@ func runMigrations(db *sql.DB) error {
 			tick_size REAL NOT NULL DEFAULT 0.05,
 			last_price REAL DEFAULT 0.0,
 			scan_date TEXT NOT NULL,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			mis_leverage REAL NOT NULL DEFAULT 5.0,
+			mis_margin_pct REAL NOT NULL DEFAULT 0.20
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_scanned_stocks_date ON scanned_stocks(scan_date);`,
 		`CREATE TABLE IF NOT EXISTS sector_metadata (
@@ -289,8 +291,8 @@ func runMigrations(db *sql.DB) error {
 	}
 
 	// Idempotent column migrations
-	_, _ = db.Exec(`ALTER TABLE scanned_stocks ADD COLUMN mis_leverage REAL NOT NULL DEFAULT 0.0;`)
-	_, _ = db.Exec(`ALTER TABLE scanned_stocks ADD COLUMN mis_margin_pct REAL NOT NULL DEFAULT 0.0;`)
+	_, _ = db.Exec(`ALTER TABLE scanned_stocks ADD COLUMN mis_leverage REAL NOT NULL DEFAULT 5.0;`)
+	_, _ = db.Exec(`ALTER TABLE scanned_stocks ADD COLUMN mis_margin_pct REAL NOT NULL DEFAULT 0.20;`)
 	_, _ = db.Exec(`ALTER TABLE positions ADD COLUMN exit_price REAL NOT NULL DEFAULT 0.0;`)
 	_, _ = db.Exec(`ALTER TABLE positions ADD COLUMN low_water_mark REAL NOT NULL DEFAULT 0.0;`)
 	_, _ = db.Exec(`ALTER TABLE positions ADD COLUMN mfe_r REAL NOT NULL DEFAULT 0.0;`)

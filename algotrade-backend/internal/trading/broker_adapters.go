@@ -20,6 +20,7 @@ const (
 	DefaultVariety         = "regular"
 	ExchangeNSE            = "NSE"
 	ProductMIS             = "MIS"
+	ProductCNC             = "CNC"
 	ValidityDay            = "DAY"
 	OrderStatusComplete    = "COMPLETE"
 	OrderStatusRejected    = "REJECTED"
@@ -60,7 +61,7 @@ type ExecutionBroker interface {
 	PlaceLimitBuy(ctx context.Context, symbol string, token uint32, qty int, limitPrice float64, stock *market.StockMetrics) (string, error)
 	PlaceProtectedMarketSell(ctx context.Context, symbol string, token uint32, qty int, currentLTP, tickSize float64, stock *market.StockMetrics) (string, error)
 	PlaceEmergencySweepSell(ctx context.Context, symbol string, token uint32, qty int, currentLTP, tickSize, maxSlippagePct float64, stock *market.StockMetrics) (string, error)
-	PlaceSLOrder(ctx context.Context, symbol string, token uint32, qty int, triggerPrice, limitPrice, currentLTP, tickSize float64) (string, error)
+	PlaceSLOrder(ctx context.Context, symbol string, token uint32, qty int, triggerPrice, limitPrice, currentLTP, tickSize float64, stockMetrics *market.StockMetrics) (string, error)
 	ModifySLOrder(ctx context.Context, orderID string, newQty int, newTrigger, newLimit, currentLTP, tickSize float64) error
 	MutateSLToMarket(ctx context.Context, orderID string, qty int, stock *market.StockMetrics) error
 	CancelOrder(ctx context.Context, orderID string) error
@@ -86,13 +87,20 @@ func (broker *ZerodhaLiveBroker) Mode() string {
 	return "LIVE"
 }
 
+func determineOrderProduct(stockMetrics *market.StockMetrics) string {
+	if stockMetrics != nil && stockMetrics.MISLeverage <= 1.0 {
+		return ProductCNC
+	}
+	return ProductMIS
+}
+
 func (broker *ZerodhaLiveBroker) PlaceLimitBuy(
 	ctx context.Context,
 	symbol string,
 	token uint32,
 	qty int,
 	limitPrice float64,
-	_ *market.StockMetrics,
+	stockMetrics *market.StockMetrics,
 ) (string, error) {
 	if qty <= 0 {
 		return "", ErrInvalidQuantity
@@ -103,6 +111,7 @@ func (broker *ZerodhaLiveBroker) PlaceLimitBuy(
 		return "", kite.ErrNoSession
 	}
 
+	orderProduct := determineOrderProduct(stockMetrics)
 	apiCallStartTime := time.Now()
 	var orderResponse kiteconnect.OrderResponse
 	if dispatcher := broker.kiteService.GetRateLimiter(); dispatcher != nil {
@@ -111,7 +120,7 @@ func (broker *ZerodhaLiveBroker) PlaceLimitBuy(
 				Exchange:        ExchangeNSE,
 				Tradingsymbol:   symbol,
 				Validity:        ValidityDay,
-				Product:         ProductMIS,
+				Product:         orderProduct,
 				OrderType:       "LIMIT",
 				TransactionType: "BUY",
 				Quantity:        qty,
@@ -130,7 +139,7 @@ func (broker *ZerodhaLiveBroker) PlaceLimitBuy(
 			Exchange:        ExchangeNSE,
 			Tradingsymbol:   symbol,
 			Validity:        ValidityDay,
-			Product:         ProductMIS,
+			Product:         orderProduct,
 			OrderType:       "LIMIT",
 			TransactionType: "BUY",
 			Quantity:        qty,
@@ -188,6 +197,8 @@ func (broker *ZerodhaLiveBroker) PlaceEmergencySweepSell(
 		}
 	}
 
+	orderProduct := determineOrderProduct(stock)
+
 	// Stage C Final Escalation (>= 3.5%): attempt direct MARKET sell first, fallback to deep LPP limit
 	if maxSlippagePct >= 0.035 {
 		if dispatcher := broker.kiteService.GetRateLimiter(); dispatcher != nil {
@@ -196,7 +207,7 @@ func (broker *ZerodhaLiveBroker) PlaceEmergencySweepSell(
 					Exchange:        ExchangeNSE,
 					Tradingsymbol:   symbol,
 					Validity:        ValidityDay,
-					Product:         ProductMIS,
+					Product:         orderProduct,
 					OrderType:       "MARKET",
 					TransactionType: "SELL",
 					Quantity:        qty,
@@ -214,7 +225,7 @@ func (broker *ZerodhaLiveBroker) PlaceEmergencySweepSell(
 				Exchange:        ExchangeNSE,
 				Tradingsymbol:   symbol,
 				Validity:        ValidityDay,
-				Product:         ProductMIS,
+				Product:         orderProduct,
 				OrderType:       "MARKET",
 				TransactionType: "SELL",
 				Quantity:        qty,
@@ -235,7 +246,7 @@ func (broker *ZerodhaLiveBroker) PlaceEmergencySweepSell(
 				Exchange:        ExchangeNSE,
 				Tradingsymbol:   symbol,
 				Validity:        ValidityDay,
-				Product:         ProductMIS,
+				Product:         orderProduct,
 				OrderType:       "LIMIT",
 				TransactionType: "SELL",
 				Quantity:        qty,
@@ -254,7 +265,7 @@ func (broker *ZerodhaLiveBroker) PlaceEmergencySweepSell(
 			Exchange:        ExchangeNSE,
 			Tradingsymbol:   symbol,
 			Validity:        ValidityDay,
-			Product:         ProductMIS,
+			Product:         orderProduct,
 			OrderType:       "LIMIT",
 			TransactionType: "SELL",
 			Quantity:        qty,
@@ -275,6 +286,7 @@ func (broker *ZerodhaLiveBroker) PlaceSLOrder(
 	token uint32,
 	qty int,
 	triggerPrice, limitPrice, currentLTP, tickSize float64,
+	stockMetrics *market.StockMetrics,
 ) (string, error) {
 	if qty <= 0 {
 		return "", ErrInvalidQuantity
@@ -294,6 +306,7 @@ func (broker *ZerodhaLiveBroker) PlaceSLOrder(
 		return "", kite.ErrNoSession
 	}
 
+	orderProduct := determineOrderProduct(stockMetrics)
 	apiCallStartTime := time.Now()
 	var orderResponse kiteconnect.OrderResponse
 	if dispatcher := broker.kiteService.GetRateLimiter(); dispatcher != nil {
@@ -302,7 +315,7 @@ func (broker *ZerodhaLiveBroker) PlaceSLOrder(
 				Exchange:        ExchangeNSE,
 				Tradingsymbol:   symbol,
 				Validity:        ValidityDay,
-				Product:         ProductMIS,
+				Product:         orderProduct,
 				OrderType:       "SL",
 				TransactionType: "SELL",
 				Quantity:        qty,
@@ -322,7 +335,7 @@ func (broker *ZerodhaLiveBroker) PlaceSLOrder(
 			Exchange:        ExchangeNSE,
 			Tradingsymbol:   symbol,
 			Validity:        ValidityDay,
-			Product:         ProductMIS,
+			Product:         orderProduct,
 			OrderType:       "SL",
 			TransactionType: "SELL",
 			Quantity:        qty,
@@ -903,6 +916,7 @@ func (broker *PaperBroker) PlaceSLOrder(
 	token uint32,
 	qty int,
 	triggerPrice, limitPrice, currentLTP, tickSize float64,
+	_ *market.StockMetrics,
 ) (string, error) {
 	if qty <= 0 {
 		return "", ErrInvalidQuantity
