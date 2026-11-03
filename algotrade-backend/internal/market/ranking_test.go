@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-func TestCalculateBearishScoreCompositeRVOLAndReasonsBitmask(t *testing.T) {
+func TestCalculateBearishScoreCompositeRVOLAndReasonsBitmask(testingInstance *testing.T) {
 	var stock StockMetrics
 	stock.InstrumentToken = 779521
 	stock.SetSymbol("SBIN")
@@ -28,12 +28,12 @@ func TestCalculateBearishScoreCompositeRVOLAndReasonsBitmask(t *testing.T) {
 
 	score, ev, pWin, reasons := CalculateBearishScore(&stock, 0.38)
 	if score <= 0 || pWin <= 0.44 {
-		t.Fatalf("expected positive bearish score and elevated pWin from 5m RVOL surge, got score=%.2f pWin=%.2f ev=%.2f", score, pWin, ev)
+		testingInstance.Fatalf("expected positive bearish score and elevated pWin from 5m RVOL surge, got score=%.2f pWin=%.2f ev=%.2f", score, pWin, ev)
 	}
 	if reasons&ReasonBearishBreakdown == 0 {
-		t.Fatalf("expected ReasonBearishBreakdown in returned reasons, got %d", reasons)
+		testingInstance.Fatalf("expected ReasonBearishBreakdown in returned reasons, got %d", reasons)
 	}
 	if stock.Reasons&ReasonBearishBreakdown == 0 {
-		t.Fatalf("expected bearish reasons bitmask to be merged into stock.Reasons, got %d", stock.Reasons)
+		testingInstance.Fatalf("expected bearish reasons bitmask to be merged into stock.Reasons, got %d", stock.Reasons)
 	}
 }

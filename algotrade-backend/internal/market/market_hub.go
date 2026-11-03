@@ -45,8 +45,8 @@ type detailReq struct {
 }
 
 type detailResp struct {
-	dto   *StockDetailDTO
-	found bool
+	dto     *StockDetailDTO
+	isFound bool
 }
 
 type registerWorkerReq struct {
@@ -570,8 +570,8 @@ func (actor *Actor) runLoop() {
 			actor.computeAndBroadcastSnapshot()
 
 		case req := <-actor.detailReqChan:
-			dto, found := actor.getStockDetailInternal(req.symbol)
-			req.reply <- detailResp{dto: dto, found: found}
+			dto, isFound := actor.getStockDetailInternal(req.symbol)
+			req.reply <- detailResp{dto: dto, isFound: isFound}
 
 		case workerReq := <-actor.workerReqChan:
 			idx, exists := actor.stockIndexByToken[workerReq.token]

@@ -139,14 +139,14 @@ type StockDetailDTO struct {
 
 // RankedSnapshot is the 1.0s unified frame streamed to the frontend dashboard
 type RankedSnapshot struct {
-	Timestamp        int64              `json:"timestamp"`
-	HistoricalActive bool               `json:"historical_active"`
-	HistoricalError  string             `json:"historical_error,omitempty"`
-	MarketPulse      MarketPulseDTO     `json:"market_pulse"`
-	Sectors          []SectorRankDTO    `json:"sectors"`
-	TopBullish       []StockRankDTO     `json:"top_bullish"`
-	TopBearish       []StockRankDTO     `json:"top_bearish"`
-	AllStocks        []StockRankDTO     `json:"all_stocks"`
-	Execution        *ExecutionStateDTO `json:"execution,omitempty"`
+	Timestamp          int64              `json:"timestamp"`
+	IsHistoricalActive bool               `json:"historical_active"`
+	HistoricalError    string             `json:"historical_error,omitempty"`
+	MarketPulse        MarketPulseDTO     `json:"market_pulse"`
+	Sectors            []SectorRankDTO    `json:"sectors"`
+	TopBullish         []StockRankDTO     `json:"top_bullish"`
+	TopBearish         []StockRankDTO     `json:"top_bearish"`
+	AllStocks          []StockRankDTO     `json:"all_stocks"`
+	Execution          *ExecutionStateDTO `json:"execution,omitempty"`
 }
 

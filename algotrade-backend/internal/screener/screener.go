@@ -260,13 +260,13 @@ func parseAndFilterInstruments(readerStream io.Reader, todayIST string) ([]Scann
 		return nil, fmt.Errorf("failed to read instrument csv header: %w", err)
 	}
 
-	columnIndexByName := make(map[string]int)
+	columnIndicesByName := make(map[string]int)
 	for columnIndex, columnName := range header {
-		columnIndexByName[strings.TrimSpace(columnName)] = columnIndex
+		columnIndicesByName[strings.TrimSpace(columnName)] = columnIndex
 	}
 
 	getCol := func(record []string, name string) string {
-		if index, exists := columnIndexByName[name]; exists && index < len(record) {
+		if index, exists := columnIndicesByName[name]; exists && index < len(record) {
 			return record[index]
 		}
 		return ""

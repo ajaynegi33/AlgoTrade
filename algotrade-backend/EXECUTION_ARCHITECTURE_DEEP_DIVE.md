@@ -12,15 +12,15 @@ The **AlgoTrade Backend** is an ultra-low-latency, single-writer algorithmic tra
 Imagine a high-speed submarine navigating stormy seas:
 - **The Sonar Officer (Actor Ingestion)**: One person listens to the sonar pings (market ticks). Nobody interrupts or fights over the headphones. They write observations on a single giant board with zero delay.
 - **The Navigator (Quant Ranking & Breadth)**: Every second, the navigator looks at the entire fleet of 213 ships (F&O stocks) to check if the tide is rising or falling (market breadth) and picks the top 5 fastest ships.
-- **The Safety Officer (Gatekeeper & Portfolio Heat)**: Before firing a torpedo (placing a trade), the safety officer checks the sub's electrical circuit breakers. The boat can only handle $2.0\%$ total electrical load (Portfolio Heat) at any time. If a previous torpedo is already safely at target (trailing stop at Breakeven), its risk load drops to zero, allowing another torpedo to be fired.
-- **The Torpedo Guidance Computers (Position Workers)**: Each launched trade gets its own dedicated autonomous computer (`PositionWorker`). It watches the target every millisecond, ratchets its defense shield across 4 mechanical gears, locks in Tax-Free Breakeven at $+1.00R$, takes $50\%$ profit off the table at $+1.50R$, and guarantees it never gets stuck (anti-orphan recovery loop).
+- **The Safety Officer (Gatekeeper & Portfolio Heat)**: Before firing a torpedo (placing a trade), the safety officer checks the sub's electrical circuit breakers. The boat can only handle $3.0\%$ total electrical load (Portfolio Heat) at any time. If a previous torpedo is already safely at target (trailing stop at Breakeven), its risk load drops to zero, allowing another torpedo to be fired.
+- **The Torpedo Guidance Computers (Position Workers)**: Each launched trade gets its own dedicated autonomous computer (`PositionWorker`). It watches the target every millisecond, ratchets its defense shield across 4 mechanical gears, locks in Tax-Free Breakeven across $100\%$ of the position at $+1.00R$, trails the full position without double-brokerage scale-out friction, and guarantees it never gets stuck (anti-orphan recovery loop).
 - **The Black Box & Flight Recorder (EOD Optimization Engine)**: It records every single decision—including torpedoes we chose *not* to fire (shadow signals)—and at 3:45 PM automatically analyzes whether we were smart or just lucky, emailing an executive briefing to headquarters.
 
 #### 2. Senior Quant & Systems Engineering Pillars
 1. **Single-Writer Actor Model (`internal/market`)**: Eliminates read/write mutex contention on tick ingestion. All tick processing, technical indicator calculation, and state updates occur inside a single goroutine running on a contiguous array of stock metrics (`[512]StockMetrics`) with **zero heap allocations** and **< 250ns** per-tick processing time.
 2. **Lock-Free Atomic Hot Path (`internal/trading/trailing_stop.go`)**: Active position monitoring, high-water mark tracking, and stop-loss breach detection (`UpdateTrailingStopLossOnPriceTick`) are executed directly from the Actor's tick loop using hardware-level atomic operations (bit-cast IEEE-754 floats to `uint64`), running with **zero mutex locks** and zero heap allocations.
-3. **Fail-Safe Autonomous Execution (`internal/trading`)**: Each active position runs on its own dedicated worker goroutine (`PositionWorker`), managing order lifecycles with strict bounds on exchange modification limits (NSE maximum 25 modifications per order), 5-minute limit order timeouts with viable partial-fill promotion, 3-step race-free scale-outs, and a 4-stage anti-orphan exit recovery protocol.
-4. **Continuous Portfolio Heat Engine & EOD Optimization Engine (`internal/trading`, `internal/monitoring`)**: Account equity is guarded by a hard $2.0\%$ Portfolio Heat Cap. Once a winning position ratchets its stop to Breakeven (or above), its open downside risk drops to ₹0.00, releasing portfolio heat and allowing the engine to spawn new continuous trades during the day. All signals—both filled trades and rejected candidate setups—are logged asynchronously via a ring buffer to compute Maximum Favorable Excursion (MFE), Maximum Adverse Excursion (MAE), shadow outcomes, and automated 15:45 IST diagnostic reports emailed via Resend.
+3. **Fail-Safe Autonomous Execution (`internal/trading`)**: Each active position runs on its own dedicated worker goroutine (`PositionWorker`), managing order lifecycles with strict bounds on exchange modification limits (NSE maximum 25 modifications per order), 5-minute limit order timeouts with viable partial-fill promotion, 100% full-position dynamic trailing after $+1.00R$ Tax-Free Breakeven, and a 4-stage anti-orphan exit recovery protocol.
+4. **Continuous Portfolio Heat Engine & EOD Optimization Engine (`internal/trading`, `internal/monitoring`)**: Account equity is guarded by a hard $3.0\%$ Portfolio Heat Cap. Once a winning position ratchets its stop to Breakeven (or above), its open downside risk drops to ₹0.00, releasing portfolio heat and allowing the engine to spawn new continuous trades during the day. All signals—both filled trades and rejected candidate setups—are logged asynchronously via a ring buffer to compute Maximum Favorable Excursion (MFE), Maximum Adverse Excursion (MAE), shadow outcomes, and automated 15:45 IST diagnostic reports emailed via Resend.
 
 ---
 
@@ -66,11 +66,11 @@ flowchart TB
         PW -->|4. Event Loop| WL["position_worker.go: workerLoop()"]
     end
 
-    subgraph ActiveManagement ["5. Trailing Gears, Scale-Out & Bulletproof Exits"]
+    subgraph ActiveManagement ["5. Trailing Gears, +1.00R Breakeven & Bulletproof Exits"]
         WL -->|Gear 1: Mods 1–18| G1R["Agile Dynamic Trail (min 2 ticks / 0.12 BaseBuffer, cooldown 350ms)"]
         WL -->|Gear 3: Mods 19–24| G3R["Coarse 5m Bar Trail (min 0.40 BaseBuffer, cooldown 1500ms)"]
         WL -->|Gear 4: Mod >= 24| G4S["Virtual Shadow Stop in RAM (Mod 25 Reserved for Exit)"]
-        WL -->|+1.50R MFE| SO3["3-Step Race-Free Scale-Out (50% Banked + Tax-Free BE)"]
+        WL -->|+1.00R MFE| SO3["100% Full-Position Runner (Tax-Free Breakeven Ratchet)"]
         WL -->|Breach / Shock / 15:14| FLT["position_exit.go: 4-Stage Bulletproof Exit Protocol"]
         FLT -->|Stage A| MA["Mutate SL to Market (Consumes Reserved Mod 25)"]
         FLT -->|Stage B & C| LPP["Cancel SL -> Escalating LPP Limit Sweeps (0.75% to 3.50%)"]
@@ -268,7 +268,7 @@ internal/trading/execution_manager.go: Manager.OnSecondTick()
 ### Step 4: Position Sizing, 4 Institutional Constraints & Continuous Portfolio Heat
 
 #### Beginner Intuition
-How many shares should we buy? A rookie asks: "How much money do I have?" A professional quant asks: "How much am I allowed to lose if this trade hits its stop loss?" We calculate the distance to our protective stop, cap our risk at a fraction of account equity, and then run 4 strict safety limits (Risk, Margin, Concentration, and Liquidity). Most importantly: we enforce a **2.0% Total Portfolio Heat Cap**. If you have 3 open trades, their combined downside risk cannot exceed 2.0% of your account. Once a trade moves into profit and we trail its stop to breakeven, its risk drops to ₹0, freeing up room for the next trade!
+How many shares should we buy? A rookie asks: "How much money do I have?" A professional quant asks: "How much am I allowed to lose if this trade hits its stop loss?" We calculate the distance to our protective stop, cap our risk at a fraction of account equity, and then run 4 strict safety limits (Risk, Margin, Concentration, and Liquidity). Most importantly: we enforce a **3.0% Total Portfolio Heat Cap**. If you have 3 open trades, their combined downside risk cannot exceed 3.0% of your account. Once a trade moves into profit and we trail its stop to breakeven, its risk drops to ₹0, freeing up room for the next trade!
 
 #### Exact Calling Chain & Flow
 ```
@@ -304,7 +304,7 @@ internal/trading/entry_gatekeeper.go: PickBestLongCandidate()
    $$\text{RiskPct} = \begin{cases} 1.25\% & \text{if Net Equity } \le \text{₹}15,000 \quad (\text{utilizes 5x MIS on ₹10k}) \\ 1.00\% & \text{if Net Equity } \le \text{₹}50,000 \\ 0.75\% & \text{if Net Equity } \le \text{₹}2,00,000 \\ 0.50\% & \text{if Net Equity } \le \text{₹}50,00,000 \\ 0.35\% & \text{if Net Equity } > \text{₹}50,00,000 \quad (\text{Institutional wealth preservation}) \end{cases}$$
 
 3. **Continuous Portfolio Heat Ceiling**:
-   $$\text{MaxPortfolioHeatRupees} = 0.02 \times \text{NetEquity}$$
+   $$\text{MaxPortfolioHeatRupees} = 0.03 \times \text{NetEquity}$$
    $$\text{TotalOpenRiskRupees} = \sum_{w \in \text{workers}} w.\text{GetOpenRiskRupees}()$$
    $$\text{RemainingHeatBudgetRupees} = \max(0.0, \text{MaxPortfolioHeatRupees} - \text{TotalOpenRiskRupees})$$
    $$\text{RiskBudget} = \min(\text{NetEquity} \times \text{RiskPct} \times \text{SizeMult} \times \text{DrawdownMult}, \text{RemainingHeatBudgetRupees})$$
@@ -345,8 +345,8 @@ internal/trading/execution_manager.go: Manager.spawnCandidateWorker()
 | `ENTRY_PLACED` | `filledEntryQty` | `filled == 0` after cancel drain | Transition to `STATE_CLOSED` (`ENTRY_TIMEOUT_UNFILLED`) |
 | `ENTRY_PLACED` | `filledEntryQty` | $0 < \text{filled} < \text{DustFloorQty}$ | Transition to `STATE_EMERGENCY_FLATTEN` (`DUST_GUARD`) |
 | `ENTRY_PLACED` | `filledEntryQty` | $\text{filled} \ge \text{DustFloorQty}$ | **Promote partial fill!** Recalculate BE stop, place SL-L |
-| `PROTECTED_ACTIVE`| Realized R-Multiple | $\text{MFE} \ge +1.00R$ | **Ratchet stop to Tax-Free Breakeven** (avoids Brownian noise) |
-| `PROTECTED_ACTIVE`| Realized R-Multiple | $\text{MFE} \ge +1.50R$ | Transition to `STATE_SCALE_OUT_PENDING` (Tranche 1 50% harvest) |
+| `PROTECTED_ACTIVE`| Realized R-Multiple | $\text{MFE} \ge +1.00R$ | **Ratchet stop to Tax-Free Breakeven** across 100% of shares |
+| `PROTECTED_ACTIVE`| Parabolic Climax | $\text{MFE} > +2.20R \land \text{VWAP Ext} > 1.8\text{ ATR}$ | Tighten trail buffer via `parabolicClimaxFactor` |
 | `PROTECTED_ACTIVE`| Modification Count | `modCount >= 24` | Transition to `STATE_SHADOW_STOP_ACTIVE` (Gear 4) |
 
 #### Partial Fill Promotion & 500ms Drain Window
@@ -371,9 +371,8 @@ if filled < worker.DustFloorQty {
     return
 }
 
-// Viable partial fill: promote to active trade!
-runnerQty := max(1, filled - (filled / 2))
-beStop := CalculateTaxCoveringBreakevenStop(worker.GetEntryPrice(), filled, runnerQty, worker.TickSize)
+// Viable partial fill: promote to active trade (100% Runner Policy)!
+beStop := CalculateTaxCoveringBreakevenStop(worker.GetEntryPrice(), filled, filled, worker.TickSize)
 worker.InitialQty = filled
 worker.BreakevenStop = beStop
 worker.PlaceInitialStopLossOrderIfNotPlaced()
@@ -381,7 +380,7 @@ worker.PlaceInitialStopLossOrderIfNotPlaced()
 
 ---
 
-### Step 6: Trailing Stop Loss Gears, Scale-Out & Bulletproof Exits
+### Step 6: Trailing Stop Loss Gears, 100% Runner Protocol & Bulletproof Exits
 
 #### Beginner Intuition
 A trailing stop is like a one-way ratchet: as the stock price climbs higher, your stop-loss order moves up behind it, locking in profit. If the price turns around, you exit with money banked. But the exchange has a strict law: **maximum 25 modifications per order**. If you modify your order every second, you'll hit 25 in two minutes and the exchange will reject your orders! 
@@ -395,7 +394,7 @@ Our engine solves this using **Mechanical Gears**:
 internal/market/tick_ingestion.go: Actor.processTick()
   ──[<250ns Hot Path]──> internal/trading/trailing_stop.go: PositionWorker.UpdateTrailingStopLossOnPriceTick()
     ├── Update High-Water Mark (HWM) & Low-Water Mark (LWM) via atomic CAS
-    ├── Guard A: 200ms SL breach latency watchdog
+    ├── Guard A: Two-tier SL breach watchdog (0ms below SL-L limit price, 1000ms / Tick 2+ inside band)
     ├── Guard B: Gear 4 Virtual Shadow Stop check (modCount >= 24)
     ├── Guard C: Breakeven Ratchet at +1.00R (avoids Brownian noise stop-out)
     ├── Guard D: 45-Minute In-Trade Alpha Decay Stagnation Watchdog (HWM < +0.50R)
@@ -406,7 +405,7 @@ internal/market/tick_ingestion.go: Actor.processTick()
 #### Detailed Step-by-Step Tick Lifecycle (`UpdateTrailingStopLossOnPriceTick`)
 Every live tick runs through this 6-step sequence:
 * **Step 1: Update High-Water Mark (`highWaterMark`)**: If price rises from ₹500 $\to$ ₹510 $\to$ ₹525, `highWaterMark` updates to ₹525.
-* **Step 2: Guard A (Gapped-Through SL Watchdog)**: If market gaps below stop loss without Zerodha executing, detects within 1 second and immediately fires an emergency market exit.
+* **Step 2: Guard A (Gapped-Through SL Watchdog)**: If market gaps below the SL-L protective limit price (`CalculateProtectiveLimitPriceBelowStop`), triggers an immediate (`0ms`) emergency market exit; if inside `[protectiveLimitPrice, confirmedStopLoss]`, arms on Tick 1 and triggers on Tick 2+ deep breach ($\le \text{SL} - 3\text{ ticks}$) or after $\ge 1\text{ second}$.
 * **Step 3: Check Buyer Strength vs Seller Pressure (`orderFlowMultiplier`)**: If buyers dominate the tape, allows more breathing room so winners aren't shaken out. If volume dries up, tightens the buffer to protect profits.
 * **Step 4: Parabolic Climax Tightener (`parabolicClimaxFactor`)**: If a stock surges vertically ($>2.2R$ and $>1.8\text{ ATR}$ above VWAP), moves like that snap back violently. Clamps the stop right behind price to capture the peak.
 * **Step 5: The +1.0R Tax-Free Breakeven Ratchet**: Once trade reaches $+1.0R$ (e.g. ₹510), stop-loss is raised to **Tax-Free Breakeven** via `CalculateTaxCoveringBreakevenStop()`. Downside risk drops to **₹0.00** for 100% of the position.

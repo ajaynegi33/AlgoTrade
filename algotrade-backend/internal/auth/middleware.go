@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/ajaynegi33/AlgoTrade/internal/response"
@@ -50,20 +52,65 @@ func AuthMiddleware(secret []byte) func(http.Handler) http.Handler {
 	}
 }
 
-func CORSMiddleware(frontendURL string) func(http.Handler) http.Handler {
+// IsOriginAllowed validates whether a browser Origin header is permitted to access the backend.
+// It allows explicitly configured origins (single or comma-separated), local loopback ports,
+// and same-host origins where the Origin hostname matches the incoming HTTP Host header.
+func IsOriginAllowed(originHeader string, requestHost string, allowedOrigins ...string) bool {
+	normalizedOrigin := strings.TrimRight(strings.TrimSpace(originHeader), "/")
+	if normalizedOrigin == "" {
+		return false
+	}
+
+	parsedOrigin, parseErr := url.Parse(normalizedOrigin)
+	if parseErr != nil || (parsedOrigin.Scheme != "http" && parsedOrigin.Scheme != "https") || parsedOrigin.Host == "" {
+		return false
+	}
+
+	for _, allowedEntry := range allowedOrigins {
+		for _, rawOrigin := range strings.Split(allowedEntry, ",") {
+			configuredOrigin := strings.TrimRight(strings.TrimSpace(rawOrigin), "/")
+			if configuredOrigin == "" {
+				continue
+			}
+			if configuredOrigin == "*" || strings.EqualFold(normalizedOrigin, configuredOrigin) {
+				return true
+			}
+		}
+	}
+
+	originHostname := strings.ToLower(parsedOrigin.Hostname())
+	if originHostname == "localhost" || originHostname == "127.0.0.1" || originHostname == "::1" {
+		return true
+	}
+
+	requestHostname := extractRequestHostname(requestHost)
+	if requestHostname != "" && strings.EqualFold(originHostname, requestHostname) {
+		return true
+	}
+
+	return false
+}
+
+func extractRequestHostname(hostPort string) string {
+	trimmedHostPort := strings.TrimSpace(hostPort)
+	if trimmedHostPort == "" {
+		return ""
+	}
+	if parsedHost, _, splitErr := net.SplitHostPort(trimmedHostPort); splitErr == nil {
+		return strings.Trim(parsedHost, "[]")
+	}
+	return strings.Trim(trimmedHostPort, "[]")
+}
+
+func CORSMiddleware(allowedOrigins ...string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 			// Avoid caching issues across different client origins
 			writer.Header().Add("Vary", "Origin")
 
-			origin := request.Header.Get("Origin")
-			if origin == frontendURL || frontendURL == "*" {
-				writer.Header().Set("Access-Control-Allow-Origin", origin)
-			} else if origin != "" {
-				// Allow localhost dynamically if testing with different ports
-				if strings.HasPrefix(origin, "http://localhost:") || strings.HasPrefix(origin, "http://127.0.0.1:") {
-					writer.Header().Set("Access-Control-Allow-Origin", origin)
-				}
+			originHeader := strings.TrimRight(strings.TrimSpace(request.Header.Get("Origin")), "/")
+			if originHeader != "" && IsOriginAllowed(originHeader, request.Host, allowedOrigins...) {
+				writer.Header().Set("Access-Control-Allow-Origin", originHeader)
 			}
 
 			writer.Header().Set("Access-Control-Allow-Credentials", "true")

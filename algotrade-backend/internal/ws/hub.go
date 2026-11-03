@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/ajaynegi33/AlgoTrade/internal/auth"
 	"github.com/gorilla/websocket"
 )
 
@@ -19,15 +21,6 @@ const (
 	maxMessageSize = 65536
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 32768,
-	CheckOrigin: func(r *http.Request) bool {
-		// Allow local development and dashboard origin
-		return true
-	},
-}
-
 // ClientHub manages connected browser WebSocket tabs
 type ClientHub struct {
 	connectedClients map[*websocket.Conn]bool
@@ -36,6 +29,7 @@ type ClientHub struct {
 	registerChan     chan *websocket.Conn
 	unregisterChan   chan *websocket.Conn
 	mu               sync.Mutex
+	allowedOrigins   []string
 	bufferPool       sync.Pool
 	isClosed         atomic.Bool
 }
@@ -76,9 +70,36 @@ func (hub *ClientHub) Broadcast(snapshot interface{}) {
 	}
 }
 
+// SetAllowedOrigins configures the allowed browser origins for WebSocket upgrades.
+func (hub *ClientHub) SetAllowedOrigins(allowedOrigins ...string) {
+	hub.mu.Lock()
+	hub.allowedOrigins = append([]string(nil), allowedOrigins...)
+	hub.mu.Unlock()
+}
+
+func (hub *ClientHub) isWebSocketOriginAllowed(request *http.Request) bool {
+	if request == nil {
+		return false
+	}
+	originHeader := strings.TrimSpace(request.Header.Get("Origin"))
+	if originHeader == "" {
+		return true
+	}
+	hub.mu.Lock()
+	configuredOrigins := make([]string, len(hub.allowedOrigins))
+	copy(configuredOrigins, hub.allowedOrigins)
+	hub.mu.Unlock()
+	return auth.IsOriginAllowed(originHeader, request.Host, configuredOrigins...)
+}
+
 // ServeWS upgrades the HTTP request to WebSocket and registers the client
 func (hub *ClientHub) ServeWS(writer http.ResponseWriter, request *http.Request) {
-	conn, err := upgrader.Upgrade(writer, request, nil)
+	wsUpgrader := websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 32768,
+		CheckOrigin:     hub.isWebSocketOriginAllowed,
+	}
+	conn, err := wsUpgrader.Upgrade(writer, request, nil)
 	if err != nil {
 		slog.Warn("Failed to upgrade websocket connection", "error", err)
 		return

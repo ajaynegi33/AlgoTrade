@@ -6,7 +6,7 @@ import (
 
 // FlightRecorderConfig holds the operational parameters for the runtime execution trace flight recorder
 type FlightRecorderConfig struct {
-	Enabled               bool          `json:"enabled"`
+	IsEnabled             bool          `json:"enabled"`
 	TraceDirectory        string        `json:"trace_directory"`
 	MaxRingBufferBytes    uint64        `json:"max_ring_buffer_bytes"`
 	MinEventAge           time.Duration `json:"min_event_age"`
@@ -19,7 +19,7 @@ type FlightRecorderConfig struct {
 // DefaultFlightRecorderConfig provides safe production defaults with bounded memory and disk usage
 func DefaultFlightRecorderConfig() FlightRecorderConfig {
 	return FlightRecorderConfig{
-		Enabled:               true,
+		IsEnabled:             true,
 		TraceDirectory:        "data/traces",
 		MaxRingBufferBytes:    8 * 1024 * 1024,  // 8 MB ring buffer
 		MinEventAge:           10 * time.Second, // Retain at least 10 seconds of runtime events

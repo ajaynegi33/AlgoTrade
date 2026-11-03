@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func TestTokenBucket_AcquireAndCadence(t *testing.T) {
+func TestTokenBucket_AcquireAndCadence(testingInstance *testing.T) {
 	// 5 tokens/second, burst of 1
 	tokenBucket := NewTokenBucket(5.0, 1.0)
 	testContext := context.Background()
@@ -18,21 +18,21 @@ func TestTokenBucket_AcquireAndCadence(t *testing.T) {
 	startTime := time.Now()
 	acquireError := tokenBucket.Acquire(testContext)
 	if acquireError != nil {
-		t.Fatalf("first acquire failed: %v", acquireError)
+		testingInstance.Fatalf("first acquire failed: %v", acquireError)
 	}
 
 	// Second acquire must wait ~200ms (1.0 / 5.0 = 200ms)
 	acquireError = tokenBucket.Acquire(testContext)
 	if acquireError != nil {
-		t.Fatalf("second acquire failed: %v", acquireError)
+		testingInstance.Fatalf("second acquire failed: %v", acquireError)
 	}
 	elapsedDuration := time.Since(startTime)
 	if elapsedDuration < 150*time.Millisecond {
-		t.Fatalf("expected rate pacing of ~200ms, but completed in %v", elapsedDuration)
+		testingInstance.Fatalf("expected rate pacing of ~200ms, but completed in %v", elapsedDuration)
 	}
 }
 
-func TestDispatcher_PriorityPreemption(t *testing.T) {
+func TestDispatcher_PriorityPreemption(testingInstance *testing.T) {
 	dispatcher := NewCentralKiteDispatcher()
 	defer dispatcher.Stop()
 
@@ -74,21 +74,21 @@ func TestDispatcher_PriorityPreemption(t *testing.T) {
 	select {
 	case <-emergencyDoneChannel:
 	case <-time.After(3 * time.Second):
-		t.Fatalf("emergency order timed out")
+		testingInstance.Fatalf("emergency order timed out")
 	}
 
 	orderMutex.Lock()
 	defer orderMutex.Unlock()
 	if len(executionOrder) == 0 {
-		t.Fatalf("expected executions, got none")
+		testingInstance.Fatalf("expected executions, got none")
 	}
 	// The very first item executed must be the emergency stop-loss!
 	if executionOrder[0] != "EMERGENCY-STOP-LOSS" {
-		t.Fatalf("expected EMERGENCY-STOP-LOSS to preempt background tasks, but got: %s (full order: %v)", executionOrder[0], executionOrder)
+		testingInstance.Fatalf("expected EMERGENCY-STOP-LOSS to preempt background tasks, but got: %s (full order: %v)", executionOrder[0], executionOrder)
 	}
 }
 
-func TestDispatcher_JustInTimeContextCancellation(t *testing.T) {
+func TestDispatcher_JustInTimeContextCancellation(testingInstance *testing.T) {
 	dispatcher := NewCentralKiteDispatcher()
 	defer dispatcher.Stop()
 
@@ -97,16 +97,16 @@ func TestDispatcher_JustInTimeContextCancellation(t *testing.T) {
 	cancelFunction()
 
 	_, executionError := dispatcher.ExecuteStandardOrder(canceledContext, func() (interface{}, error) {
-		t.Fatalf("action must not execute when context is canceled")
+		testingInstance.Fatalf("action must not execute when context is canceled")
 		return nil, nil
 	})
 
 	if executionError == nil {
-		t.Fatalf("expected error on canceled context, got nil")
+		testingInstance.Fatalf("expected error on canceled context, got nil")
 	}
 }
 
-func TestDispatcher_PanicRecovery(t *testing.T) {
+func TestDispatcher_PanicRecovery(testingInstance *testing.T) {
 	dispatcher := NewCentralKiteDispatcher()
 	defer dispatcher.Stop()
 
@@ -115,7 +115,7 @@ func TestDispatcher_PanicRecovery(t *testing.T) {
 	})
 
 	if executionError == nil {
-		t.Fatalf("expected panic to be recovered as an error, got nil")
+		testingInstance.Fatalf("expected panic to be recovered as an error, got nil")
 	}
 
 	// Verify dispatcher survived and can execute subsequent requests
@@ -123,11 +123,11 @@ func TestDispatcher_PanicRecovery(t *testing.T) {
 		return "alive_and_well", nil
 	})
 	if nextError != nil || response != "alive_and_well" {
-		t.Fatalf("dispatcher died after panic: resp=%v, err=%v", response, nextError)
+		testingInstance.Fatalf("dispatcher died after panic: resp=%v, err=%v", response, nextError)
 	}
 }
 
-func TestDispatcher_Http429CircuitPause(t *testing.T) {
+func TestDispatcher_Http429CircuitPause(testingInstance *testing.T) {
 	dispatcher := NewCentralKiteDispatcher()
 	defer dispatcher.Stop()
 
@@ -138,10 +138,10 @@ func TestDispatcher_Http429CircuitPause(t *testing.T) {
 
 	stats := dispatcher.GetStats()
 	if stats.Http429BackoffCount != 1 {
-		t.Fatalf("expected Http429BackoffCount to be 1, got %d", stats.Http429BackoffCount)
+		testingInstance.Fatalf("expected Http429BackoffCount to be 1, got %d", stats.Http429BackoffCount)
 	}
 	if !stats.IsCircuitPaused {
-		t.Fatalf("expected IsCircuitPaused to be true after 429 error")
+		testingInstance.Fatalf("expected IsCircuitPaused to be true after 429 error")
 	}
 
 	// Standard order should now be immediately rejected with ErrCircuitPaused during cooldown
@@ -149,11 +149,11 @@ func TestDispatcher_Http429CircuitPause(t *testing.T) {
 		return "should_not_run", nil
 	})
 	if !errors.Is(rejectedError, ErrCircuitPaused) {
-		t.Fatalf("expected ErrCircuitPaused, got %v", rejectedError)
+		testingInstance.Fatalf("expected ErrCircuitPaused, got %v", rejectedError)
 	}
 }
 
-func TestDispatcher_QueueSaturationProtection(t *testing.T) {
+func TestDispatcher_QueueSaturationProtection(testingInstance *testing.T) {
 	dispatcher := NewCentralKiteDispatcher()
 	defer dispatcher.Stop()
 
@@ -191,11 +191,11 @@ func TestDispatcher_QueueSaturationProtection(t *testing.T) {
 	close(blockerChannel)
 
 	if saturatedCount == 0 {
-		t.Fatalf("expected queue saturation rejections when exceeding buffer capacity")
+		testingInstance.Fatalf("expected queue saturation rejections when exceeding buffer capacity")
 	}
 }
 
-func TestDispatcher_ExecuteAccountSyncAndHistorical(t *testing.T) {
+func TestDispatcher_ExecuteAccountSyncAndHistorical(testingInstance *testing.T) {
 	dispatcher := NewCentralKiteDispatcher()
 	defer dispatcher.Stop()
 
@@ -204,7 +204,7 @@ func TestDispatcher_ExecuteAccountSyncAndHistorical(t *testing.T) {
 		return "account_margins_synced", nil
 	})
 	if accountSyncError != nil || accountSyncResponse != "account_margins_synced" {
-		t.Fatalf("account sync execution failed: resp=%v, err=%v", accountSyncResponse, accountSyncError)
+		testingInstance.Fatalf("account sync execution failed: resp=%v, err=%v", accountSyncResponse, accountSyncError)
 	}
 
 	// 2. Historical data execution
@@ -212,16 +212,16 @@ func TestDispatcher_ExecuteAccountSyncAndHistorical(t *testing.T) {
 		return "historical_candles_synced", nil
 	})
 	if historicalError != nil || historicalResponse != "historical_candles_synced" {
-		t.Fatalf("historical execution failed: resp=%v, err=%v", historicalResponse, historicalError)
+		testingInstance.Fatalf("historical execution failed: resp=%v, err=%v", historicalResponse, historicalError)
 	}
 
 	stats := dispatcher.GetStats()
 	if stats.TotalDispatchedCount < 2 {
-		t.Fatalf("expected at least 2 processed requests, got %d", stats.TotalDispatchedCount)
+		testingInstance.Fatalf("expected at least 2 processed requests, got %d", stats.TotalDispatchedCount)
 	}
 }
 
-func TestDispatcher_EmergencyPreemptionDuringSlowBackgroundCall(t *testing.T) {
+func TestDispatcher_EmergencyPreemptionDuringSlowBackgroundCall(testingInstance *testing.T) {
 	dispatcher := NewCentralKiteDispatcher()
 	defer dispatcher.Stop()
 
@@ -255,18 +255,18 @@ func TestDispatcher_EmergencyPreemptionDuringSlowBackgroundCall(t *testing.T) {
 		emergencyElapsed := time.Since(startTime)
 		// Emergency order was dispatched and completed without waiting for the 200ms background call
 		if emergencyElapsed > 150*time.Millisecond {
-			t.Fatalf("emergency order was blocked by slow background call, elapsed: %v", emergencyElapsed)
+			testingInstance.Fatalf("emergency order was blocked by slow background call, elapsed: %v", emergencyElapsed)
 		}
 	case <-backgroundFinishedChannel:
-		t.Fatalf("slow background call finished before emergency order! Head-of-line blocking occurred.")
+		testingInstance.Fatalf("slow background call finished before emergency order! Head-of-line blocking occurred.")
 	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for execution")
+		testingInstance.Fatalf("timed out waiting for execution")
 	}
 
 	<-backgroundFinishedChannel
 }
 
-func TestDispatcher_InterruptibleCircuitPauseOnContextCancel(t *testing.T) {
+func TestDispatcher_InterruptibleCircuitPauseOnContextCancel(testingInstance *testing.T) {
 	dispatcher := NewCentralKiteDispatcher()
 	defer dispatcher.Stop()
 
@@ -277,7 +277,7 @@ func TestDispatcher_InterruptibleCircuitPauseOnContextCancel(t *testing.T) {
 
 	stats := dispatcher.GetStats()
 	if !stats.IsCircuitPaused {
-		t.Fatalf("expected circuit to be paused")
+		testingInstance.Fatalf("expected circuit to be paused")
 	}
 
 	// 2. Submit an emergency order with a short 30ms context timeout
@@ -291,10 +291,80 @@ func TestDispatcher_InterruptibleCircuitPauseOnContextCancel(t *testing.T) {
 
 	elapsedDuration := time.Since(startTime)
 	if executionError == nil {
-		t.Fatalf("expected context timeout error, got nil")
+		testingInstance.Fatalf("expected context timeout error, got nil")
 	}
 	// The wait should abort in ~30ms, not hang for the full 1500ms cooldown
 	if elapsedDuration > 200*time.Millisecond {
-		t.Fatalf("circuit pause sleep was not interrupted by context cancellation, elapsed: %v", elapsedDuration)
+		testingInstance.Fatalf("circuit pause sleep was not interrupted by context cancellation, elapsed: %v", elapsedDuration)
 	}
 }
+
+func TestPhase3_CanceledContextStressAndCategoryBucketIsolation(testingContext *testing.T) {
+	dispatcher := NewCentralKiteDispatcher()
+	defer dispatcher.Stop()
+
+	// 1. 1,000-Iteration Canceled Context Stress Test (VULN-2):
+	// Submitting a pre-canceled context across all priorities and direct EnqueueRequest must NEVER execute ActionFunction.
+	canceledContext, cancelFunction := context.WithCancel(context.Background())
+	cancelFunction()
+
+	for iteration := 0; iteration < 1000; iteration++ {
+		_, err := dispatcher.ExecuteStandardOrder(canceledContext, func() (interface{}, error) {
+			testingContext.Fatalf("VULN-2 regression: canceled StandardOrder executed on iteration %d", iteration)
+			return nil, nil
+		})
+		if err == nil {
+			testingContext.Fatalf("expected error on canceled StandardOrder at iteration %d", iteration)
+		}
+
+		enqueueErr := dispatcher.EnqueueRequest(KiteRequestEnvelope{
+			RequestID:        fmt.Sprintf("CANCELED-ENQ-%d", iteration),
+			PriorityLevel:    PriorityStandardOrder,
+			Category:         CategoryOrder,
+			ExecutionContext: canceledContext,
+			ActionFunction: func() (interface{}, error) {
+				testingContext.Fatalf("VULN-2 regression: canceled EnqueueRequest executed on iteration %d", iteration)
+				return nil, nil
+			},
+			ResponseChannel: make(chan KiteResponseEnvelope, 1),
+			EnqueuedAt:      time.Now(),
+		})
+		if enqueueErr == nil {
+			testingContext.Fatalf("expected EnqueueRequest to reject canceled context at iteration %d", iteration)
+		}
+	}
+
+	// 2. Category Bucket Isolation:
+	// Exhaust historicalTokenBucket (2.0 burst capacity), while leaving generalTokenBucket (4.0 burst capacity) untouched.
+	// A 3rd CategoryHistorical request must wait ~400ms (1.0 / 2.5 req/s) rather than bypassing via generalTokenBucket!
+	for drainIndex := 0; drainIndex < 2; drainIndex++ {
+		dispatcher.historicalTokenBucket.TryAcquire()
+	}
+	historicalStart := time.Now()
+	_, histErr := dispatcher.ExecuteHistorical(context.Background(), func() (interface{}, error) {
+		return "candles", nil
+	})
+	if histErr != nil {
+		testingContext.Fatalf("ExecuteHistorical failed: %v", histErr)
+	}
+	historicalElapsed := time.Since(historicalStart)
+	if historicalElapsed < 300*time.Millisecond {
+		testingContext.Fatalf("expected CategoryHistorical to be throttled by historicalTokenBucket (~400ms), but completed in %v", historicalElapsed)
+	}
+
+	// 3. AccountSync (CategoryGeneral) must use generalTokenBucket and NOT drain orderTokenBucket:
+	for drainIndex := 0; drainIndex < 4; drainIndex++ {
+		dispatcher.orderTokenBucket.TryAcquire()
+	}
+	accountStart := time.Now()
+	_, acctErr := dispatcher.ExecuteAccountSync(context.Background(), func() (interface{}, error) {
+		return "margins", nil
+	})
+	if acctErr != nil {
+		testingContext.Fatalf("ExecuteAccountSync failed: %v", acctErr)
+	}
+	if time.Since(accountStart) > 80*time.Millisecond {
+		testingContext.Fatalf("expected ExecuteAccountSync (CategoryGeneral) to use generalTokenBucket immediately even when orderTokenBucket is empty")
+	}
+}
+

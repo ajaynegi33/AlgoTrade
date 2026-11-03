@@ -274,7 +274,9 @@ func (service *HistoricalService) computeBaselines(candles []kiteconnect.Histori
 		slotVolumeList := slotVolumes[slot]
 		var medianVol uint64 = 1000 // Default floor
 		if len(slotVolumeList) > 0 {
-			sort.Slice(slotVolumeList, func(i, j int) bool { return slotVolumeList[i] < slotVolumeList[j] })
+			sort.Slice(slotVolumeList, func(volumeIndexA, volumeIndexB int) bool {
+				return slotVolumeList[volumeIndexA] < slotVolumeList[volumeIndexB]
+			})
 			medianVol = slotVolumeList[len(slotVolumeList)/2]
 			if medianVol < 500 {
 				medianVol = 500

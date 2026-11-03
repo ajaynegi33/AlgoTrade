@@ -52,6 +52,11 @@ func (worker *PositionWorker) UpdateTrailingStopLossOnPriceTick(stockMetrics *ma
 	}
 	worker.latestLTPBits.Store(math.Float64bits(lastTradedPrice))
 
+	currentTickUnix := stockMetrics.LastUpdatedUnix
+	if currentTickUnix <= 0 {
+		currentTickUnix = time.Now().Unix()
+	}
+
 	// Runaway Price Guard: Cancel entry limit buy if price ran away without filling
 	if worker.filledEntryQty.Load() <= 0 {
 		worker.mu.RLock()
@@ -62,8 +67,8 @@ func (worker *PositionWorker) UpdateTrailingStopLossOnPriceTick(stockMetrics *ma
 		if isEntryPlaced && worker.OneR > 0 && lastTradedPrice >= entryPx+1.2*worker.OneR {
 			runawayStart := worker.runawaySinceUnix.Load()
 			if runawayStart == 0 {
-				worker.runawaySinceUnix.Store(stockMetrics.LastUpdatedUnix)
-			} else if (stockMetrics.LastUpdatedUnix - runawayStart) >= 30 {
+				worker.runawaySinceUnix.Store(currentTickUnix)
+			} else if (currentTickUnix - runawayStart) >= 30 {
 				worker.TriggerEmergencyExit("ENTRY_CANCELLED_PRICE_RUNAWAY")
 				return
 			}
@@ -90,15 +95,31 @@ func (worker *PositionWorker) UpdateTrailingStopLossOnPriceTick(stockMetrics *ma
 		lowWaterMark = lastTradedPrice
 		worker.lowWaterMarkBits.Store(math.Float64bits(lowWaterMark))
 	}
-	maxFavorableRMultiple := (highWaterMark - entryPrice) / worker.OneR
+
+	effectiveOneR := worker.OneR
+	if effectiveOneR <= 0 && worker.InitialStop > 0 && entryPrice > worker.InitialStop {
+		effectiveOneR = entryPrice - worker.InitialStop
+	}
+	var maxFavorableRMultiple float64
+	if effectiveOneR > 0 && highWaterMark > entryPrice {
+		maxFavorableRMultiple = (highWaterMark - entryPrice) / effectiveOneR
+	}
 	confirmedStopLoss := math.Float64frombits(worker.confirmedStopBits.Load())
 
-	// 2. GUARD A: Gapped-Through / Stranded SL Watchdog (1s Epoch or 3-Tick Breach)
+	// 2. GUARD A: Gapped-Through / Stranded SL Watchdog
+	// - If price gaps completely below the SL-L protective limit band, the exchange order cannot fill -> exit on Tick 1.
+	// - If price is inside [protectiveLimitPrice, confirmedStopLoss], Tick 1 arms slBreachSinceUnix so normal
+	//   exchange SL-L fills don't race our emergency sweep, and Tick 2+ (or >= 1s epoch) triggers emergency exit.
 	if lastTradedPrice <= confirmedStopLoss {
+		protectiveLimitPrice := CalculateProtectiveLimitPriceBelowStop(confirmedStopLoss, worker.TickSize)
+		if lastTradedPrice < protectiveLimitPrice {
+			worker.TriggerEmergencyExit("SL_GAP_THROUGH_BREACH")
+			return
+		}
 		breachStartTimeUnix := worker.slBreachSinceUnix.Load()
 		if breachStartTimeUnix == 0 {
-			worker.slBreachSinceUnix.Store(stockMetrics.LastUpdatedUnix)
-		} else if (stockMetrics.LastUpdatedUnix-breachStartTimeUnix) >= 1 || lastTradedPrice <= confirmedStopLoss-(3.0*worker.TickSize) {
+			worker.slBreachSinceUnix.Store(currentTickUnix)
+		} else if (currentTickUnix-breachStartTimeUnix) >= 1 || lastTradedPrice <= confirmedStopLoss-(3.0*worker.TickSize) {
 			worker.TriggerEmergencyExit("SL_GAP_THROUGH_BREACH")
 			return
 		}
@@ -129,10 +150,13 @@ func (worker *PositionWorker) UpdateTrailingStopLossOnPriceTick(stockMetrics *ma
 	}
 
 	// 5. Compute Dynamic Order-Flow Multiplier M_flow & Parabolic Climax Factor C_climax
-	currentBar := stockMetrics.SessionBars[stockMetrics.CurrentBarIdx]
 	var closeLocationValue float64 = 0.50
-	if currentBar.High > currentBar.Low {
-		closeLocationValue = (lastTradedPrice - currentBar.Low) / (currentBar.High - currentBar.Low)
+	if int(stockMetrics.CurrentBarIdx) < len(stockMetrics.SessionBars) {
+		currentBar := stockMetrics.SessionBars[stockMetrics.CurrentBarIdx]
+		if currentBar.High > currentBar.Low {
+			rawCloseLocationValue := (lastTradedPrice - currentBar.Low) / (currentBar.High - currentBar.Low)
+			closeLocationValue = math.Max(0.0, math.Min(1.0, rawCloseLocationValue))
+		}
 	}
 	flowScore := 0.50*float64(effectiveAggressorBuy) + 0.35*float64(stockMetrics.SmoothedBuyerRatio) + 0.15*closeLocationValue
 
@@ -156,8 +180,8 @@ func (worker *PositionWorker) UpdateTrailingStopLossOnPriceTick(stockMetrics *ma
 
 	// 6. Dynamic Breathing Buffer & High-Frequency Breakeven Ratchet
 	effectiveBaseBuffer := worker.BaseBuffer
-	if !worker.hasBreakevenCompleted.Load() && flowScore < 0.55 {
-		effectiveBaseBuffer = math.Min(worker.BaseBuffer, worker.OneR)
+	if !worker.hasBreakevenCompleted.Load() && flowScore < 0.55 && effectiveOneR > 0 {
+		effectiveBaseBuffer = math.Min(worker.BaseBuffer, effectiveOneR)
 	}
 
 	dynamicBreathingBuffer := effectiveBaseBuffer * orderFlowMultiplier * parabolicClimaxFactor
@@ -168,15 +192,19 @@ func (worker *PositionWorker) UpdateTrailingStopLossOnPriceTick(stockMetrics *ma
 	// Moving to BE at +1.00R guarantees market noise cannot stop out valid trending moves prematurely.
 	if maxFavorableRMultiple >= 1.00 {
 		worker.hasBreakevenCompleted.Store(true)
+		worker.currentGear.CompareAndSwap(1, GearDynamicTrail)
 		unclampedCandidateStop = math.Max(unclampedCandidateStop, breakevenStop)
 	}
-	if worker.hasBreakevenCompleted.Load() && stockMetrics.CurrentBarIdx > worker.EntryBarIdx && stockMetrics.CurrentBarIdx >= 1 {
-		prev5mLow := stockMetrics.SessionBars[stockMetrics.CurrentBarIdx-1].Low - 2.0*worker.TickSize
-		unclampedCandidateStop = math.Max(unclampedCandidateStop, RoundToTick(prev5mLow, worker.TickSize))
+	if worker.hasBreakevenCompleted.Load() && stockMetrics.CurrentBarIdx > worker.EntryBarIdx && stockMetrics.CurrentBarIdx >= 1 && int(stockMetrics.CurrentBarIdx-1) < len(stockMetrics.SessionBars) {
+		previousBar := stockMetrics.SessionBars[stockMetrics.CurrentBarIdx-1]
+		if previousBar.Low > 0 {
+			prev5mLow := previousBar.Low - 2.0*worker.TickSize
+			unclampedCandidateStop = math.Max(unclampedCandidateStop, RoundToTick(prev5mLow, worker.TickSize))
+		}
 	}
 
 	// 7. OrderBlock Rule: Judge the Zone on Completed 5-Minute Candle Closes (Never on Intra-Candle Wicks)
-	if stockMetrics.CurrentBarIdx > worker.EntryBarIdx && stockMetrics.CurrentBarIdx >= 1 {
+	if stockMetrics.CurrentBarIdx > worker.EntryBarIdx && stockMetrics.CurrentBarIdx >= 1 && int(stockMetrics.CurrentBarIdx-1) < len(stockMetrics.SessionBars) {
 		previousBar := stockMetrics.SessionBars[stockMetrics.CurrentBarIdx-1]
 		if previousBar.Close > 0 && previousBar.Close < worker.InitialStop {
 			worker.TriggerEmergencyExit("COMPLETED_5M_STRUCTURAL_STOP_CLOSE")
@@ -225,8 +253,11 @@ func (worker *PositionWorker) RaiseStopLossOrder(candidateStop, safeATR float64,
 		return
 	}
 
-	confirmedStopPrice := math.Float64frombits(worker.confirmedStopBits.Load())
-	priceImprovement := candidateStop - confirmedStopPrice
+	referenceStopPrice := math.Max(
+		math.Float64frombits(worker.confirmedStopBits.Load()),
+		math.Float64frombits(worker.proposedStopBits.Load()),
+	)
+	priceImprovement := candidateStop - referenceStopPrice
 	if priceImprovement <= 0 {
 		return
 	}

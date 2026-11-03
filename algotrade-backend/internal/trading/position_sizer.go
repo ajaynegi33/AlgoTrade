@@ -189,8 +189,8 @@ func ComputePositionSize( stockMetrics *market.StockMetrics, signalBarLow float6
 
 	// Constraint 4: Order-Book Top-3 Ask Liquidity Cap (never sweep more than 20% of visible depth)
 	var askTop3Qty uint64
-	for i := 0; i < 3; i++ {
-		askTop3Qty += uint64(stockMetrics.AskLevels[i].Qty)
+	for askLevelIndex := 0; askLevelIndex < 3; askLevelIndex++ {
+		askTop3Qty += uint64(stockMetrics.AskLevels[askLevelIndex].Qty)
 	}
 	liquidityCappedQuantity := max(1, int(math.Floor(MaxTop3AskLiquidityRatio*float64(askTop3Qty))))
 

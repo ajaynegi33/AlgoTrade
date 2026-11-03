@@ -57,11 +57,11 @@ func (handler *Handler) UpdateSettings(writer http.ResponseWriter, request *http
 	}
 
 	var requestBody struct {
-		Mode             *string  `json:"mode"`
-		AutoExecute      *bool    `json:"auto_execute"`
-		PaperCapital     *float64 `json:"paper_capital"`
-		RiskPerTradePct  *float64 `json:"risk_per_trade_pct"`
-		MaxOpenPositions *int     `json:"max_open_positions"`
+		Mode                 *string  `json:"mode"`
+		IsAutoExecuteEnabled *bool    `json:"auto_execute"`
+		PaperCapital         *float64 `json:"paper_capital"`
+		RiskPerTradePct      *float64 `json:"risk_per_trade_pct"`
+		MaxOpenPositions     *int     `json:"max_open_positions"`
 	}
 	bodyBytes, err := io.ReadAll(io.LimitReader(request.Body, 16384))
 	if err != nil {
@@ -77,8 +77,8 @@ func (handler *Handler) UpdateSettings(writer http.ResponseWriter, request *http
 	if requestBody.Mode != nil {
 		currentSettings.Mode = *requestBody.Mode
 	}
-	if requestBody.AutoExecute != nil {
-		currentSettings.AutoExecute = *requestBody.AutoExecute
+	if requestBody.IsAutoExecuteEnabled != nil {
+		currentSettings.IsAutoExecuteEnabled = *requestBody.IsAutoExecuteEnabled
 	}
 	if requestBody.PaperCapital != nil {
 		currentSettings.PaperCapital = *requestBody.PaperCapital
@@ -136,8 +136,8 @@ func (handler *Handler) Flatten(writer http.ResponseWriter, request *http.Reques
 	}
 
 	var requestBody struct {
-		PositionID string `json:"position_id"`
-		All        bool   `json:"all"`
+		PositionID       string `json:"position_id"`
+		ShouldFlattenAll bool   `json:"all"`
 	}
 	bodyBytes, err := io.ReadAll(io.LimitReader(request.Body, 8192))
 	if err != nil {
@@ -149,12 +149,12 @@ func (handler *Handler) Flatten(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 
-	if !requestBody.All && requestBody.PositionID == "" {
+	if !requestBody.ShouldFlattenAll && requestBody.PositionID == "" {
 		response.Error(writer, http.StatusBadRequest, "MISSING_TARGET", "Provide position_id or set all=true")
 		return
 	}
 
-	flattenedCount, flatErr := handler.manager.FlattenPosition(requestBody.PositionID, requestBody.All)
+	flattenedCount, flatErr := handler.manager.FlattenPosition(requestBody.PositionID, requestBody.ShouldFlattenAll)
 	if flatErr != nil {
 		response.Error(writer, http.StatusNotFound, "FLATTEN_ERROR", flatErr.Error())
 		return

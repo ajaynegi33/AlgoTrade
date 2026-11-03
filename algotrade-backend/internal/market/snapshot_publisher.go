@@ -124,26 +124,26 @@ func (actor *Actor) computeAndBroadcastSnapshot() {
 	actor.sectorHealthMap = newSectorHealthMap
 
 	// Deterministic Sort: Primary by ChangePercent DESC, Secondary tie-breaker by SectorID ASC
-	slices.SortFunc(sectorRankings, func(a, b SectorRankDTO) int {
-		if a.ChangePercent > b.ChangePercent {
+	slices.SortFunc(sectorRankings, func(sectorRankA, sectorRankB SectorRankDTO) int {
+		if sectorRankA.ChangePercent > sectorRankB.ChangePercent {
 			return -1
-		} else if a.ChangePercent < b.ChangePercent {
+		} else if sectorRankA.ChangePercent < sectorRankB.ChangePercent {
 			return 1
 		}
-		if a.SectorID < b.SectorID {
+		if sectorRankA.SectorID < sectorRankB.SectorID {
 			return -1
-		} else if a.SectorID > b.SectorID {
+		} else if sectorRankA.SectorID > sectorRankB.SectorID {
 			return 1
 		}
 		return 0
 	})
 
-	for i := range sectorRankings {
-		if i < 2 && sectorRankings[i].ChangePercent > 0 {
-			sectorRankings[i].IsLeader = true
+	for sectorIndex := range sectorRankings {
+		if sectorIndex < 2 && sectorRankings[sectorIndex].ChangePercent > 0 {
+			sectorRankings[sectorIndex].IsLeader = true
 		}
-		if i >= len(sectorRankings)-2 && len(sectorRankings) >= 4 && sectorRankings[i].ChangePercent < 0 {
-			sectorRankings[i].IsLagging = true
+		if sectorIndex >= len(sectorRankings)-2 && len(sectorRankings) >= 4 && sectorRankings[sectorIndex].ChangePercent < 0 {
+			sectorRankings[sectorIndex].IsLagging = true
 		}
 	}
 
@@ -159,12 +159,12 @@ func (actor *Actor) computeAndBroadcastSnapshot() {
 	// 5. Quicksort Active Indices by BullishScore (~2 microseconds)
 	bullishSorted := make([]uint16, len(actor.activeStockIndices))
 	copy(bullishSorted, actor.activeStockIndices)
-	slices.SortFunc(bullishSorted, func(i, j uint16) int {
-		s1 := actor.stocks[i].BullishScore
-		s2 := actor.stocks[j].BullishScore
-		if s1 > s2 {
+	slices.SortFunc(bullishSorted, func(stockIndexA, stockIndexB uint16) int {
+		scoreA := actor.stocks[stockIndexA].BullishScore
+		scoreB := actor.stocks[stockIndexB].BullishScore
+		if scoreA > scoreB {
 			return -1
-		} else if s1 < s2 {
+		} else if scoreA < scoreB {
 			return 1
 		}
 		return 0
@@ -189,56 +189,56 @@ func (actor *Actor) computeAndBroadcastSnapshot() {
 	// Bearish Sort for Top 5 Bearish Outliers
 	bearishSorted := make([]uint16, len(actor.activeStockIndices))
 	copy(bearishSorted, actor.activeStockIndices)
-	slices.SortFunc(bearishSorted, func(i, j uint16) int {
-		s1 := actor.stocks[i].BearishScore
-		s2 := actor.stocks[j].BearishScore
-		if s1 > s2 {
+	slices.SortFunc(bearishSorted, func(stockIndexA, stockIndexB uint16) int {
+		scoreA := actor.stocks[stockIndexA].BearishScore
+		scoreB := actor.stocks[stockIndexB].BearishScore
+		if scoreA > scoreB {
 			return -1
-		} else if s1 < s2 {
+		} else if scoreA < scoreB {
 			return 1
 		}
 		return 0
 	})
 
 	// Build Top 5 Bullish Outliers
-	topBullish := make([]StockRankDTO, 0, 5)
-	for rk, idx := range bullishSorted {
-		if rk >= 5 {
+	topBullishStocks := make([]StockRankDTO, 0, 5)
+	for rankIndex, stockIndex := range bullishSorted {
+		if rankIndex >= 5 {
 			break
 		}
-		dto := actor.ConvertStockToDTO(&actor.stocks[idx], rk+1)
-		topBullish = append(topBullish, dto)
+		stockDTO := actor.ConvertStockToDTO(&actor.stocks[stockIndex], rankIndex+1)
+		topBullishStocks = append(topBullishStocks, stockDTO)
 	}
 
 	// Build Top 5 Bearish Outliers
-	topBearish := make([]StockRankDTO, 0, 5)
-	for rk, idx := range bearishSorted {
-		if rk >= 5 {
+	topBearishStocks := make([]StockRankDTO, 0, 5)
+	for rankIndex, stockIndex := range bearishSorted {
+		if rankIndex >= 5 {
 			break
 		}
-		dto := actor.ConvertStockToDTO(&actor.stocks[idx], rk+1)
-		topBearish = append(topBearish, dto)
+		stockDTO := actor.ConvertStockToDTO(&actor.stocks[stockIndex], rankIndex+1)
+		topBearishStocks = append(topBearishStocks, stockDTO)
 	}
 
 	// Build Full 213 Watchlist Table
 	allStocks := make([]StockRankDTO, len(bullishSorted))
-	for rk, idx := range bullishSorted {
-		allStocks[rk] = actor.ConvertStockToDTO(&actor.stocks[idx], rk+1)
+	for rankIndex, stockIndex := range bullishSorted {
+		allStocks[rankIndex] = actor.ConvertStockToDTO(&actor.stocks[stockIndex], rankIndex+1)
 	}
 
 	// Historical API Status
 	histHealthy, histErr := actor.histClient.IsHealthy()
 
 	snapshot := RankedSnapshot{
-		Timestamp:        nowUnix,
-		HistoricalActive: histHealthy,
-		HistoricalError:  histErr,
-		MarketPulse:      pulseDTO,
-		Sectors:          sectorRankings,
-		TopBullish:       topBullish,
-		TopBearish:       topBearish,
-		AllStocks:        allStocks,
-		Execution:        execState,
+		Timestamp:          nowUnix,
+		IsHistoricalActive: histHealthy,
+		HistoricalError:    histErr,
+		MarketPulse:        pulseDTO,
+		Sectors:            sectorRankings,
+		TopBullish:         topBullishStocks,
+		TopBearish:         topBearishStocks,
+		AllStocks:          allStocks,
+		Execution:          execState,
 	}
 
 	actor.wsHub.Broadcast(snapshot)

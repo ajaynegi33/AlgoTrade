@@ -49,7 +49,7 @@ func (handler *Handler) GetLoginURL(writer http.ResponseWriter, request *http.Re
 // HandleBrowserCallback handles direct browser OAuth redirects from Zerodha Kite (GET)
 // and redirects the user back to the frontend dashboard via HTTP 302
 func (handler *Handler) HandleBrowserCallback(writer http.ResponseWriter, request *http.Request) {
-	dashboardURL := handler.service.cfg.FrontendURL + "/dashboard"
+	dashboardURL := handler.service.cfg.ResolveFrontendURLForRequestHost(request.Host) + "/dashboard"
 
 	statusParam := request.URL.Query().Get("status")
 	requestToken := request.URL.Query().Get("request_token")

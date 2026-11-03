@@ -9,6 +9,14 @@ import (
 	"time"
 )
 
+type brokerFetchState struct {
+	isFetchInFlight   bool
+	fetchWaitChannel  chan struct{}
+	lastFetchTime     time.Time
+	lastFetchedOrders []OrderUpdateEvent
+	lastFetchErr      error
+}
+
 // OrderReconciler deduplicates order updates across WebSocket, Webhook, and REST polling,
 // and coalesces concurrent FetchOrders calls so multiple PositionWorkers never trigger HTTP 429.
 type OrderReconciler struct {
@@ -20,13 +28,9 @@ type OrderReconciler struct {
 	pendingEventsByOrderID      map[string]OrderUpdateEvent
 	onOrderDelta                func(positionID, legType string, orderEvent OrderUpdateEvent, deltaFilled int)
 
-	// Coalesced singleflight-style REST fetch cache
-	fetchMu         sync.Mutex
-	isFetchInFlight bool
-	fetchWaitChannel chan struct{}
-	lastFetchTime   time.Time
-	lastFetchedList []OrderUpdateEvent
-	lastFetchErr    error
+	// Per-mode coalesced singleflight-style REST fetch cache ("PAPER" vs "LIVE")
+	fetchMu           sync.Mutex
+	fetchStatesByMode map[string]*brokerFetchState
 }
 
 func NewOrderReconciler(
@@ -40,6 +44,10 @@ func NewOrderReconciler(
 		legTypeByOrderID:            make(map[string]string),
 		pendingEventsByOrderID:      make(map[string]OrderUpdateEvent),
 		onOrderDelta:                onOrderDelta,
+		fetchStatesByMode: map[string]*brokerFetchState{
+			"PAPER": {},
+			"LIVE":  {},
+		},
 	}
 }
 
@@ -165,51 +173,65 @@ func (reconciler *OrderReconciler) ProcessOrderEvent(orderEvent OrderUpdateEvent
 	}
 }
 
-// SyncOrdersCoalesced fetches all orders from the active broker, coalescing concurrent callers within 500ms
+// SyncOrdersCoalesced fetches all orders from the specified broker, coalescing concurrent callers per broker mode within 500ms
 func (reconciler *OrderReconciler) SyncOrdersCoalesced(ctx context.Context, broker ExecutionBroker) ([]OrderUpdateEvent, error) {
 	if broker == nil {
 		return nil, nil
 	}
 
-	reconciler.fetchMu.Lock()
-	if time.Since(reconciler.lastFetchTime) < 500*time.Millisecond && reconciler.lastFetchErr == nil {
-		cached := reconciler.lastFetchedList
-		reconciler.fetchMu.Unlock()
-		return cached, nil
+	brokerMode := broker.Mode()
+	if brokerMode == "" {
+		brokerMode = "PAPER"
 	}
-	if reconciler.isFetchInFlight {
-		waitCh := reconciler.fetchWaitChannel
+
+	reconciler.fetchMu.Lock()
+	if reconciler.fetchStatesByMode == nil {
+		reconciler.fetchStatesByMode = make(map[string]*brokerFetchState)
+	}
+	fetchState, isModeTracked := reconciler.fetchStatesByMode[brokerMode]
+	if !isModeTracked {
+		fetchState = &brokerFetchState{}
+		reconciler.fetchStatesByMode[brokerMode] = fetchState
+	}
+
+	if time.Since(fetchState.lastFetchTime) < 500*time.Millisecond && fetchState.lastFetchErr == nil {
+		cachedOrderEvents := fetchState.lastFetchedOrders
+		reconciler.fetchMu.Unlock()
+		return cachedOrderEvents, nil
+	}
+	if fetchState.isFetchInFlight {
+		waitChannel := fetchState.fetchWaitChannel
 		reconciler.fetchMu.Unlock()
 		select {
-		case <-waitCh:
+		case <-waitChannel:
 			reconciler.fetchMu.Lock()
-			res, err := reconciler.lastFetchedList, reconciler.lastFetchErr
+			fetchedOrderEvents, fetchErr := fetchState.lastFetchedOrders, fetchState.lastFetchErr
 			reconciler.fetchMu.Unlock()
-			return res, err
+			return fetchedOrderEvents, fetchErr
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
 	}
 
-	reconciler.isFetchInFlight = true
-	reconciler.fetchWaitChannel = make(chan struct{})
-	waitCh := reconciler.fetchWaitChannel
+	fetchState.isFetchInFlight = true
+	fetchState.fetchWaitChannel = make(chan struct{})
+	waitChannel := fetchState.fetchWaitChannel
 	reconciler.fetchMu.Unlock()
 
-	events, err := broker.FetchOrders(ctx)
+	orderEvents, fetchErr := broker.FetchOrders(ctx)
 
 	reconciler.fetchMu.Lock()
-	reconciler.lastFetchTime = time.Now()
-	reconciler.lastFetchedList = events
-	reconciler.lastFetchErr = err
-	reconciler.isFetchInFlight = false
-	close(waitCh)
+	fetchState.lastFetchTime = time.Now()
+	fetchState.lastFetchedOrders = orderEvents
+	fetchState.lastFetchErr = fetchErr
+	fetchState.isFetchInFlight = false
+	close(waitChannel)
 	reconciler.fetchMu.Unlock()
 
-	if err == nil {
-		for _, orderEvent := range events {
+	if fetchErr == nil {
+		for _, orderEvent := range orderEvents {
 			reconciler.ProcessOrderEvent(orderEvent)
 		}
 	}
-	return events, err
+	return orderEvents, fetchErr
 }

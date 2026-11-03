@@ -86,7 +86,7 @@ func (manager *FlightRecorderManager) Start(parentContext context.Context) error
 		return nil
 	}
 
-	if !manager.configuration.Enabled {
+	if !manager.configuration.IsEnabled {
 		slog.Info("Tracer Flight Recorder is disabled by configuration")
 		return nil
 	}
@@ -143,7 +143,7 @@ func (manager *FlightRecorderManager) Stop() error {
 
 // RecordLatency inspects the measured duration against the threshold and enqueues a non-blocking dump if anomalous
 func (manager *FlightRecorderManager) RecordLatency(triggerReason string, measuredDuration, thresholdDuration time.Duration) {
-	if manager == nil || !manager.isRunning || !manager.configuration.Enabled || measuredDuration < thresholdDuration {
+	if manager == nil || !manager.isRunning || !manager.configuration.IsEnabled || measuredDuration < thresholdDuration {
 		return
 	}
 
@@ -183,7 +183,7 @@ func (manager *FlightRecorderManager) RecordLatency(triggerReason string, measur
 
 // TriggerManualDump initiates an on-demand snapshot from administrative APIs and blocks until completed
 func (manager *FlightRecorderManager) TriggerManualDump(callerContext context.Context, triggerReason string) (*TraceMetadata, error) {
-	if manager == nil || !manager.isRunning || !manager.configuration.Enabled {
+	if manager == nil || !manager.isRunning || !manager.configuration.IsEnabled {
 		return nil, errors.New("flight recorder is not active or enabled")
 	}
 
@@ -354,7 +354,7 @@ func (manager *FlightRecorderManager) GetStatus() FlightRecorderStatus {
 	}
 
 	return FlightRecorderStatus{
-		IsEnabled:               manager.configuration.Enabled,
+		IsEnabled:               manager.configuration.IsEnabled,
 		IsRunning:               manager.isRunning,
 		IsCurrentlyDumping:      manager.isDumpingActive.Load(),
 		StartedAt:               manager.serviceStartedAt,

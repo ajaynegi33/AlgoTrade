@@ -6,10 +6,10 @@ import (
 )
 
 type Envelope struct {
-	Success bool        `json:"success"`
-	Data    interface{} `json:"data,omitempty"`
-	Error   *ErrorBody  `json:"error,omitempty"`
-	Message string      `json:"message,omitempty"`
+	IsSuccess bool        `json:"success"`
+	Data      interface{} `json:"data,omitempty"`
+	Error     *ErrorBody  `json:"error,omitempty"`
+	Message   string      `json:"message,omitempty"`
 }
 
 type ErrorBody struct {
@@ -17,37 +17,37 @@ type ErrorBody struct {
 	Message string `json:"message"`
 }
 
-func JSON(w http.ResponseWriter, status int, payload interface{}) {
+func JSON(responseWriter http.ResponseWriter, status int, payload interface{}) {
 	buf, err := json.Marshal(payload)
 	if err != nil {
-		http.Error(w, `{"success":false,"error":{"code":"SERIALIZATION_ERROR","message":"Failed to serialize response"}}`, http.StatusInternalServerError)
+		http.Error(responseWriter, `{"success":false,"error":{"code":"SERIALIZATION_ERROR","message":"Failed to serialize response"}}`, http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_, _ = w.Write(buf)
+	responseWriter.Header().Set("Content-Type", "application/json")
+	responseWriter.WriteHeader(status)
+	_, _ = responseWriter.Write(buf)
 }
 
-func Success(w http.ResponseWriter, status int, data interface{}) {
-	JSON(w, status, Envelope{
-		Success: true,
-		Data:    data,
+func Success(responseWriter http.ResponseWriter, status int, data interface{}) {
+	JSON(responseWriter, status, Envelope{
+		IsSuccess: true,
+		Data:      data,
 	})
 }
 
-func Message(w http.ResponseWriter, status int, msg string) {
-	JSON(w, status, Envelope{
-		Success: true,
-		Message: msg,
+func Message(responseWriter http.ResponseWriter, status int, messageText string) {
+	JSON(responseWriter, status, Envelope{
+		IsSuccess: true,
+		Message:   messageText,
 	})
 }
 
-func Error(w http.ResponseWriter, status int, code, msg string) {
-	JSON(w, status, Envelope{
-		Success: false,
+func Error(responseWriter http.ResponseWriter, status int, code, messageText string) {
+	JSON(responseWriter, status, Envelope{
+		IsSuccess: false,
 		Error: &ErrorBody{
 			Code:    code,
-			Message: msg,
+			Message: messageText,
 		},
 	})
 }

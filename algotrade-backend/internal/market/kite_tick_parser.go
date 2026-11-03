@@ -39,7 +39,7 @@ func ParseBinaryFrame(data []byte) []ParsedTick {
 	offset := 2
 	dataLen := len(data)
 
-	for i := 0; i < numPackets && offset+2 <= dataLen; i++ {
+	for packetIndex := 0; packetIndex < numPackets && offset+2 <= dataLen; packetIndex++ {
 		pktLen := int(binary.BigEndian.Uint16(data[offset : offset+2]))
 		offset += 2
 
@@ -47,12 +47,12 @@ func ParseBinaryFrame(data []byte) []ParsedTick {
 			break
 		}
 
-		pkt := data[offset : offset+pktLen]
+		packetBytes := data[offset : offset+pktLen]
 		offset += pktLen
 
 		if pktLen == 184 {
 			// Full Equity Packet (NSE Cash Equities)
-			tick := parseEquityPacket(pkt)
+			tick := parseEquityPacket(packetBytes)
 			ticks = append(ticks, tick)
 		}
 	}

@@ -9,14 +9,14 @@ import (
 	"github.com/zerodha/gokiteconnect/v4/models"
 )
 
-func TestComputeBaselinesIgnoresOvernightGapInATR14(t *testing.T) {
+func TestComputeBaselinesIgnoresOvernightGapInATR14(testingInstance *testing.T) {
 	ist := time.FixedZone("IST", 5*3600+1800)
 	var candles []kiteconnect.HistoricalData
 
 	// Day 1: 15 five-minute bars ending at 15:25 IST around ₹200.00 with exact ₹1.50 bar range (High - Low = 1.50)
 	day1Start := time.Date(2026, 10, 22, 14, 15, 0, 0, ist)
-	for i := 0; i < 15; i++ {
-		barTime := day1Start.Add(time.Duration(i*5) * time.Minute)
+	for barIndex := 0; barIndex < 15; barIndex++ {
+		barTime := day1Start.Add(time.Duration(barIndex*5) * time.Minute)
 		candles = append(candles, kiteconnect.HistoricalData{
 			Date:   models.Time{Time: barTime},
 			Open:   200.00,
@@ -30,8 +30,8 @@ func TestComputeBaselinesIgnoresOvernightGapInATR14(t *testing.T) {
 	// Day 2: 09:15 AM (slot 0) opens with a massive +₹15.00 (+7.5%) overnight gap at ₹215.00,
 	// but its intraday 5-minute bar range is still ₹1.50 (High 216.00, Low 214.50).
 	day2Start := time.Date(2026, 10, 23, 9, 15, 0, 0, ist)
-	for i := 0; i < 6; i++ {
-		barTime := day2Start.Add(time.Duration(i*5) * time.Minute)
+	for barIndex := 0; barIndex < 6; barIndex++ {
+		barTime := day2Start.Add(time.Duration(barIndex*5) * time.Minute)
 		candles = append(candles, kiteconnect.HistoricalData{
 			Date:   models.Time{Time: barTime},
 			Open:   215.00,
@@ -48,25 +48,25 @@ func TestComputeBaselinesIgnoresOvernightGapInATR14(t *testing.T) {
 
 	// True 5m intraday ATR14 must be ~1.50 (never contaminated by the ₹15.00 overnight gap!)
 	if math.Abs(profile.ATR14-1.50) > 0.05 {
-		t.Fatalf("expected 5m ATR14 ~ 1.50 (uncontaminated by overnight gap), got %.4f", profile.ATR14)
+		testingInstance.Fatalf("expected 5m ATR14 ~ 1.50 (uncontaminated by overnight gap), got %.4f", profile.ATR14)
 	}
 }
 
-func TestHistoricalService_AutoRecoversOnKiteAuthentication(t *testing.T) {
+func TestHistoricalService_AutoRecoversOnKiteAuthentication(testingInstance *testing.T) {
 	kiteSvc := &Service{}
 	histSvc := NewHistoricalService(nil, kiteSvc)
 
 	// 1. Boot before Kite login: SeedStockBaselines returns fallback and sets "No active Kite session"
 	prof, err := histSvc.SeedStockBaselines(779521, 800.0)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		testingInstance.Fatalf("unexpected error: %v", err)
 	}
 	if !prof.IsFallback {
-		t.Fatalf("expected IsFallback=true when no Kite session is active")
+		testingInstance.Fatalf("expected IsFallback=true when no Kite session is active")
 	}
 	healthy, errMsg := histSvc.IsHealthy()
 	if healthy || errMsg != "No active Kite session" {
-		t.Fatalf("expected unhealthy 'No active Kite session', got healthy=%v err=%q", healthy, errMsg)
+		testingInstance.Fatalf("expected unhealthy 'No active Kite session', got healthy=%v err=%q", healthy, errMsg)
 	}
 
 	// 2. Simulate user logging into Zerodha Kite (session becomes active)
@@ -82,7 +82,7 @@ func TestHistoricalService_AutoRecoversOnKiteAuthentication(t *testing.T) {
 	// 3. IsHealthy() must immediately recover to (true, "") without requiring a server restart
 	healthyAfter, errAfter := histSvc.IsHealthy()
 	if !healthyAfter || errAfter != "" {
-		t.Fatalf("expected HistoricalService to auto-recover after Kite authentication, got healthy=%v err=%q", healthyAfter, errAfter)
+		testingInstance.Fatalf("expected HistoricalService to auto-recover after Kite authentication, got healthy=%v err=%q", healthyAfter, errAfter)
 	}
 }
 

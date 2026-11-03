@@ -75,20 +75,23 @@ func CalculateInitialStopLoss(entryPrice float64, signalBarLow float64, averageT
 	// Floor ATR at 0.25% LTP to guard against zero or uninitialized historical bar data
 	safeATR := math.Max(averageTrueRange14, entryPrice*0.0025)
 
-	// Step 1: Strictly non-inverting bounds:
+	// Step 1: Strictly non-inverting bounds quantized to exchange ticks:
 	// DeltaMin is capped at 0.80% LTP while DeltaMax adapts to ATR expansion
-	deltaMin := math.Max(
+	rawDeltaMin := math.Max(
 		StopMinTickMultiplier*tickSize,
 		math.Max(StopMinRiskPctCap*entryPrice, math.Min(0.35*safeATR, StopMaxRiskPctCap*entryPrice)),
 	)
-	deltaMax := math.Max(
+	deltaMin := RoundUpToTick(rawDeltaMin, tickSize)
+
+	rawDeltaMax := math.Max(
 		deltaMin+StopMinTickMultiplier*tickSize,
 		math.Min(1.15*safeATR, math.Max(0.0150*entryPrice, 0.85*safeATR)),
 	)
+	deltaMax := math.Max(deltaMin+StopMinTickMultiplier*tickSize, RoundUpToTick(rawDeltaMax, tickSize))
 
 	// Step 2: Base breathing buffer calibrated across NSE price tiers:
 	rawBuffer := math.Max(0.75*safeATR, StopBaseBufferLTPRatio*entryPrice)
-	baseBuffer := RoundToTick(math.Max(deltaMin, math.Min(deltaMax, rawBuffer)), tickSize)
+	baseBuffer := math.Max(deltaMin, math.Min(deltaMax, RoundToTick(rawBuffer, tickSize)))
 
 	// Step 3: Structural Stop placement below the signal candle low:
 	rawStop := signalBarLow - 2.0*tickSize
@@ -118,7 +121,7 @@ func CalculateInitialStopLoss(entryPrice float64, signalBarLow float64, averageT
 		DeltaMax:     deltaMax,
 		BaseBuffer:   baseBuffer,
 		InitialStop:  initialStop,
-		OneR:         entryPrice - initialStop,
+		OneR:         RoundToTick(entryPrice-initialStop, tickSize),
 		SignalBarLow: signalBarLow,
 	}, nil
 }

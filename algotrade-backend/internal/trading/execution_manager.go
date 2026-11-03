@@ -69,7 +69,10 @@ func NewManager( db *sql.DB, actor *market.Actor, kiteService *kite.Service, tic
 		tickerClient.SetOrderUpdateHandler(manager.reconciler.HandleWebSocketTextFrame)
 		tickerClient.SetReconnectHandler(func() {
 			slog.Info("Kite Ticker reconnected: running immediate REST order reconciliation")
-			_, _ = manager.reconciler.SyncOrdersCoalesced(manager.ctx, manager.getActiveBroker())
+			hasLiveWorkers, _ := manager.getActiveWorkerModes()
+			if manager.capitalMgr.GetSettings().Mode == "LIVE" || hasLiveWorkers {
+				_, _ = manager.reconciler.SyncOrdersCoalesced(manager.ctx, manager.liveBroker)
+			}
 		})
 	}
 
@@ -105,6 +108,44 @@ func (manager *Manager) getActiveBroker() ExecutionBroker {
 	return manager.paperBroker
 }
 
+func (manager *Manager) getActiveWorkerModes() (hasLiveWorkers bool, hasPaperWorkers bool) {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	for _, worker := range manager.activeWorkers {
+		if worker == nil || worker.isClosed.Load() {
+			continue
+		}
+		if worker.Mode == "LIVE" {
+			hasLiveWorkers = true
+		} else if worker.Mode == "PAPER" {
+			hasPaperWorkers = true
+		}
+	}
+	return hasLiveWorkers, hasPaperWorkers
+}
+
+func (manager *Manager) resolveBrokerForOrphanedOrder(positionID, orderID string) ExecutionBroker {
+	if strings.HasPrefix(orderID, "PAPER-") {
+		return manager.paperBroker
+	}
+	if manager.db != nil && positionID != "" {
+		var positionMode string
+		err := manager.db.QueryRow(`SELECT mode FROM positions WHERE position_id = ? LIMIT 1`, positionID).Scan(&positionMode)
+		if err == nil {
+			if positionMode == "LIVE" {
+				return manager.liveBroker
+			}
+			if positionMode == "PAPER" {
+				return manager.paperBroker
+			}
+		}
+	}
+	if orderID != "" {
+		return manager.liveBroker
+	}
+	return manager.getActiveBroker()
+}
+
 func (manager *Manager) handleOrderDelta(positionID, legType string, orderEvent OrderUpdateEvent, deltaFilled int) {
 	manager.mu.RLock()
 	worker, isWorkerFound := manager.activeWorkers[positionID]
@@ -116,7 +157,7 @@ func (manager *Manager) handleOrderDelta(positionID, legType string, orderEvent 
 		slog.Error("ORPHANED BUY FILL DETECTED: Position worker closed or not found, initiating emergency market liquidation",
 			"position_id", positionID, "order_id", orderEvent.OrderID, "delta_filled", deltaFilled, "symbol", orderEvent.Symbol)
 		go func() {
-			broker := manager.getActiveBroker()
+			broker := manager.resolveBrokerForOrphanedOrder(positionID, orderEvent.OrderID)
 			_, err := broker.PlaceEmergencySweepSell(context.Background(), orderEvent.Symbol, orderEvent.InstrumentToken, deltaFilled, orderEvent.AveragePrice, 0.05, 0.0350, nil)
 			if err != nil {
 				slog.Error("CRITICAL: Failed to liquidate orphaned shares", "symbol", orderEvent.Symbol, "qty", deltaFilled, "error", err)
@@ -178,10 +219,14 @@ func (manager *Manager) OnSecondTick(
 
 	// Collect active position telemetry & blocked margin
 	manager.mu.RLock()
+	allUnclosedWorkers := make([]*PositionWorker, 0, len(manager.activeWorkers))
 	activePositionWorkers := make([]*PositionWorker, 0, len(manager.activeWorkers))
 	for _, worker := range manager.activeWorkers {
-		if worker.Mode == settings.Mode && !worker.isClosed.Load() {
-			activePositionWorkers = append(activePositionWorkers, worker)
+		if !worker.isClosed.Load() {
+			allUnclosedWorkers = append(allUnclosedWorkers, worker)
+			if worker.Mode == settings.Mode {
+				activePositionWorkers = append(activePositionWorkers, worker)
+			}
 		}
 	}
 	closedPositionDTOs := make([]market.ActivePositionDTO, 0, len(manager.closedPositions))
@@ -191,6 +236,13 @@ func (manager *Manager) OnSecondTick(
 		}
 	}
 	manager.mu.RUnlock()
+
+	// Mandatory 15:14 IST Auto-Squareoff Sweep applies across ALL modes unconditionally
+	if sessionClock.Phase == "AUTO_SQUAREOFF_SWEEP" {
+		for _, worker := range allUnclosedWorkers {
+			worker.TriggerEmergencyExit("MANDATORY_1514_IST_MIS_SQUAREOFF")
+		}
+	}
 
 	// Guarantee deterministic FIFO chronological entry order (oldest entry first)
 	slices.SortFunc(activePositionWorkers, func(workerA, workerB *PositionWorker) int {
@@ -206,11 +258,6 @@ func (manager *Manager) OnSecondTick(
 	var blockedMargin, unrealisedPnL, totalOpenRiskRupees float64
 	activeDTOs := make([]market.ActivePositionDTO, 0, len(activePositionWorkers))
 	for _, worker := range activePositionWorkers {
-		// Mandatory 15:14 IST Auto-Squareoff Sweep
-		if sessionClock.Phase == "AUTO_SQUAREOFF_SWEEP" {
-			worker.TriggerEmergencyExit("MANDATORY_1514_IST_MIS_SQUAREOFF")
-		}
-
 		dto := worker.ToDTO()
 		activeDTOs = append(activeDTOs, dto)
 		unrealisedPnL += dto.UnrealisedPnL
@@ -269,7 +316,7 @@ func (manager *Manager) OnSecondTick(
 		gateStatus = "LOCKED_MAX_PORTFOLIO_HEAT"
 		gateReason = fmt.Sprintf("Max Portfolio Heat (%.2f%% / 3.00%%) reached. Open risk is ₹%.2f. Awaiting active stops to trail to breakeven.",
 			portfolioHeatPercentage*100.0, totalOpenRiskRupees)
-	} else if settings.AutoExecute {
+	} else if settings.IsAutoExecuteEnabled {
 		gateStatus = pickStatus
 		gateReason = pickReason
 		if candidate != nil {
@@ -283,7 +330,7 @@ func (manager *Manager) OnSecondTick(
 
 	stateDTO := &market.ExecutionStateDTO{
 		Mode:                 settings.Mode,
-		IsAutoExecuteEnabled: settings.AutoExecute,
+		IsAutoExecuteEnabled: settings.IsAutoExecuteEnabled,
 		IsMacroShockActive:   pulse.MarketRegime == "FLASH_SHOCK",
 		GateStatus:           gateStatus,
 		GateReason:        gateReason,
@@ -413,15 +460,17 @@ func (manager *Manager) backgroundMaintenanceLoop() {
 			return
 
 		case <-reconcileTicker.C:
-			manager.mu.RLock()
-			activeCount := len(manager.activeWorkers)
-			manager.mu.RUnlock()
-			if activeCount > 0 {
-				_, _ = manager.reconciler.SyncOrdersCoalesced(manager.ctx, manager.getActiveBroker())
+			hasLiveWorkers, hasPaperWorkers := manager.getActiveWorkerModes()
+			if hasLiveWorkers {
+				_, _ = manager.reconciler.SyncOrdersCoalesced(manager.ctx, manager.liveBroker)
+			}
+			if hasPaperWorkers {
+				_, _ = manager.reconciler.SyncOrdersCoalesced(manager.ctx, manager.paperBroker)
 			}
 
 		case <-marginTicker.C:
-			if manager.capitalMgr.GetSettings().Mode == "LIVE" {
+			hasLiveWorkers, _ := manager.getActiveWorkerModes()
+			if manager.capitalMgr.GetSettings().Mode == "LIVE" || hasLiveWorkers {
 				_ = manager.capitalMgr.RefreshLiveMargins()
 			}
 		}
@@ -519,7 +568,14 @@ func (manager *Manager) rehydrateOpenPositionsFromDB() {
 		slog.Error("Failed iterating open positions for rehydration", "error", err)
 	}
 
+	var hasRehydratedLive bool
+	var hasRehydratedPaper bool
 	for _, positionRecord := range rawOpenPositions {
+		if positionRecord.mode == "LIVE" {
+			hasRehydratedLive = true
+		} else if positionRecord.mode == "PAPER" {
+			hasRehydratedPaper = true
+		}
 		var broker ExecutionBroker = manager.paperBroker
 		if positionRecord.mode == "LIVE" {
 			broker = manager.liveBroker
@@ -652,6 +708,45 @@ func (manager *Manager) rehydrateOpenPositionsFromDB() {
 		slog.Info("Rehydrated open PositionWorker from SQLite crash recovery",
 			"position_id", positionRecord.positionID, "symbol", positionRecord.symbol, "state", positionRecord.state, "remaining_qty", worker.RemainingQty())
 	}
+
+	if hasRehydratedLive && manager.capitalMgr.GetSettings().Mode != "LIVE" {
+		slog.Warn("Rehydrated open LIVE position while execution_settings mode was PAPER; forcing execution mode to LIVE for safety")
+		manager.capitalMgr.ForceSyncModeForRehydration("LIVE")
+	} else if hasRehydratedPaper && !hasRehydratedLive && manager.capitalMgr.GetSettings().Mode != "PAPER" {
+		slog.Warn("Rehydrated open PAPER position while execution_settings mode was LIVE; syncing execution mode to PAPER")
+		manager.capitalMgr.ForceSyncModeForRehydration("PAPER")
+	}
+}
+
+func (manager *Manager) refreshCachedStateWithSettings() *market.ExecutionStateDTO {
+	settings := manager.capitalMgr.GetSettings()
+	now := time.Now()
+	clock := EvaluateGlobalSessionClocks(now, 50.0, 1.0)
+	capDTO, riskDTO, _ := manager.capitalMgr.ComputeCapitalSummary(0, 0, 0, 0, clock.SizeMultiplier)
+
+	if previousState := manager.lastStateDTO.Load(); previousState != nil {
+		updatedState := *previousState
+		updatedState.Mode = settings.Mode
+		updatedState.IsAutoExecuteEnabled = settings.IsAutoExecuteEnabled
+		updatedState.Capital = capDTO
+		updatedState.DailyRisk = riskDTO
+		manager.lastStateDTO.Store(&updatedState)
+		return &updatedState
+	}
+
+	stateDTO := &market.ExecutionStateDTO{
+		Mode:                 settings.Mode,
+		IsAutoExecuteEnabled: settings.IsAutoExecuteEnabled,
+		GateStatus:           "PAUSED_MANUAL",
+		GateReason:           "Ready",
+		Capital:              capDTO,
+		DailyRisk:            riskDTO,
+		SessionClock:         clock,
+		ActivePositions:      []market.ActivePositionDTO{},
+		ClosedPositions:      []market.ActivePositionDTO{},
+	}
+	manager.lastStateDTO.Store(stateDTO)
+	return stateDTO
 }
 
 // GetCurrentState returns the latest 1s ExecutionStateDTO (or builds one on demand)
@@ -659,36 +754,27 @@ func (manager *Manager) GetCurrentState() *market.ExecutionStateDTO {
 	if cached := manager.lastStateDTO.Load(); cached != nil {
 		return cached
 	}
-	now := time.Now()
-	clock := EvaluateGlobalSessionClocks(now, 50.0, 1.0)
-	settings := manager.capitalMgr.GetSettings()
-	capDTO, riskDTO, _ := manager.capitalMgr.ComputeCapitalSummary(0, 0, 0, 0, clock.SizeMultiplier)
-	return &market.ExecutionStateDTO{
-		Mode:            settings.Mode,
-		IsAutoExecuteEnabled: settings.AutoExecute,
-		GateStatus:      "PAUSED_MANUAL",
-		GateReason:      "Ready",
-		Capital:         capDTO,
-		DailyRisk:       riskDTO,
-		SessionClock:    clock,
-		ActivePositions: []market.ActivePositionDTO{},
-		ClosedPositions: []market.ActivePositionDTO{},
-	}
+	return manager.refreshCachedStateWithSettings()
 }
 
 // UpdateSettings updates mode/auto_execute/risk settings safely
 func (manager *Manager) UpdateSettings(settings ExecutionSettings) (*market.ExecutionStateDTO, error) {
-	manager.mu.RLock()
-	openCount := len(manager.activeWorkers)
-	manager.mu.RUnlock()
-
-	if err := manager.capitalMgr.UpdateSettings(settings, openCount); err != nil {
+	manager.mu.Lock()
+	openCount := 0
+	for _, worker := range manager.activeWorkers {
+		if worker != nil && !worker.isClosed.Load() {
+			openCount++
+		}
+	}
+	err := manager.capitalMgr.UpdateSettings(settings, openCount)
+	manager.mu.Unlock()
+	if err != nil {
 		return nil, err
 	}
 	if settings.Mode == "LIVE" {
 		_ = manager.capitalMgr.RefreshLiveMargins()
 	}
-	return manager.GetCurrentState(), nil
+	return manager.refreshCachedStateWithSettings(), nil
 }
 
 // UpdatePaperCapital updates virtual paper capital (₹500 to ₹100Cr) in real time
@@ -696,7 +782,7 @@ func (manager *Manager) UpdatePaperCapital(paperCapital float64) (*market.Execut
 	if err := manager.capitalMgr.UpdatePaperCapital(paperCapital); err != nil {
 		return nil, err
 	}
-	return manager.GetCurrentState(), nil
+	return manager.refreshCachedStateWithSettings(), nil
 }
 
 // FlattenPosition triggers immediate emergency flatten for one position or all open positions

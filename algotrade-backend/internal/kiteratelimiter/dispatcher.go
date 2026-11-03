@@ -75,6 +75,13 @@ func (dispatcher *CentralKiteDispatcher) EnqueueRequest(envelope KiteRequestEnve
 	if dispatcher.isStopped.Load() {
 		return ErrDispatcherStopped
 	}
+	if envelope.ExecutionContext == nil {
+		envelope.ExecutionContext = context.Background()
+	}
+	if envelope.ExecutionContext.Err() != nil {
+		dispatcher.droppedStaleCount.Add(1)
+		return envelope.ExecutionContext.Err()
+	}
 
 	switch envelope.PriorityLevel {
 	case PriorityEmergencyCritical:
@@ -83,7 +90,10 @@ func (dispatcher *CentralKiteDispatcher) EnqueueRequest(envelope KiteRequestEnve
 		case dispatcher.emergencyPriorityChannel <- envelope:
 			return nil
 		case <-envelope.ExecutionContext.Done():
+			dispatcher.droppedStaleCount.Add(1)
 			return envelope.ExecutionContext.Err()
+		case <-dispatcher.dispatcherContext.Done():
+			return ErrDispatcherStopped
 		case <-time.After(2 * time.Second):
 			return ErrQueueSaturated
 		}
@@ -94,6 +104,7 @@ func (dispatcher *CentralKiteDispatcher) EnqueueRequest(envelope KiteRequestEnve
 		case dispatcher.standardOrderChannel <- envelope:
 			return nil
 		case <-envelope.ExecutionContext.Done():
+			dispatcher.droppedStaleCount.Add(1)
 			return envelope.ExecutionContext.Err()
 		default:
 			return ErrQueueSaturated
@@ -105,6 +116,7 @@ func (dispatcher *CentralKiteDispatcher) EnqueueRequest(envelope KiteRequestEnve
 		case dispatcher.backgroundSyncChannel <- envelope:
 			return nil
 		case <-envelope.ExecutionContext.Done():
+			dispatcher.droppedStaleCount.Add(1)
 			return envelope.ExecutionContext.Err()
 		default:
 			return ErrQueueSaturated
@@ -114,8 +126,37 @@ func (dispatcher *CentralKiteDispatcher) EnqueueRequest(envelope KiteRequestEnve
 		select {
 		case dispatcher.standardOrderChannel <- envelope:
 			return nil
+		case <-envelope.ExecutionContext.Done():
+			dispatcher.droppedStaleCount.Add(1)
+			return envelope.ExecutionContext.Err()
 		default:
 			return ErrQueueSaturated
+		}
+	}
+}
+
+func (dispatcher *CentralKiteDispatcher) getTokenBucketForCategory(category EndpointCategory) *TokenBucket {
+	switch category {
+	case CategoryHistorical:
+		return dispatcher.historicalTokenBucket
+	case CategoryGeneral:
+		return dispatcher.generalTokenBucket
+	default:
+		return dispatcher.orderTokenBucket
+	}
+}
+
+func (dispatcher *CentralKiteDispatcher) drainRemainingQueuesOnShutdown() {
+	for {
+		select {
+		case envelope := <-dispatcher.emergencyPriorityChannel:
+			dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{ResponseError: ErrDispatcherStopped})
+		case envelope := <-dispatcher.standardOrderChannel:
+			dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{ResponseError: ErrDispatcherStopped})
+		case envelope := <-dispatcher.backgroundSyncChannel:
+			dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{ResponseError: ErrDispatcherStopped})
+		default:
+			return
 		}
 	}
 }
@@ -123,9 +164,10 @@ func (dispatcher *CentralKiteDispatcher) EnqueueRequest(envelope KiteRequestEnve
 // runLoop executes the prioritized event loop draining emergency orders first
 func (dispatcher *CentralKiteDispatcher) runLoop() {
 	defer dispatcher.shutdownWaitGroup.Done()
+	defer dispatcher.drainRemainingQueuesOnShutdown()
 
 	for {
-		// Tier 1: Check emergency channel immediately
+		// Tier 1: Drain any waiting emergency requests first
 		select {
 		case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
 			dispatcher.processEmergencyEnvelope(emergencyEnvelope)
@@ -135,40 +177,7 @@ func (dispatcher *CentralKiteDispatcher) runLoop() {
 		default:
 		}
 
-		// Tier 2: Check standard order channel
-		select {
-		case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
-			dispatcher.processEmergencyEnvelope(emergencyEnvelope)
-			continue
-		default:
-		}
-
-		if len(dispatcher.standardOrderChannel) > 0 {
-			if dispatcher.orderTokenBucket.TryAcquire() {
-				select {
-				case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
-					dispatcher.processEmergencyEnvelope(emergencyEnvelope)
-					continue
-				case standardEnvelope := <-dispatcher.standardOrderChannel:
-					dispatcher.executeWithGrantedToken(standardEnvelope)
-					continue
-				default:
-				}
-			} else {
-				waitDuration := dispatcher.orderTokenBucket.WaitDurationForNextToken()
-				select {
-				case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
-					dispatcher.processEmergencyEnvelope(emergencyEnvelope)
-					continue
-				case <-time.After(waitDuration):
-					continue
-				case <-dispatcher.dispatcherContext.Done():
-					return
-				}
-			}
-		}
-
-		// Tier 3: Check background sync channel
+		// Tier 2: Drain standard orders and account sync requests (if no emergency request is waiting)
 		select {
 		case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
 			dispatcher.processEmergencyEnvelope(emergencyEnvelope)
@@ -176,41 +185,12 @@ func (dispatcher *CentralKiteDispatcher) runLoop() {
 		case standardEnvelope := <-dispatcher.standardOrderChannel:
 			dispatcher.processStandardEnvelope(standardEnvelope)
 			continue
+		case <-dispatcher.dispatcherContext.Done():
+			return
 		default:
 		}
 
-		if len(dispatcher.backgroundSyncChannel) > 0 {
-			if dispatcher.generalTokenBucket.TryAcquire() {
-				select {
-				case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
-					dispatcher.processEmergencyEnvelope(emergencyEnvelope)
-					continue
-				case standardEnvelope := <-dispatcher.standardOrderChannel:
-					dispatcher.processStandardEnvelope(standardEnvelope)
-					continue
-				case backgroundEnvelope := <-dispatcher.backgroundSyncChannel:
-					dispatcher.executeWithGrantedToken(backgroundEnvelope)
-					continue
-				default:
-				}
-			} else {
-				waitDuration := dispatcher.generalTokenBucket.WaitDurationForNextToken()
-				select {
-				case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
-					dispatcher.processEmergencyEnvelope(emergencyEnvelope)
-					continue
-				case standardEnvelope := <-dispatcher.standardOrderChannel:
-					dispatcher.processStandardEnvelope(standardEnvelope)
-					continue
-				case <-time.After(waitDuration):
-					continue
-				case <-dispatcher.dispatcherContext.Done():
-					return
-				}
-			}
-		}
-
-		// Tier 4: Block on all three priority channels simultaneously when idle
+		// Tier 3: Block on all three priority channels simultaneously when idle or draining background queue
 		select {
 		case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
 			dispatcher.processEmergencyEnvelope(emergencyEnvelope)
@@ -218,21 +198,18 @@ func (dispatcher *CentralKiteDispatcher) runLoop() {
 			select {
 			case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
 				dispatcher.processEmergencyEnvelope(emergencyEnvelope)
-				_ = dispatcher.EnqueueRequest(standardEnvelope)
 			default:
-				dispatcher.processStandardEnvelope(standardEnvelope)
 			}
+			dispatcher.processStandardEnvelope(standardEnvelope)
 		case backgroundEnvelope := <-dispatcher.backgroundSyncChannel:
 			select {
 			case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
 				dispatcher.processEmergencyEnvelope(emergencyEnvelope)
-				_ = dispatcher.EnqueueRequest(backgroundEnvelope)
 			case standardEnvelope := <-dispatcher.standardOrderChannel:
 				dispatcher.processStandardEnvelope(standardEnvelope)
-				_ = dispatcher.EnqueueRequest(backgroundEnvelope)
 			default:
-				dispatcher.processBackgroundEnvelope(backgroundEnvelope)
 			}
+			dispatcher.processBackgroundEnvelope(backgroundEnvelope)
 		case <-dispatcher.dispatcherContext.Done():
 			return
 		}
@@ -241,7 +218,7 @@ func (dispatcher *CentralKiteDispatcher) runLoop() {
 
 // processEmergencyEnvelope immediately acquires order tokens and launches critical emergency actions
 func (dispatcher *CentralKiteDispatcher) processEmergencyEnvelope(envelope KiteRequestEnvelope) {
-	if envelope.ExecutionContext.Err() != nil {
+	if envelope.ExecutionContext != nil && envelope.ExecutionContext.Err() != nil {
 		dispatcher.droppedStaleCount.Add(1)
 		dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
 			ResponseError: ErrRequestTimedOutInQueue,
@@ -249,13 +226,33 @@ func (dispatcher *CentralKiteDispatcher) processEmergencyEnvelope(envelope KiteR
 		return
 	}
 
-	tokenAcquireError := dispatcher.orderTokenBucket.Acquire(envelope.ExecutionContext)
-	if tokenAcquireError != nil {
-		dispatcher.droppedStaleCount.Add(1)
-		dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
-			ResponseError: tokenAcquireError,
-		})
-		return
+	tokenBucket := dispatcher.getTokenBucketForCategory(envelope.Category)
+	for {
+		if envelope.ExecutionContext != nil && envelope.ExecutionContext.Err() != nil {
+			dispatcher.droppedStaleCount.Add(1)
+			dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+				ResponseError: envelope.ExecutionContext.Err(),
+			})
+			return
+		}
+		if tokenBucket.TryAcquire() {
+			break
+		}
+		waitDuration := tokenBucket.WaitDurationForNextToken()
+		select {
+		case <-time.After(waitDuration):
+		case <-envelope.ExecutionContext.Done():
+			dispatcher.droppedStaleCount.Add(1)
+			dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+				ResponseError: envelope.ExecutionContext.Err(),
+			})
+			return
+		case <-dispatcher.dispatcherContext.Done():
+			dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+				ResponseError: ErrDispatcherStopped,
+			})
+			return
+		}
 	}
 
 	dispatcher.executeWithGrantedToken(envelope)
@@ -263,7 +260,7 @@ func (dispatcher *CentralKiteDispatcher) processEmergencyEnvelope(envelope KiteR
 
 // processStandardEnvelope handles standard order token acquisition and dispatch
 func (dispatcher *CentralKiteDispatcher) processStandardEnvelope(envelope KiteRequestEnvelope) {
-	if envelope.ExecutionContext.Err() != nil {
+	if envelope.ExecutionContext != nil && envelope.ExecutionContext.Err() != nil {
 		dispatcher.droppedStaleCount.Add(1)
 		dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
 			ResponseError: ErrRequestTimedOutInQueue,
@@ -278,8 +275,9 @@ func (dispatcher *CentralKiteDispatcher) processStandardEnvelope(envelope KiteRe
 		return
 	}
 
+	tokenBucket := dispatcher.getTokenBucketForCategory(envelope.Category)
 	for {
-		if envelope.ExecutionContext.Err() != nil {
+		if envelope.ExecutionContext != nil && envelope.ExecutionContext.Err() != nil {
 			dispatcher.droppedStaleCount.Add(1)
 			dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
 				ResponseError: envelope.ExecutionContext.Err(),
@@ -287,11 +285,11 @@ func (dispatcher *CentralKiteDispatcher) processStandardEnvelope(envelope KiteRe
 			return
 		}
 
-		if dispatcher.orderTokenBucket.TryAcquire() {
+		if tokenBucket.TryAcquire() {
 			break
 		}
 
-		waitDuration := dispatcher.orderTokenBucket.WaitDurationForNextToken()
+		waitDuration := tokenBucket.WaitDurationForNextToken()
 		select {
 		case emergencyEnvelope := <-dispatcher.emergencyPriorityChannel:
 			dispatcher.processEmergencyEnvelope(emergencyEnvelope)
@@ -303,6 +301,9 @@ func (dispatcher *CentralKiteDispatcher) processStandardEnvelope(envelope KiteRe
 			})
 			return
 		case <-dispatcher.dispatcherContext.Done():
+			dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+				ResponseError: ErrDispatcherStopped,
+			})
 			return
 		}
 	}
@@ -312,7 +313,7 @@ func (dispatcher *CentralKiteDispatcher) processStandardEnvelope(envelope KiteRe
 
 // processBackgroundEnvelope handles background task token acquisition and dispatch
 func (dispatcher *CentralKiteDispatcher) processBackgroundEnvelope(envelope KiteRequestEnvelope) {
-	if envelope.ExecutionContext.Err() != nil {
+	if envelope.ExecutionContext != nil && envelope.ExecutionContext.Err() != nil {
 		dispatcher.droppedStaleCount.Add(1)
 		dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
 			ResponseError: ErrRequestTimedOutInQueue,
@@ -327,15 +328,10 @@ func (dispatcher *CentralKiteDispatcher) processBackgroundEnvelope(envelope Kite
 		return
 	}
 
-	var tokenBucket *TokenBucket
-	if envelope.Category == CategoryHistorical {
-		tokenBucket = dispatcher.historicalTokenBucket
-	} else {
-		tokenBucket = dispatcher.generalTokenBucket
-	}
+	tokenBucket := dispatcher.getTokenBucketForCategory(envelope.Category)
 
 	for {
-		if envelope.ExecutionContext.Err() != nil {
+		if envelope.ExecutionContext != nil && envelope.ExecutionContext.Err() != nil {
 			dispatcher.droppedStaleCount.Add(1)
 			dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
 				ResponseError: envelope.ExecutionContext.Err(),
@@ -361,6 +357,9 @@ func (dispatcher *CentralKiteDispatcher) processBackgroundEnvelope(envelope Kite
 			})
 			return
 		case <-dispatcher.dispatcherContext.Done():
+			dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+				ResponseError: ErrDispatcherStopped,
+			})
 			return
 		}
 	}
@@ -379,6 +378,14 @@ func (dispatcher *CentralKiteDispatcher) executeWithGrantedToken(envelope KiteRe
 
 // executeWorker handles circuit pauses, panic recovery, and returns responses
 func (dispatcher *CentralKiteDispatcher) executeWorker(envelope KiteRequestEnvelope) {
+	if envelope.ExecutionContext != nil && envelope.ExecutionContext.Err() != nil {
+		dispatcher.droppedStaleCount.Add(1)
+		dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+			ResponseError: envelope.ExecutionContext.Err(),
+		})
+		return
+	}
+
 	// 1. Check for active HTTP 429 Circuit Pause with interruptible wait for emergency orders
 	pauseDuration := dispatcher.getActiveCircuitPauseDuration()
 	if pauseDuration > 0 {
@@ -403,6 +410,15 @@ func (dispatcher *CentralKiteDispatcher) executeWorker(envelope KiteRequestEnvel
 			})
 			return
 		}
+	}
+
+	// Re-verify context after any circuit pause wait before invoking the live API closure
+	if envelope.ExecutionContext != nil && envelope.ExecutionContext.Err() != nil {
+		dispatcher.droppedStaleCount.Add(1)
+		dispatcher.deliverResponse(envelope.ResponseChannel, KiteResponseEnvelope{
+			ResponseError: envelope.ExecutionContext.Err(),
+		})
+		return
 	}
 
 	// 2. Execute action closure safely with panic recovery

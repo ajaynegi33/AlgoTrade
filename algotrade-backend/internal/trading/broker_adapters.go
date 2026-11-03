@@ -557,18 +557,18 @@ func walkBook(qty int, limitPrice float64, stockMetrics *market.StockMetrics, is
 	var totalValue float64
 	var filled int
 
-	for i := 0; i < 5 && remainingShares > 0; i++ {
+	for depthLevelIndex := 0; depthLevelIndex < 5 && remainingShares > 0; depthLevelIndex++ {
 		var levelPrice float64
 		var levelQuantity int
 		if isBuy {
-			levelPrice = float64(stockMetrics.AskLevels[i].Price)
-			levelQuantity = int(stockMetrics.AskLevels[i].Qty)
+			levelPrice = float64(stockMetrics.AskLevels[depthLevelIndex].Price)
+			levelQuantity = int(stockMetrics.AskLevels[depthLevelIndex].Qty)
 			if limitPrice > 0 && levelPrice > limitPrice+1e-6 {
 				break
 			}
 		} else {
-			levelPrice = float64(stockMetrics.BidLevels[i].Price)
-			levelQuantity = int(stockMetrics.BidLevels[i].Qty)
+			levelPrice = float64(stockMetrics.BidLevels[depthLevelIndex].Price)
+			levelQuantity = int(stockMetrics.BidLevels[depthLevelIndex].Qty)
 			if limitPrice > 0 && levelPrice < limitPrice-1e-6 {
 				break
 			}
@@ -729,9 +729,9 @@ func (broker *PaperBroker) PlaceLimitBuy(
 
 	// Calculate visible ask depth available at or below limitPrice
 	availableShares := 0
-	for i := 0; i < 5; i++ {
-		levelPrice := float64(stock.AskLevels[i].Price)
-		levelQuantity := int(stock.AskLevels[i].Qty)
+	for depthLevelIndex := 0; depthLevelIndex < 5; depthLevelIndex++ {
+		levelPrice := float64(stock.AskLevels[depthLevelIndex].Price)
+		levelQuantity := int(stock.AskLevels[depthLevelIndex].Qty)
 		if levelPrice > 0 && levelQuantity > 0 && (limitPrice <= 0 || levelPrice <= limitPrice+1e-6) {
 			availableShares += levelQuantity
 		}

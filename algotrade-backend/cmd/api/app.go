@@ -101,35 +101,35 @@ func NewApp(cfg *config.Config) (*App, error) {
 }
 
 // Start launches the ticker, market hub, initial scan, flight recorder, and HTTP server
-func (app *App) Start() error {
-	if app.flightRecorderManager != nil {
-		if startError := app.flightRecorderManager.Start(context.Background()); startError != nil {
+func (application *App) Start() error {
+	if application.flightRecorderManager != nil {
+		if startError := application.flightRecorderManager.Start(context.Background()); startError != nil {
 			slog.Warn("Failed to start flight recorder manager", "error", startError)
 		}
 	}
 
-	app.tickerClient.Start()
+	application.tickerClient.Start()
 
-	if err := app.marketHub.Start(); err != nil {
+	if err := application.marketHub.Start(); err != nil {
 		return err
 	}
 
 	// Deferred non-blocking initial scan check on startup
 	go func() {
 		time.Sleep(1 * time.Second)
-		if _, err := app.screenerService.RunScan(false); err != nil {
+		if _, err := application.screenerService.RunScan(false); err != nil {
 			slog.Info("Initial universe scan deferred (no network or already scanned)", "info", err.Error())
 		}
 	}()
 
 	go func() {
 		slog.Info("AlgoTrade Backend started",
-			"port", app.cfg.Port,
-			"env", app.cfg.Env,
+			"port", application.cfg.Port,
+			"env", application.cfg.Env,
 			"auth", "AccessToken=5m, RefreshToken=24h (RTR enabled)",
-			"allowed_origin", app.cfg.FrontendURL,
+			"allowed_origin", application.cfg.FrontendURL,
 		)
-		if err := app.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := application.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("Server encountered fatal error", "error", err)
 			os.Exit(1)
 		}
@@ -139,26 +139,26 @@ func (app *App) Start() error {
 }
 
 // Stop shuts down the HTTP server and all background engines cleanly
-func (app *App) Stop(ctx context.Context) {
+func (application *App) Stop(ctx context.Context) {
 	slog.Info("Shutdown signal received, shutting down gracefully...")
 
-	if err := app.server.Shutdown(ctx); err != nil {
+	if err := application.server.Shutdown(ctx); err != nil {
 		slog.Error("Graceful shutdown error", "error", err)
 	}
 
-	if app.scheduler != nil {
-		app.scheduler.Stop()
+	if application.scheduler != nil {
+		application.scheduler.Stop()
 	}
-	if app.collector != nil {
-		app.collector.Stop()
+	if application.collector != nil {
+		application.collector.Stop()
 	}
-	if app.flightRecorderManager != nil {
-		_ = app.flightRecorderManager.Stop()
+	if application.flightRecorderManager != nil {
+		_ = application.flightRecorderManager.Stop()
 	}
 
-	app.tradeManager.Stop()
-	app.marketHub.Stop()
-	app.tickerClient.Stop()
+	application.tradeManager.Stop()
+	application.marketHub.Stop()
+	application.tickerClient.Stop()
 
 	if err := database.Close(); err != nil {
 		slog.Error("Error closing database connection", "error", err)

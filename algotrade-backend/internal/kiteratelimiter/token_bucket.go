@@ -40,8 +40,10 @@ func (bucket *TokenBucket) TryAcquire() bool {
 
 	currentTime := time.Now()
 	elapsedSeconds := currentTime.Sub(bucket.lastRefillTime).Seconds()
-	bucket.currentTokens = math.Min(bucket.burstCapacity, bucket.currentTokens+elapsedSeconds*bucket.refillRatePerSecond)
-	bucket.lastRefillTime = currentTime
+	if elapsedSeconds > 0 {
+		bucket.currentTokens = math.Min(bucket.burstCapacity, bucket.currentTokens+elapsedSeconds*bucket.refillRatePerSecond)
+		bucket.lastRefillTime = currentTime
+	}
 
 	if bucket.currentTokens >= 1.0 {
 		bucket.currentTokens -= 1.0
@@ -58,24 +60,32 @@ func (bucket *TokenBucket) WaitDurationForNextToken() time.Duration {
 
 	currentTime := time.Now()
 	elapsedSeconds := currentTime.Sub(bucket.lastRefillTime).Seconds()
-	bucket.currentTokens = math.Min(bucket.burstCapacity, bucket.currentTokens+elapsedSeconds*bucket.refillRatePerSecond)
-	bucket.lastRefillTime = currentTime
+	if elapsedSeconds > 0 {
+		bucket.currentTokens = math.Min(bucket.burstCapacity, bucket.currentTokens+elapsedSeconds*bucket.refillRatePerSecond)
+		bucket.lastRefillTime = currentTime
+	}
 
 	if bucket.currentTokens >= 1.0 {
 		return 0
 	}
 	remainingTokensNeeded := 1.0 - bucket.currentTokens
-	return time.Duration((remainingTokensNeeded / bucket.refillRatePerSecond) * float64(time.Second))
+	waitNanoseconds := math.Ceil((remainingTokensNeeded / bucket.refillRatePerSecond) * float64(time.Second))
+	return time.Duration(waitNanoseconds)
 }
 
 // Acquire blocks until one token becomes available or the context is cancelled
 func (bucket *TokenBucket) Acquire(executionContext context.Context) error {
+	if executionContext != nil && executionContext.Err() != nil {
+		return executionContext.Err()
+	}
 	for {
 		bucket.bucketMutex.Lock()
 		currentTime := time.Now()
 		elapsedSeconds := currentTime.Sub(bucket.lastRefillTime).Seconds()
-		bucket.currentTokens = math.Min(bucket.burstCapacity, bucket.currentTokens+elapsedSeconds*bucket.refillRatePerSecond)
-		bucket.lastRefillTime = currentTime
+		if elapsedSeconds > 0 {
+			bucket.currentTokens = math.Min(bucket.burstCapacity, bucket.currentTokens+elapsedSeconds*bucket.refillRatePerSecond)
+			bucket.lastRefillTime = currentTime
+		}
 
 		if bucket.currentTokens >= 1.0 {
 			bucket.currentTokens -= 1.0
@@ -84,7 +94,8 @@ func (bucket *TokenBucket) Acquire(executionContext context.Context) error {
 		}
 
 		remainingTokensNeeded := 1.0 - bucket.currentTokens
-		waitDuration := time.Duration((remainingTokensNeeded / bucket.refillRatePerSecond) * float64(time.Second))
+		waitNanoseconds := math.Ceil((remainingTokensNeeded / bucket.refillRatePerSecond) * float64(time.Second))
+		waitDuration := time.Duration(waitNanoseconds)
 		bucket.bucketMutex.Unlock()
 
 		select {

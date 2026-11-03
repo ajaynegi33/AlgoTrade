@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ type Config struct {
 	Port               string
 	JWTSecret          []byte
 	FrontendURL        string
+	AllowedOrigins     []string
 	Env                string
 	AccessTokenExpiry  time.Duration
 	RefreshTokenExpiry time.Duration
@@ -43,18 +45,65 @@ func (config *Config) IsKiteConfigured() bool {
 	return config.KiteAPIKey != "" && config.KiteAPISecret != ""
 }
 
+// ResolveFrontendURLForRequestHost returns the best matching frontend origin for the incoming HTTP Host header.
+func (config *Config) ResolveFrontendURLForRequestHost(requestHost string) string {
+	if config == nil {
+		return ""
+	}
+	requestHostname := extractHostname(requestHost)
+	if requestHostname == "" {
+		return config.FrontendURL
+	}
+
+	for _, allowedOrigin := range config.AllowedOrigins {
+		parsedOrigin, parseErr := url.Parse(allowedOrigin)
+		if parseErr == nil && strings.EqualFold(parsedOrigin.Hostname(), requestHostname) {
+			return allowedOrigin
+		}
+	}
+
+	// If primary FrontendURL is loopback (localhost/127.0.0.1) but request arrived on a remote IP/host,
+	// preserve the frontend scheme and port while targeting the remote hostname.
+	primaryParsed, parseErr := url.Parse(config.FrontendURL)
+	if parseErr == nil && isLoopbackHost(primaryParsed.Hostname()) && !isLoopbackHost(requestHostname) {
+		frontendPort := primaryParsed.Port()
+		if frontendPort != "" {
+			return fmt.Sprintf("%s://%s:%s", primaryParsed.Scheme, requestHostname, frontendPort)
+		}
+		return fmt.Sprintf("%s://%s", primaryParsed.Scheme, requestHostname)
+	}
+
+	return config.FrontendURL
+}
+
+func extractHostname(hostPort string) string {
+	trimmedHostPort := strings.TrimSpace(hostPort)
+	if trimmedHostPort == "" {
+		return ""
+	}
+	if parsedHost, _, splitErr := net.SplitHostPort(trimmedHostPort); splitErr == nil {
+		return strings.Trim(parsedHost, "[]")
+	}
+	return strings.Trim(trimmedHostPort, "[]")
+}
+
+func isLoopbackHost(hostname string) bool {
+	normalizedHost := strings.ToLower(strings.TrimSpace(hostname))
+	return normalizedHost == "localhost" || normalizedHost == "127.0.0.1" || normalizedHost == "::1"
+}
+
 type ConfigValidationError struct {
 	MissingFields []string
 	InvalidFields map[string]string
 }
 
-func (err *ConfigValidationError) Error() string {
+func (validationError *ConfigValidationError) Error() string {
 	var errorStringBuilder strings.Builder
 	errorStringBuilder.WriteString("configuration validation failed:\n")
-	if len(err.MissingFields) > 0 {
-		errorStringBuilder.WriteString(fmt.Sprintf("  - missing required variables: %s\n", strings.Join(err.MissingFields, ", ")))
+	if len(validationError.MissingFields) > 0 {
+		errorStringBuilder.WriteString(fmt.Sprintf("  - missing required variables: %s\n", strings.Join(validationError.MissingFields, ", ")))
 	}
-	for fieldName, fieldError := range err.InvalidFields {
+	for fieldName, fieldError := range validationError.InvalidFields {
 		errorStringBuilder.WriteString(fmt.Sprintf("  - invalid variable %s: %s\n", fieldName, fieldError))
 	}
 	return errorStringBuilder.String()
@@ -70,6 +119,12 @@ func loadEnvFile(path string) error {
 		return err
 	}
 	defer file.Close()
+
+	if fileInfo, statErr := file.Stat(); statErr == nil && fileInfo.Mode().Perm()&0o077 != 0 {
+		if chmodErr := os.Chmod(path, 0o600); chmodErr != nil {
+			slog.Warn("Unable to tighten .env file permissions to 0600", "path", path, "error", chmodErr)
+		}
+	}
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -120,7 +175,7 @@ func findAndLoadEnvFile(paths ...string) (string, error) {
 		}
 	}
 
-	candidates := []string{
+	candidatePaths := []string{
 		".env",
 		".env.dev",
 		".env.local",
@@ -129,7 +184,7 @@ func findAndLoadEnvFile(paths ...string) (string, error) {
 		"algotrade-backend/.env",
 	}
 
-	for _, candidatePath := range candidates {
+	for _, candidatePath := range candidatePaths {
 		if fileInfo, err := os.Stat(candidatePath); err == nil && !fileInfo.IsDir() {
 			if err := loadEnvFile(candidatePath); err == nil {
 				return candidatePath, nil
@@ -166,68 +221,85 @@ func LoadAndValidate(paths ...string) (*Config, error) {
 		slog.Debug("Loaded environment configuration file", "path", loadedPath)
 	}
 
-	missing := make([]string, 0)
-	invalid := make(map[string]string)
+	missingVariables := make([]string, 0)
+	invalidConfigs := make(map[string]string)
 
-	getRequired := func(key string) string {
-		variableValue := strings.TrimSpace(os.Getenv(key))
+	getRequiredVariable := func(variableKey string) string {
+		variableValue := strings.TrimSpace(os.Getenv(variableKey))
 		if variableValue == "" {
-			missing = append(missing, key)
+			missingVariables = append(missingVariables, variableKey)
 		}
 		return variableValue
 	}
 
-	portStr := getRequired("PORT")
+	portStr := getRequiredVariable("PORT")
 	if portStr != "" {
 		portNum, err := strconv.Atoi(portStr)
 		if err != nil || portNum < 1024 || portNum > 65535 {
-			invalid["PORT"] = "must be a valid port number between 1024 and 65535"
+			invalidConfigs["PORT"] = "must be a valid port number between 1024 and 65535"
 		}
 	}
 
-	envStr := getRequired("ENV")
+	envStr := getRequiredVariable("ENV")
 	if envStr != "" {
 		envLower := strings.ToLower(envStr)
 		if envLower != "development" && envLower != "production" && envLower != "test" {
-			invalid["ENV"] = "must be 'development', 'production', or 'test'"
+			invalidConfigs["ENV"] = "must be 'development', 'production', or 'test'"
 		}
 	}
 
-	jwtSecretStr := getRequired("JWT_SECRET")
+	jwtSecretStr := getRequiredVariable("JWT_SECRET")
 	if jwtSecretStr != "" && len(jwtSecretStr) < 32 {
-		invalid["JWT_SECRET"] = "must be at least 32 characters long for HMAC-SHA256 cryptographic security"
+		invalidConfigs["JWT_SECRET"] = "must be at least 32 characters long for HMAC-SHA256 cryptographic security"
 	}
 
-	frontendURL := getRequired("FRONTEND_URL")
+	frontendURL := getRequiredVariable("FRONTEND_URL")
+	allowedOrigins := make([]string, 0)
 	if frontendURL != "" {
-		parsedURL, err := url.Parse(frontendURL)
-		if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
-			invalid["FRONTEND_URL"] = "must be a valid URL with scheme (e.g. http://localhost:3000)"
-		} else {
-			frontendURL = strings.TrimRight(frontendURL, "/")
+		rawOriginParts := strings.Split(frontendURL, ",")
+		for _, rawOriginPart := range rawOriginParts {
+			trimmedOrigin := strings.TrimRight(strings.TrimSpace(rawOriginPart), "/")
+			if trimmedOrigin == "" {
+				continue
+			}
+			if trimmedOrigin == "*" {
+				allowedOrigins = append(allowedOrigins, "*")
+				continue
+			}
+			parsedURL, parseErr := url.Parse(trimmedOrigin)
+			if parseErr != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Host == "" {
+				invalidConfigs["FRONTEND_URL"] = "must be one or more valid comma-separated URLs with scheme (e.g. http://localhost:3000)"
+				break
+			}
+			allowedOrigins = append(allowedOrigins, trimmedOrigin)
+		}
+		if len(allowedOrigins) == 0 && invalidConfigs["FRONTEND_URL"] == "" {
+			invalidConfigs["FRONTEND_URL"] = "must be a valid URL with scheme (e.g. http://localhost:3000)"
+		} else if len(allowedOrigins) > 0 {
+			frontendURL = allowedOrigins[0]
 		}
 	}
 
-	authUserEmail := getRequired("AUTH_USER_EMAIL")
+	authUserEmail := getRequiredVariable("AUTH_USER_EMAIL")
 	if authUserEmail != "" {
 		if !strings.Contains(authUserEmail, "@") || !strings.Contains(authUserEmail, ".") {
-			invalid["AUTH_USER_EMAIL"] = "must be a valid email address"
+			invalidConfigs["AUTH_USER_EMAIL"] = "must be a valid email address"
 		}
 	}
 
-	authUserPassword := getRequired("AUTH_USER_PASSWORD")
+	authUserPassword := getRequiredVariable("AUTH_USER_PASSWORD")
 	if authUserPassword != "" && len(authUserPassword) < 8 {
-		invalid["AUTH_USER_PASSWORD"] = "must be at least 8 characters long"
+		invalidConfigs["AUTH_USER_PASSWORD"] = "must be at least 8 characters long"
 	}
 
-	authUserName := getRequired("AUTH_USER_NAME")
-	authUserID := getRequired("AUTH_USER_ID")
-	authUserRole := getRequired("AUTH_USER_ROLE")
+	authUserName := getRequiredVariable("AUTH_USER_NAME")
+	authUserID := getRequiredVariable("AUTH_USER_ID")
+	authUserRole := getRequiredVariable("AUTH_USER_ROLE")
 
-	if len(missing) > 0 || len(invalid) > 0 {
+	if len(missingVariables) > 0 || len(invalidConfigs) > 0 {
 		return nil, &ConfigValidationError{
-			MissingFields: missing,
-			InvalidFields: invalid,
+			MissingFields: missingVariables,
+			InvalidFields: invalidConfigs,
 		}
 	}
 
@@ -249,6 +321,7 @@ func LoadAndValidate(paths ...string) (*Config, error) {
 		Port:               portStr,
 		JWTSecret:          []byte(jwtSecretStr),
 		FrontendURL:        frontendURL,
+		AllowedOrigins:     allowedOrigins,
 		Env:                envStr,
 		AccessTokenExpiry:  5 * time.Minute,
 		RefreshTokenExpiry: 24 * time.Hour,

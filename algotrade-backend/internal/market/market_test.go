@@ -9,72 +9,72 @@ import (
 	"github.com/ajaynegi33/AlgoTrade/internal/screener"
 )
 
-func TestStockMetricsAlignment(t *testing.T) {
+func TestStockMetricsAlignment(testingInstance *testing.T) {
 	size := unsafe.Sizeof(StockMetrics{})
 	if size%8 != 0 {
-		t.Fatalf("StockMetrics size (%d bytes) is not divisible by 8! Contains unaligned padding.", size)
+		testingInstance.Fatalf("StockMetrics size (%d bytes) is not divisible by 8! Contains unaligned padding.", size)
 	}
 	if size != 3976 {
-		t.Logf("StockMetrics size: %d bytes (aligned to 8-byte boundary)", size)
+		testingInstance.Logf("StockMetrics size: %d bytes (aligned to 8-byte boundary)", size)
 	}
 
 	barSize := unsafe.Sizeof(OHLCVBar{})
 	if barSize != 48 {
-		t.Fatalf("OHLCVBar size is %d, expected 48 bytes", barSize)
+		testingInstance.Fatalf("OHLCVBar size is %d, expected 48 bytes", barSize)
 	}
 }
 
-func TestBinaryParser(t *testing.T) {
+func TestBinaryParser(testingInstance *testing.T) {
 	// Construct a synthetic 184-byte equity packet
-	pkt := make([]byte, 184)
-	binary.BigEndian.PutUint32(pkt[0:4], 123456)             // Token
-	binary.BigEndian.PutUint32(pkt[4:8], 150000)             // LTP = 1500.00
-	binary.BigEndian.PutUint32(pkt[8:12], 100)               // LTQ
-	binary.BigEndian.PutUint32(pkt[12:16], 149500)           // VWAP = 1495.00
-	binary.BigEndian.PutUint32(pkt[16:20], 500000)           // Volume = 500,000
-	binary.BigEndian.PutUint32(pkt[28:32], 149000)           // Open = 1490.00
-	binary.BigEndian.PutUint32(pkt[32:36], 151000)           // High = 1510.00
-	binary.BigEndian.PutUint32(pkt[36:40], 148500)           // Low = 1485.00
-	binary.BigEndian.PutUint32(pkt[40:44], 148000)           // Close = 1480.00
-	binary.BigEndian.PutUint32(pkt[60:64], 1700000000)       // ExchTime
-	binary.BigEndian.PutUint32(pkt[64:68], 2000)             // Bid1 Qty
-	binary.BigEndian.PutUint32(pkt[68:72], 149995)           // Bid1 Price = 1499.95
-	binary.BigEndian.PutUint32(pkt[124:128], 1000)           // Ask1 Qty
-	binary.BigEndian.PutUint32(pkt[128:132], 150005)         // Ask1 Price = 1500.05
+	packetBytes := make([]byte, 184)
+	binary.BigEndian.PutUint32(packetBytes[0:4], 123456)       // Token
+	binary.BigEndian.PutUint32(packetBytes[4:8], 150000)       // LTP = 1500.00
+	binary.BigEndian.PutUint32(packetBytes[8:12], 100)         // LTQ
+	binary.BigEndian.PutUint32(packetBytes[12:16], 149500)     // VWAP = 1495.00
+	binary.BigEndian.PutUint32(packetBytes[16:20], 500000)     // Volume = 500,000
+	binary.BigEndian.PutUint32(packetBytes[28:32], 149000)     // Open = 1490.00
+	binary.BigEndian.PutUint32(packetBytes[32:36], 151000)     // High = 1510.00
+	binary.BigEndian.PutUint32(packetBytes[36:40], 148500)     // Low = 1485.00
+	binary.BigEndian.PutUint32(packetBytes[40:44], 148000)     // Close = 1480.00
+	binary.BigEndian.PutUint32(packetBytes[60:64], 1700000000) // ExchTime
+	binary.BigEndian.PutUint32(packetBytes[64:68], 2000)       // Bid1 Qty
+	binary.BigEndian.PutUint32(packetBytes[68:72], 149995)     // Bid1 Price = 1499.95
+	binary.BigEndian.PutUint32(packetBytes[124:128], 1000)     // Ask1 Qty
+	binary.BigEndian.PutUint32(packetBytes[128:132], 150005)   // Ask1 Price = 1500.05
 
 	// Wrap in Kite frame: [NumPackets=1 (2B)][Len=184 (2B)][Packet (184B)]
-	frame := make([]byte, 4+184)
-	binary.BigEndian.PutUint16(frame[0:2], 1)
-	binary.BigEndian.PutUint16(frame[2:4], 184)
-	copy(frame[4:], pkt)
+	frameBytes := make([]byte, 4+184)
+	binary.BigEndian.PutUint16(frameBytes[0:2], 1)
+	binary.BigEndian.PutUint16(frameBytes[2:4], 184)
+	copy(frameBytes[4:], packetBytes)
 
-	ticks := ParseBinaryFrame(frame)
+	ticks := ParseBinaryFrame(frameBytes)
 	if len(ticks) != 1 {
-		t.Fatalf("Expected 1 tick, got %d", len(ticks))
+		testingInstance.Fatalf("Expected 1 tick, got %d", len(ticks))
 	}
 
 	tick := ticks[0]
 	if tick.Token != 123456 {
-		t.Errorf("Expected token 123456, got %d", tick.Token)
+		testingInstance.Errorf("Expected token 123456, got %d", tick.Token)
 	}
 	if tick.LTP != 1500.00 {
-		t.Errorf("Expected LTP 1500.00, got %f", tick.LTP)
+		testingInstance.Errorf("Expected LTP 1500.00, got %f", tick.LTP)
 	}
 	if tick.VWAP != 1495.00 {
-		t.Errorf("Expected VWAP 1495.00, got %f", tick.VWAP)
+		testingInstance.Errorf("Expected VWAP 1495.00, got %f", tick.VWAP)
 	}
 	if tick.Volume != 500000 {
-		t.Errorf("Expected Volume 500000, got %d", tick.Volume)
+		testingInstance.Errorf("Expected Volume 500000, got %d", tick.Volume)
 	}
 	if tick.ExchangeTime != 1700000000 {
-		t.Errorf("Expected ExchangeTime 1700000000, got %d", tick.ExchangeTime)
+		testingInstance.Errorf("Expected ExchangeTime 1700000000, got %d", tick.ExchangeTime)
 	}
 	if tick.Bid1Price != 1499.95 || tick.Ask1Price != 1500.05 {
-		t.Errorf("Best quotes parsed incorrectly: Bid=%f, Ask=%f", tick.Bid1Price, tick.Ask1Price)
+		testingInstance.Errorf("Best quotes parsed incorrectly: Bid=%f, Ask=%f", tick.Bid1Price, tick.Ask1Price)
 	}
 }
 
-func TestGaussianVWAPSweetSpotAndCLV(t *testing.T) {
+func TestGaussianVWAPSweetSpotAndCLV(testingInstance *testing.T) {
 	stock := &StockMetrics{
 		LTP:                1002.50,
 		ExchangeVWAP:       1000.00,
@@ -103,23 +103,23 @@ func TestGaussianVWAPSweetSpotAndCLV(t *testing.T) {
 
 	score, ev, pWin, reasons := CalculateBullishScore(stock, 0.65)
 	if pWin < 0.65 {
-		t.Errorf("Expected high confluence pWin >= 0.65, got %f", pWin)
+		testingInstance.Errorf("Expected high confluence pWin >= 0.65, got %f", pWin)
 	}
 	if ev <= 0.20 {
-		t.Errorf("Expected positive EV >= 0.20R, got %f", ev)
+		testingInstance.Errorf("Expected positive EV >= 0.20R, got %f", ev)
 	}
 	if reasons&ReasonVWAPSweetSpot == 0 {
-		t.Errorf("Expected ReasonVWAPSweetSpot flag, got reasons: %b", reasons)
+		testingInstance.Errorf("Expected ReasonVWAPSweetSpot flag, got reasons: %b", reasons)
 	}
 	if reasons&ReasonOrderBookWall == 0 {
-		t.Errorf("Expected ReasonOrderBookWall flag, got reasons: %b", reasons)
+		testingInstance.Errorf("Expected ReasonOrderBookWall flag, got reasons: %b", reasons)
 	}
 	if score < 70.0 {
-		t.Errorf("Expected high BullishScore >= 70, got %f", score)
+		testingInstance.Errorf("Expected high BullishScore >= 70, got %f", score)
 	}
 }
 
-func TestOpeningRange15mHelper(t *testing.T) {
+func TestOpeningRange15mHelper(testingInstance *testing.T) {
 	stock := &StockMetrics{CurrentBarIdx: 4}
 	stock.SessionBars[0] = OHLCVBar{High: 105.0, Low: 99.0}
 	stock.SessionBars[1] = OHLCVBar{High: 107.5, Low: 101.0}
@@ -127,17 +127,17 @@ func TestOpeningRange15mHelper(t *testing.T) {
 
 	orh, orl, ready := stock.OpeningRange15m()
 	if !ready {
-		t.Fatalf("Expected ready=true for CurrentBarIdx >= 3")
+		testingInstance.Fatalf("Expected ready=true for CurrentBarIdx >= 3")
 	}
 	if orh != 107.5 {
-		t.Errorf("Expected ORH 107.5, got %f", orh)
+		testingInstance.Errorf("Expected ORH 107.5, got %f", orh)
 	}
 	if orl != 98.5 {
-		t.Errorf("Expected ORL 98.5, got %f", orl)
+		testingInstance.Errorf("Expected ORL 98.5, got %f", orl)
 	}
 }
 
-func TestSectorRestriction(t *testing.T) {
+func TestSectorRestriction(testingInstance *testing.T) {
 	health := SectorHealth{
 		SectorID:          screener.SectorIT,
 		SectorName:        "IT",
@@ -148,14 +148,14 @@ func TestSectorRestriction(t *testing.T) {
 	}
 
 	if !health.IsRestricted {
-		t.Fatalf("Expected IT sector to be restricted")
+		testingInstance.Fatalf("Expected IT sector to be restricted")
 	}
 	if health.BreadthAboveVWAP >= 40.0 {
-		t.Errorf("Expected breadth < 40%%, got %f", health.BreadthAboveVWAP)
+		testingInstance.Errorf("Expected breadth < 40%%, got %f", health.BreadthAboveVWAP)
 	}
 }
 
-func TestGetStockDetail_ETERNAL(t *testing.T) {
+func TestGetStockDetail_ETERNAL(testingInstance *testing.T) {
 	actor := NewActor(nil, nil, nil, nil, nil)
 	idx := actor.registerTrackedStock(1304833, "ETERNAL", 1, 0.05)
 	stock := &actor.stocks[idx]
@@ -168,38 +168,38 @@ func TestGetStockDetail_ETERNAL(t *testing.T) {
 	// 1. Exact match lookup
 	detail, found := actor.GetStockDetail("ETERNAL")
 	if !found || detail == nil {
-		t.Fatalf("Expected GetStockDetail(ETERNAL) to return true, got false")
+		testingInstance.Fatalf("Expected GetStockDetail(ETERNAL) to return true, got false")
 	}
 	if detail.Symbol != "ETERNAL" {
-		t.Errorf("Expected symbol ETERNAL, got %s", detail.Symbol)
+		testingInstance.Errorf("Expected symbol ETERNAL, got %s", detail.Symbol)
 	}
 	if detail.Token != 1304833 {
-		t.Errorf("Expected token 1304833, got %d", detail.Token)
+		testingInstance.Errorf("Expected token 1304833, got %d", detail.Token)
 	}
 	if detail.Bids[0].Price != 325.80 {
-		t.Errorf("Expected rounded Bid price 325.80, got %f", detail.Bids[0].Price)
+		testingInstance.Errorf("Expected rounded Bid price 325.80, got %f", detail.Bids[0].Price)
 	}
 
 	// 2. Case invariance lookup
 	detailLower, foundLower := actor.GetStockDetail("eternal")
 	if !foundLower || detailLower == nil {
-		t.Fatalf("Expected GetStockDetail(eternal) to be case-insensitive, got false")
+		testingInstance.Fatalf("Expected GetStockDetail(eternal) to be case-insensitive, got false")
 	}
 
 	// 3. Whitespace invariance lookup
 	detailSpace, foundSpace := actor.GetStockDetail("  ETERNAL  ")
 	if !foundSpace || detailSpace == nil {
-		t.Fatalf("Expected GetStockDetail('  ETERNAL  ') to handle whitespace, got false")
+		testingInstance.Fatalf("Expected GetStockDetail('  ETERNAL  ') to handle whitespace, got false")
 	}
 
 	// 4. Non-existent symbol lookup
 	_, foundMissing := actor.GetStockDetail("INVALID_XYZ")
 	if foundMissing {
-		t.Errorf("Expected GetStockDetail(INVALID_XYZ) to return false, got true")
+		testingInstance.Errorf("Expected GetStockDetail(INVALID_XYZ) to return false, got true")
 	}
 }
 
-func TestApplyBaselineProfileBackfillsTodayBarsAndOR15m(t *testing.T) {
+func TestApplyBaselineProfileBackfillsTodayBarsAndOR15m(testingInstance *testing.T) {
 	actor := NewActor(nil, nil, nil, nil, nil)
 	actor.initializeTodayEpoch()
 	idx := actor.registerTrackedStock(779521, "SBIN", screener.SectorBank, 0.05)
@@ -221,25 +221,25 @@ func TestApplyBaselineProfileBackfillsTodayBarsAndOR15m(t *testing.T) {
 
 	stock := &actor.stocks[idx]
 	if !stock.IsWarm {
-		t.Fatalf("expected stock.IsWarm=true after applying non-fallback profile")
+		testingInstance.Fatalf("expected stock.IsWarm=true after applying non-fallback profile")
 	}
 	orh, orl, ready := stock.OpeningRange15m()
 	if !ready || orh != 806.5 || orl != 798.5 {
-		t.Fatalf("expected 15m ORB backfilled (ready=true, ORH=806.5, ORL=798.5), got ready=%v ORH=%.2f ORL=%.2f", ready, orh, orl)
+		testingInstance.Fatalf("expected 15m ORB backfilled (ready=true, ORH=806.5, ORL=798.5), got ready=%v ORH=%.2f ORL=%.2f", ready, orh, orl)
 	}
 }
 
-func TestSnapshotPublisher_FlashShockRegime(t *testing.T) {
+func TestSnapshotPublisher_FlashShockRegime(testingInstance *testing.T) {
 	actor := NewActor(nil, nil, nil, nil, nil)
 	actor.initializeTodayEpoch()
 
 	// Register 10 stocks: 1 above VWAP (10% breadth <= 20%)
-	for i := 0; i < 10; i++ {
-		idx := actor.registerTrackedStock(uint32(10000+i), "TEST", screener.SectorNifty50, 0.05)
+	for stockOffset := 0; stockOffset < 10; stockOffset++ {
+		idx := actor.registerTrackedStock(uint32(10000+stockOffset), "TEST", screener.SectorNifty50, 0.05)
 		stock := &actor.stocks[idx]
 		stock.IsTradeable = true
 		stock.ExchangeVWAP = 100.0
-		if i == 0 {
+		if stockOffset == 0 {
 			stock.LTP = 105.0 // Above VWAP
 		} else {
 			stock.LTP = 95.0 // Below VWAP
@@ -262,7 +262,7 @@ func TestSnapshotPublisher_FlashShockRegime(t *testing.T) {
 	}
 	breadthRatio := float64(aboveVWAPCount) / float64(activeQuotedCount)
 	if breadthRatio > 0.20 {
-		t.Fatalf("expected breadth <= 0.20, got %.2f", breadthRatio)
+		testingInstance.Fatalf("expected breadth <= 0.20, got %.2f", breadthRatio)
 	}
 }
 

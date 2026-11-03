@@ -148,8 +148,19 @@ func buildRouter(
 	mux.Handle("GET /api/diagnostics/flight-recorder/traces/{filename}", requireAuth(http.HandlerFunc(diagnosticsHandler.DownloadTrace)))
 
 	// Wrap Global Middlewares: Recovery -> CORS -> Router
+	if wsHub != nil && cfg != nil {
+		if len(cfg.AllowedOrigins) > 0 {
+			wsHub.SetAllowedOrigins(cfg.AllowedOrigins...)
+		} else if cfg.FrontendURL != "" {
+			wsHub.SetAllowedOrigins(cfg.FrontendURL)
+		}
+	}
 	var rootHandler http.Handler = mux
-	rootHandler = auth.CORSMiddleware(cfg.FrontendURL)(rootHandler)
+	if len(cfg.AllowedOrigins) > 0 {
+		rootHandler = auth.CORSMiddleware(cfg.AllowedOrigins...)(rootHandler)
+	} else {
+		rootHandler = auth.CORSMiddleware(cfg.FrontendURL)(rootHandler)
+	}
 	rootHandler = auth.RecoveryMiddleware(rootHandler)
 
 	return rootHandler

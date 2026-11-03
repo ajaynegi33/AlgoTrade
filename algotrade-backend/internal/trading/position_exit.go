@@ -49,14 +49,14 @@ func (worker *PositionWorker) processPendingWork() {
 		hasStopLossOrder := worker.slOrderID != ""
 		stopLossOrderQuantity := worker.slOrderQty
 		worker.mu.RUnlock()
-		filledEntryQuantity := int(worker.filledEntryQty.Load())
+		remainingOpenShares := worker.RemainingQty()
 		if !hasStopLossOrder {
 			worker.PlaceInitialStopLossOrderIfNotPlaced()
 			if worker.isClosed.Load() || worker.isMarketExitPending.Load() {
 				return
 			}
-		} else if filledEntryQuantity > stopLossOrderQuantity && !worker.hasBreakevenCompleted.Load() && worker.modCount.Load() < MaxSafetyModifications {
-			// Incremental fill arrived while SL is active: resize SL to cover all filled shares
+		} else if remainingOpenShares > stopLossOrderQuantity && worker.modCount.Load() < MaxSafetyModifications {
+			// Incremental fill arrived while SL is active: resize SL to cover all remaining open shares
 			confirmedStopLossPrice := math.Float64frombits(worker.confirmedStopBits.Load())
 			sellLimitPrice := CalculateProtectiveLimitPriceBelowStop(confirmedStopLossPrice, worker.TickSize)
 			lastTradedPrice := worker.LatestLTP()
@@ -64,9 +64,9 @@ func (worker *PositionWorker) processPendingWork() {
 			stopLossOrderID := worker.slOrderID
 			worker.mu.RUnlock()
 			if stopLossOrderID != "" {
-				if err := worker.broker.ModifySLOrder(worker.ctx, stopLossOrderID, filledEntryQuantity, confirmedStopLossPrice, sellLimitPrice, lastTradedPrice, worker.TickSize); err == nil {
+				if err := worker.broker.ModifySLOrder(worker.ctx, stopLossOrderID, remainingOpenShares, confirmedStopLossPrice, sellLimitPrice, lastTradedPrice, worker.TickSize); err == nil {
 					worker.mu.Lock()
-					worker.slOrderQty = filledEntryQuantity
+					worker.slOrderQty = remainingOpenShares
 					worker.mu.Unlock()
 					worker.modCount.Add(1)
 					worker.lastModUnixMs.Store(time.Now().UnixMilli())
@@ -104,6 +104,7 @@ func (worker *PositionWorker) processPendingWork() {
 	sellLimitPrice := CalculateProtectiveLimitPriceBelowStop(targetTriggerPrice, worker.TickSize)
 	err := worker.broker.ModifySLOrder(worker.ctx, stopLossOrderID, remainingQuantity, targetTriggerPrice, sellLimitPrice, lastTradedPrice, worker.TickSize)
 	if err != nil {
+		worker.proposedStopBits.Store(worker.confirmedStopBits.Load())
 		slog.Warn("SL ratchet modification rejected by broker", "symbol", worker.Symbol, "target", targetTriggerPrice, "error", err)
 		return
 	}

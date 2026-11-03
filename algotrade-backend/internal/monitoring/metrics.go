@@ -320,8 +320,8 @@ func ComputeEODMetrics(db *sql.DB, tradingDate string) (*EODReportSummary, error
 		}
 		report.SlippageRecords = append(report.SlippageRecords, rec)
 	}
-	sort.Slice(report.SlippageRecords, func(i, j int) bool {
-		return report.SlippageRecords[i].AvgSlippagePct > report.SlippageRecords[j].AvgSlippagePct
+	sort.Slice(report.SlippageRecords, func(recordIndexA, recordIndexB int) bool {
+		return report.SlippageRecords[recordIndexA].AvgSlippagePct > report.SlippageRecords[recordIndexB].AvgSlippagePct
 	})
 
 	// 5. Gear Attribution Records

@@ -12,11 +12,11 @@ import (
 	"time"
 )
 
-func TestFlightRecorderLifecycleAndDump(t *testing.T) {
-	temporaryDirectory := t.TempDir()
+func TestFlightRecorderLifecycleAndDump(testingInstance *testing.T) {
+	temporaryDirectory := testingInstance.TempDir()
 
 	testConfiguration := FlightRecorderConfig{
-		Enabled:               true,
+		IsEnabled:             true,
 		TraceDirectory:        temporaryDirectory,
 		MaxRingBufferBytes:    2 * 1024 * 1024,
 		MinEventAge:           1 * time.Second,
@@ -31,7 +31,7 @@ func TestFlightRecorderLifecycleAndDump(t *testing.T) {
 	defer cancelParentContext()
 
 	if startError := flightRecorderManager.Start(parentContext); startError != nil {
-		t.Fatalf("failed to start flight recorder: %v", startError)
+		testingInstance.Fatalf("failed to start flight recorder: %v", startError)
 	}
 	defer func() {
 		_ = flightRecorderManager.Stop()
@@ -40,7 +40,7 @@ func TestFlightRecorderLifecycleAndDump(t *testing.T) {
 	// 1. Verify status while running
 	initialStatus := flightRecorderManager.GetStatus()
 	if !initialStatus.IsRunning || !initialStatus.IsEnabled {
-		t.Fatalf("expected flight recorder to be running and enabled, got %+v", initialStatus)
+		testingInstance.Fatalf("expected flight recorder to be running and enabled, got %+v", initialStatus)
 	}
 
 	// 2. Below threshold latency should NOT trigger a dump
@@ -49,7 +49,7 @@ func TestFlightRecorderLifecycleAndDump(t *testing.T) {
 
 	summariesAfterBelowThreshold, _, _ := listTraceSummaries(temporaryDirectory)
 	if len(summariesAfterBelowThreshold) != 0 {
-		t.Fatalf("expected 0 traces for below-threshold latency, got %d", len(summariesAfterBelowThreshold))
+		testingInstance.Fatalf("expected 0 traces for below-threshold latency, got %d", len(summariesAfterBelowThreshold))
 	}
 
 	// 3. Above threshold latency SHOULD trigger a snapshot
@@ -68,31 +68,31 @@ func TestFlightRecorderLifecycleAndDump(t *testing.T) {
 	}
 
 	if len(foundTraces) == 0 {
-		t.Fatalf("expected at least 1 trace snapshot to be written to disk, found 0")
+		testingInstance.Fatalf("expected at least 1 trace snapshot to be written to disk, found 0")
 	}
 
 	savedSnapshot := foundTraces[0]
 	if savedSnapshot.FileSizeBytes <= 0 {
-		t.Fatalf("expected positive trace file size, got %d", savedSnapshot.FileSizeBytes)
+		testingInstance.Fatalf("expected positive trace file size, got %d", savedSnapshot.FileSizeBytes)
 	}
 
 	// 4. Verify companion JSON metadata file exists and contains correct information
 	expectedMetadataPath := filepath.Join(temporaryDirectory, strings.TrimSuffix(savedSnapshot.FileName, ".trace")+".json")
 	metadataBytes, readMetadataError := os.ReadFile(expectedMetadataPath)
 	if readMetadataError != nil {
-		t.Fatalf("expected companion metadata file at %s: %v", expectedMetadataPath, readMetadataError)
+		testingInstance.Fatalf("expected companion metadata file at %s: %v", expectedMetadataPath, readMetadataError)
 	}
 
 	var parsedMetadata TraceMetadata
 	if unmarshalError := json.Unmarshal(metadataBytes, &parsedMetadata); unmarshalError != nil {
-		t.Fatalf("failed to unmarshal companion metadata: %v", unmarshalError)
+		testingInstance.Fatalf("failed to unmarshal companion metadata: %v", unmarshalError)
 	}
 
 	if parsedMetadata.TriggerReason != "test_spike_anomaly" {
-		t.Errorf("expected TriggerReason 'test_spike_anomaly', got '%s'", parsedMetadata.TriggerReason)
+		testingInstance.Errorf("expected TriggerReason 'test_spike_anomaly', got '%s'", parsedMetadata.TriggerReason)
 	}
 	if parsedMetadata.MeasuredLatencyMs < 100.0 {
-		t.Errorf("expected MeasuredLatencyMs >= 100.0, got %f", parsedMetadata.MeasuredLatencyMs)
+		testingInstance.Errorf("expected MeasuredLatencyMs >= 100.0, got %f", parsedMetadata.MeasuredLatencyMs)
 	}
 
 	// 5. Test Cooldown / Debounce: another spike immediately within 100ms cooldown should be dropped
@@ -101,12 +101,12 @@ func TestFlightRecorderLifecycleAndDump(t *testing.T) {
 
 	statusAfterCooldownTest := flightRecorderManager.GetStatus()
 	if statusAfterCooldownTest.DroppedSpikeCount == 0 {
-		t.Errorf("expected dropped spikes counter to increment during cooldown, got %d", statusAfterCooldownTest.DroppedSpikeCount)
+		testingInstance.Errorf("expected dropped spikes counter to increment during cooldown, got %d", statusAfterCooldownTest.DroppedSpikeCount)
 	}
 }
 
-func TestRetentionPruning(t *testing.T) {
-	temporaryDirectory := t.TempDir()
+func TestRetentionPruning(testingInstance *testing.T) {
+	temporaryDirectory := testingInstance.TempDir()
 
 	// Create 8 dummy trace files with varying timestamps
 	baseTime := time.Now().Add(-10 * time.Hour)
@@ -124,20 +124,20 @@ func TestRetentionPruning(t *testing.T) {
 	// Prune to maximum of 4 files
 	maxRetainedFiles := 4
 	if pruneError := pruneRetainedTraces(temporaryDirectory, maxRetainedFiles, 100*1024*1024); pruneError != nil {
-		t.Fatalf("pruneRetainedTraces failed: %v", pruneError)
+		testingInstance.Fatalf("pruneRetainedTraces failed: %v", pruneError)
 	}
 
 	remainingSummaries, _, _ := listTraceSummaries(temporaryDirectory)
 	if len(remainingSummaries) != maxRetainedFiles {
-		t.Fatalf("expected exactly %d remaining traces, got %d", maxRetainedFiles, len(remainingSummaries))
+		testingInstance.Fatalf("expected exactly %d remaining traces, got %d", maxRetainedFiles, len(remainingSummaries))
 	}
 }
 
-func TestDiagnosticsHandlerHTTP(t *testing.T) {
-	temporaryDirectory := t.TempDir()
+func TestDiagnosticsHandlerHTTP(testingInstance *testing.T) {
+	temporaryDirectory := testingInstance.TempDir()
 
 	testConfiguration := FlightRecorderConfig{
-		Enabled:               true,
+		IsEnabled:             true,
 		TraceDirectory:        temporaryDirectory,
 		MaxRingBufferBytes:    2 * 1024 * 1024,
 		MinEventAge:           1 * time.Second,
@@ -149,7 +149,7 @@ func TestDiagnosticsHandlerHTTP(t *testing.T) {
 
 	flightRecorderManager := NewFlightRecorderManager(testConfiguration)
 	if startError := flightRecorderManager.Start(context.Background()); startError != nil {
-		t.Fatalf("failed to start flight recorder: %v", startError)
+		testingInstance.Fatalf("failed to start flight recorder: %v", startError)
 	}
 	defer func() {
 		_ = flightRecorderManager.Stop()
@@ -163,7 +163,7 @@ func TestDiagnosticsHandlerHTTP(t *testing.T) {
 	diagnosticsHandler.GetStatus(statusResponseRecorder, statusRequest)
 
 	if statusResponseRecorder.Code != http.StatusOK {
-		t.Fatalf("expected status 200 OK, got %d", statusResponseRecorder.Code)
+		testingInstance.Fatalf("expected status 200 OK, got %d", statusResponseRecorder.Code)
 	}
 
 	// 2. Test POST /dump (Manual on-demand trigger)
@@ -172,7 +172,7 @@ func TestDiagnosticsHandlerHTTP(t *testing.T) {
 	diagnosticsHandler.TriggerManualDump(manualDumpResponseRecorder, manualDumpRequest)
 
 	if manualDumpResponseRecorder.Code != http.StatusOK {
-		t.Fatalf("expected status 200 OK for manual dump, got %d body: %s", manualDumpResponseRecorder.Code, manualDumpResponseRecorder.Body.String())
+		testingInstance.Fatalf("expected status 200 OK for manual dump, got %d body: %s", manualDumpResponseRecorder.Code, manualDumpResponseRecorder.Body.String())
 	}
 
 	// 3. Test GET /traces
@@ -181,13 +181,13 @@ func TestDiagnosticsHandlerHTTP(t *testing.T) {
 	diagnosticsHandler.ListTraces(listResponseRecorder, listRequest)
 
 	if listResponseRecorder.Code != http.StatusOK {
-		t.Fatalf("expected status 200 OK for list traces, got %d", listResponseRecorder.Code)
+		testingInstance.Fatalf("expected status 200 OK for list traces, got %d", listResponseRecorder.Code)
 	}
 
 	// 4. Test safe path resolution & download
 	summaries, _, _ := listTraceSummaries(temporaryDirectory)
 	if len(summaries) == 0 {
-		t.Fatalf("expected at least 1 trace to download")
+		testingInstance.Fatalf("expected at least 1 trace to download")
 	}
 
 	validTraceFileName := summaries[0].FileName
@@ -197,10 +197,10 @@ func TestDiagnosticsHandlerHTTP(t *testing.T) {
 	diagnosticsHandler.DownloadTrace(downloadResponseRecorder, downloadRequest)
 
 	if downloadResponseRecorder.Code != http.StatusOK {
-		t.Fatalf("expected status 200 OK for download, got %d", downloadResponseRecorder.Code)
+		testingInstance.Fatalf("expected status 200 OK for download, got %d", downloadResponseRecorder.Code)
 	}
 	if downloadResponseRecorder.Header().Get("Content-Type") != "application/octet-stream" {
-		t.Errorf("expected application/octet-stream, got %s", downloadResponseRecorder.Header().Get("Content-Type"))
+		testingInstance.Errorf("expected application/octet-stream, got %s", downloadResponseRecorder.Header().Get("Content-Type"))
 	}
 
 	// 5. Test directory traversal attack prevention
@@ -210,7 +210,7 @@ func TestDiagnosticsHandlerHTTP(t *testing.T) {
 	diagnosticsHandler.DownloadTrace(unsafeResponseRecorder, unsafeRequest)
 
 	if unsafeResponseRecorder.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 Bad Request for unsafe filename, got %d", unsafeResponseRecorder.Code)
+		testingInstance.Fatalf("expected 400 Bad Request for unsafe filename, got %d", unsafeResponseRecorder.Code)
 	}
 }
 

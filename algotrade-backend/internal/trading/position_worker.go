@@ -95,31 +95,31 @@ type PositionWorker struct {
 	paperBroker    *PaperBroker
 	reconciler     *OrderReconciler
 	db             *sql.DB
-	getStockPtr    func() *market.StockMetrics
-	onClosed       func(w *PositionWorker)
+	getStockPtr          func() *market.StockMetrics
+	onClosed             func(worker *PositionWorker)
 	entryTimeoutDuration time.Duration
-	ctx            context.Context
-	cancel         context.CancelFunc
+	ctx                  context.Context
+	cancel               context.CancelFunc
 }
 
 type WorkerConfig struct {
-	PositionID   string
-	TradingDate  string
-	Mode         string
-	Symbol       string
-	Token        uint32
-	StockIndex   uint16
-	PatternType  string
-	TickSize     float64
-	MISLeverage  float64
-	EntryBarIdx  uint8
-	Sizing       SizingDecision
-	Broker       ExecutionBroker
-	PaperBroker  *PaperBroker
-	Reconciler   *OrderReconciler
-	DB           *sql.DB
-	GetStockPtr  func() *market.StockMetrics
-	OnClosed     func(w *PositionWorker)
+	PositionID           string
+	TradingDate          string
+	Mode                 string
+	Symbol               string
+	Token                uint32
+	StockIndex           uint16
+	PatternType          string
+	TickSize             float64
+	MISLeverage          float64
+	EntryBarIdx          uint8
+	Sizing               SizingDecision
+	Broker               ExecutionBroker
+	PaperBroker          *PaperBroker
+	Reconciler           *OrderReconciler
+	DB                   *sql.DB
+	GetStockPtr          func() *market.StockMetrics
+	OnClosed             func(worker *PositionWorker)
 	EntryTimeoutDuration time.Duration
 }
 
@@ -337,6 +337,13 @@ func (worker *PositionWorker) OnOrderDelta(legType string, orderEvent OrderUpdat
 			worker.entryCostRupees += float64(deltaFilled) * fillPx
 			worker.EntryPrice = worker.entryCostRupees / float64(newEntry)
 			worker.entryPriceBits.Store(math.Float64bits(worker.EntryPrice))
+			filledShareCount := int(newEntry)
+			updatedBreakevenStop := CalculateTaxCoveringBreakevenStop(worker.EntryPrice, filledShareCount, filledShareCount, worker.TickSize)
+			worker.BreakevenStop = updatedBreakevenStop
+			worker.breakevenStopBits.Store(math.Float64bits(updatedBreakevenStop))
+			if worker.InitialStop > 0 && worker.EntryPrice > worker.InitialStop {
+				worker.OneR = RoundToTick(worker.EntryPrice-worker.InitialStop, worker.TickSize)
+			}
 
 			if prevEntry == 0 {
 				worker.highWaterMarkBits.Store(math.Float64bits(fillPx))
@@ -548,7 +555,7 @@ func (worker *PositionWorker) handleEntryTimeout() {
 		return
 	}
 
-	runnerQty := max(1, filled-(filled/2))
+	runnerQty := max(1, filled)
 	beStop := CalculateTaxCoveringBreakevenStop(worker.GetEntryPrice(), filled, runnerQty, worker.TickSize)
 	worker.mu.Lock()
 	worker.InitialQty = filled
@@ -559,15 +566,16 @@ func (worker *PositionWorker) handleEntryTimeout() {
 	worker.mu.Unlock()
 	worker.breakevenStopBits.Store(math.Float64bits(beStop))
 
+	remainingShares := worker.RemainingQty()
 	if !hasSL {
 		worker.PlaceInitialStopLossOrderIfNotPlaced()
-	} else if filled > slQty && !worker.hasBreakevenCompleted.Load() && worker.modCount.Load() < MaxSafetyModifications {
+	} else if remainingShares > slQty && worker.modCount.Load() < MaxSafetyModifications {
 		curStop := math.Float64frombits(worker.confirmedStopBits.Load())
 		limitPx := CalculateProtectiveLimitPriceBelowStop(curStop, worker.TickSize)
 		ltp := worker.LatestLTP()
-		if err := worker.broker.ModifySLOrder(worker.ctx, slOrderID, filled, curStop, limitPx, ltp, worker.TickSize); err == nil {
+		if err := worker.broker.ModifySLOrder(worker.ctx, slOrderID, remainingShares, curStop, limitPx, ltp, worker.TickSize); err == nil {
 			worker.mu.Lock()
-			worker.slOrderQty = filled
+			worker.slOrderQty = remainingShares
 			worker.mu.Unlock()
 			worker.modCount.Add(1)
 			worker.lastModUnixMs.Store(time.Now().UnixMilli())
@@ -588,6 +596,10 @@ func (worker *PositionWorker) ToDTO() market.ActivePositionDTO {
 	beStop := worker.BreakevenStop
 	initQty := worker.InitialQty
 	exitProceeds := worker.exitProceeds
+	effectiveOneR := worker.OneR
+	if effectiveOneR <= 0 && worker.InitialStop > 0 && entryPx > worker.InitialStop {
+		effectiveOneR = entryPx - worker.InitialStop
+	}
 	worker.mu.RUnlock()
 
 	ltp := worker.LatestLTP()
@@ -601,11 +613,11 @@ func (worker *PositionWorker) ToDTO() market.ActivePositionDTO {
 	hasTranche1Completed := worker.hasBreakevenCompleted.Load()
 
 	var rMult, mfeR, maeR float64
-	if worker.OneR > 0 {
-		rMult = (ltp - entryPx) / worker.OneR
-		mfeR = (hwm - entryPx) / worker.OneR
+	if effectiveOneR > 0 {
+		rMult = (ltp - entryPx) / effectiveOneR
+		mfeR = (hwm - entryPx) / effectiveOneR
 		if lwm > 0 {
-			maeR = (lwm - entryPx) / worker.OneR
+			maeR = (lwm - entryPx) / effectiveOneR
 			if maeR > 0 {
 				maeR = 0
 			}
@@ -631,7 +643,7 @@ func (worker *PositionWorker) ToDTO() market.ActivePositionDTO {
 	gearLabel := "GEAR 1: AGILE DYNAMIC"
 	switch gear {
 	case 2:
-		gearLabel = "GEAR 2: 50% BANKED + BE"
+		gearLabel = "GEAR 2: BREAKEVEN + 5M TRAIL"
 	case 3:
 		gearLabel = "GEAR 3: COARSE 5M TRAIL"
 	case 4:

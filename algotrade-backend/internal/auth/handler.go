@@ -130,7 +130,7 @@ func (handler *Handler) Login(writer http.ResponseWriter, request *http.Request)
 		Expires:  time.Now().Add(handler.cfg.RefreshTokenExpiry),
 		MaxAge:   int(handler.cfg.RefreshTokenExpiry.Seconds()),
 		HttpOnly: true,
-		Secure:   handler.cfg.IsProduction,
+		Secure:   shouldUseSecureCookie(request, handler.cfg),
 		SameSite: http.SameSiteLaxMode,
 	})
 
@@ -203,7 +203,7 @@ func (handler *Handler) Refresh(writer http.ResponseWriter, request *http.Reques
 		Expires:  time.Now().Add(handler.cfg.RefreshTokenExpiry),
 		MaxAge:   int(handler.cfg.RefreshTokenExpiry.Seconds()),
 		HttpOnly: true,
-		Secure:   handler.cfg.IsProduction,
+		Secure:   shouldUseSecureCookie(request, handler.cfg),
 		SameSite: http.SameSiteLaxMode,
 	})
 
@@ -230,9 +230,24 @@ func (handler *Handler) Logout(writer http.ResponseWriter, request *http.Request
 		Expires:  time.Unix(0, 0),
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   handler.cfg.IsProduction,
+		Secure:   shouldUseSecureCookie(request, handler.cfg),
 		SameSite: http.SameSiteLaxMode,
 	})
 
 	response.Message(writer, http.StatusOK, "Successfully logged out")
+}
+
+// shouldUseSecureCookie determines whether the refresh_token cookie should set the Secure attribute.
+// Browsers reject Secure cookies over plain HTTP on non-localhost IPs (such as http://52.66.202.136:3000),
+// so Secure is enabled only when the transport or origin is HTTPS.
+func shouldUseSecureCookie(request *http.Request, cfg *config.Config) bool {
+	if request != nil {
+		if request.TLS != nil || strings.EqualFold(request.Header.Get("X-Forwarded-Proto"), "https") {
+			return true
+		}
+		if originHeader := strings.TrimSpace(request.Header.Get("Origin")); originHeader != "" {
+			return strings.HasPrefix(strings.ToLower(originHeader), "https://")
+		}
+	}
+	return cfg != nil && cfg.IsProduction && strings.HasPrefix(strings.ToLower(cfg.FrontendURL), "https://")
 }

@@ -19,6 +19,10 @@ func (dispatcher *CentralKiteDispatcher) ExecuteRequest(
 	if executionContext == nil {
 		executionContext = context.Background()
 	}
+	if executionContext.Err() != nil {
+		dispatcher.droppedStaleCount.Add(1)
+		return nil, executionContext.Err()
+	}
 
 	requestID := fmt.Sprintf("REQ-%d", time.Now().UnixNano())
 	responseChannel := make(chan KiteResponseEnvelope, 1)
@@ -43,6 +47,8 @@ func (dispatcher *CentralKiteDispatcher) ExecuteRequest(
 		return responseEnvelope.ResponseData, responseEnvelope.ResponseError
 	case <-executionContext.Done():
 		return nil, executionContext.Err()
+	case <-dispatcher.dispatcherContext.Done():
+		return nil, ErrDispatcherStopped
 	}
 }
 

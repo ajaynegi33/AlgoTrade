@@ -17,11 +17,11 @@ import (
 
 // ExecutionSettings holds persisted configuration for Paper vs Live execution
 type ExecutionSettings struct {
-	Mode             string  `json:"mode"`               // "PAPER" | "LIVE"
-	AutoExecute      bool    `json:"auto_execute"`       // Whether autonomous signal entry is armed
-	PaperCapital     float64 `json:"paper_capital"`      // Virtual capital (₹500 to ₹10Cr+)
-	RiskPerTradePct  float64 `json:"risk_per_trade_pct"` // Default 0.005 (0.50%)
-	MaxOpenPositions int     `json:"max_open_positions"` // Default 4
+	Mode                 string  `json:"mode"`               // "PAPER" | "LIVE"
+	IsAutoExecuteEnabled bool    `json:"auto_execute"`       // Whether autonomous signal entry is armed
+	PaperCapital         float64 `json:"paper_capital"`      // Virtual capital (₹500 to ₹10Cr+)
+	RiskPerTradePct      float64 `json:"risk_per_trade_pct"` // Default 0.005 (0.50%)
+	MaxOpenPositions     int     `json:"max_open_positions"` // Default 4
 }
 
 // RiskReservation represents an atomic in-flight risk and margin allocation
@@ -64,11 +64,11 @@ func NewCapitalManager(db *sql.DB, kiteService *kite.Service) *CapitalManager {
 		kiteService: kiteService,
 		tradingDate: todayStr,
 		settings: ExecutionSettings{
-			Mode:             "PAPER",
-			AutoExecute:      false,
-			PaperCapital:     100000.0,
-			RiskPerTradePct:  0.005,
-			MaxOpenPositions: 4,
+			Mode:                 "PAPER",
+			IsAutoExecuteEnabled: false,
+			PaperCapital:         100000.0,
+			RiskPerTradePct:      0.005,
+			MaxOpenPositions:     4,
 		},
 		activeReservations:  make(map[string]RiskReservation),
 		dailyLedger:         make(map[string]*market.DailyRiskDTO),
@@ -101,7 +101,7 @@ func (capitalManager *CapitalManager) loadFromDatabase() {
 		if mode == "LIVE" || mode == "PAPER" {
 			capitalManager.settings.Mode = mode
 		}
-		capitalManager.settings.AutoExecute = isAutoExecuteFlag != 0
+		capitalManager.settings.IsAutoExecuteEnabled = isAutoExecuteFlag != 0
 		if paperCapital >= 500.0 {
 			capitalManager.settings.PaperCapital = paperCapital
 		}
@@ -243,8 +243,9 @@ func (capitalManager *CapitalManager) UpdateSettings(newSettings ExecutionSettin
 	if newSettings.Mode != "PAPER" && newSettings.Mode != "LIVE" {
 		return errors.New("mode must be 'PAPER' or 'LIVE'")
 	}
-	if newSettings.Mode != capitalManager.settings.Mode && activeOpenCount > 0 {
-		return fmt.Errorf("cannot switch mode from %s to %s while %d position(s) are open", capitalManager.settings.Mode, newSettings.Mode, activeOpenCount)
+	if newSettings.Mode != capitalManager.settings.Mode && (activeOpenCount > 0 || len(capitalManager.activeReservations) > 0) {
+		return fmt.Errorf("cannot switch mode from %s to %s while %d position(s) or %d reservation(s) are open",
+			capitalManager.settings.Mode, newSettings.Mode, activeOpenCount, len(capitalManager.activeReservations))
 	}
 	if newSettings.RiskPerTradePct <= 0 || newSettings.RiskPerTradePct > 0.03 {
 		return errors.New("risk_per_trade_pct must be between 0.001 (0.1%) and 0.03 (3.0%)")
@@ -256,13 +257,13 @@ func (capitalManager *CapitalManager) UpdateSettings(newSettings ExecutionSettin
 		capitalManager.settings.PaperCapital = newSettings.PaperCapital
 	}
 	capitalManager.settings.Mode = newSettings.Mode
-	capitalManager.settings.AutoExecute = newSettings.AutoExecute
+	capitalManager.settings.IsAutoExecuteEnabled = newSettings.IsAutoExecuteEnabled
 	capitalManager.settings.RiskPerTradePct = newSettings.RiskPerTradePct
 	capitalManager.settings.MaxOpenPositions = newSettings.MaxOpenPositions
 
 	if capitalManager.db != nil {
 		autoInt := 0
-		if capitalManager.settings.AutoExecute {
+		if capitalManager.settings.IsAutoExecuteEnabled {
 			autoInt = 1
 		}
 		_, err := capitalManager.db.Exec(`
@@ -280,6 +281,20 @@ func (capitalManager *CapitalManager) UpdateSettings(newSettings ExecutionSettin
 		}
 	}
 	return nil
+}
+
+// ForceSyncModeForRehydration aligns the active execution mode with rehydrated open positions after crash recovery
+func (capitalManager *CapitalManager) ForceSyncModeForRehydration(mode string) {
+	if mode != "PAPER" && mode != "LIVE" {
+		return
+	}
+	capitalManager.mu.Lock()
+	capitalManager.settings.Mode = mode
+	capitalManager.mu.Unlock()
+
+	if capitalManager.db != nil {
+		_, _ = capitalManager.db.Exec(`UPDATE execution_settings SET mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`, mode)
+	}
 }
 
 func (capitalManager *CapitalManager) UpdatePaperCapital(newCapital float64) error {

@@ -59,7 +59,7 @@ func (actor *Actor) GetStockDetail(symbol string) (*StockDetailDTO, bool) {
 	case actor.detailReqChan <- detailReq{symbol: symbol, reply: reply}:
 		select {
 		case res := <-reply:
-			return res.dto, res.found
+			return res.dto, res.isFound
 		case <-time.After(2 * time.Second):
 			return nil, false
 		}
@@ -127,8 +127,8 @@ func (actor *Actor) getStockDetailInternal(symbol string) (*StockDetailDTO, bool
 
 	// Format session bars
 	bars := make([]SessionBarDTO, 0, int(stockMetrics.CurrentBarIdx)+1)
-	for i := 0; i <= int(stockMetrics.CurrentBarIdx) && i < 75; i++ {
-		bar := stockMetrics.SessionBars[i]
+	for candleIndex := 0; candleIndex <= int(stockMetrics.CurrentBarIdx) && candleIndex < 75; candleIndex++ {
+		bar := stockMetrics.SessionBars[candleIndex]
 		if bar.Open > 0 || bar.Close > 0 || bar.Volume > 0 {
 			barTimeStr := time.Unix(bar.Timestamp, 0).In(istZone).Format("15:04")
 			bars = append(bars, SessionBarDTO{

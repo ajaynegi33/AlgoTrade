@@ -18,14 +18,14 @@ type mockUserStore struct {
 	user     *User
 }
 
-func (mockStore *mockUserStore) Authenticate(email, password string) (*User, error) {
-	if email == mockStore.email && password == mockStore.password {
-		return mockStore.user, nil
+func (store *mockUserStore) Authenticate(email, password string) (*User, error) {
+	if email == store.email && password == store.password {
+		return store.user, nil
 	}
 	return nil, errors.New("invalid credentials")
 }
 
-func TestGenerateAndValidateTokens(t *testing.T) {
+func TestGenerateAndValidateTokens(testingInstance *testing.T) {
 	secret := []byte("test-secret-key-12345678901234567890")
 	userID := "usr_1001"
 	email := "trader@algotrade.com"
@@ -34,51 +34,51 @@ func TestGenerateAndValidateTokens(t *testing.T) {
 	// 1. Generate valid tokens with JTI
 	accessToken, refreshToken, refreshJTI, err := GenerateTokens(userID, email, role, secret, 5*time.Minute, 24*time.Hour)
 	if err != nil {
-		t.Fatalf("GenerateTokens failed: %v", err)
+		testingInstance.Fatalf("GenerateTokens failed: %v", err)
 	}
 	if accessToken == "" || refreshToken == "" || refreshJTI == "" {
-		t.Fatalf("Tokens and JTI should not be empty")
+		testingInstance.Fatalf("Tokens and JTI should not be empty")
 	}
 
 	// 2. Validate Access Token as access type
 	accessClaims, err := ValidateToken(accessToken, secret, TokenTypeAccess)
 	if err != nil {
-		t.Fatalf("Validate access token failed: %v", err)
+		testingInstance.Fatalf("Validate access token failed: %v", err)
 	}
 	if accessClaims.UserID != userID || accessClaims.Email != email || accessClaims.Role != role {
-		t.Errorf("Claims mismatch: got %+v", accessClaims)
+		testingInstance.Errorf("Claims mismatch: got %+v", accessClaims)
 	}
 
 	// 3. Ensure Access Token cannot be used as Refresh Token
 	_, err = ValidateToken(accessToken, secret, TokenTypeRefresh)
 	if err != ErrWrongTokenType {
-		t.Errorf("Expected ErrWrongTokenType, got %v", err)
+		testingInstance.Errorf("Expected ErrWrongTokenType, got %v", err)
 	}
 
 	// 4. Validate Refresh Token has matching JTI
 	refreshClaims, err := ValidateToken(refreshToken, secret, TokenTypeRefresh)
 	if err != nil {
-		t.Fatalf("Validate refresh token failed: %v", err)
+		testingInstance.Fatalf("Validate refresh token failed: %v", err)
 	}
 	if refreshClaims.UserID != userID {
-		t.Errorf("Refresh claims mismatch: got %+v", refreshClaims)
+		testingInstance.Errorf("Refresh claims mismatch: got %+v", refreshClaims)
 	}
 	if refreshClaims.ID != refreshJTI {
-		t.Errorf("Expected refresh claims ID to match JTI %s, got %s", refreshJTI, refreshClaims.ID)
+		testingInstance.Errorf("Expected refresh claims ID to match JTI %s, got %s", refreshJTI, refreshClaims.ID)
 	}
 
 	// 5. Test expired token
 	expiredAccessToken, _, _, err := GenerateTokens(userID, email, role, secret, -1*time.Minute, 24*time.Hour)
 	if err != nil {
-		t.Fatalf("GenerateTokens failed: %v", err)
+		testingInstance.Fatalf("GenerateTokens failed: %v", err)
 	}
 	_, err = ValidateToken(expiredAccessToken, secret, TokenTypeAccess)
 	if err != ErrExpiredToken {
-		t.Errorf("Expected ErrExpiredToken, got %v", err)
+		testingInstance.Errorf("Expected ErrExpiredToken, got %v", err)
 	}
 }
 
-func TestRefreshTokenRotationAndReplay(t *testing.T) {
+func TestRefreshTokenRotationAndReplay(testingInstance *testing.T) {
 	cfg := &config.Config{
 		JWTSecret:          []byte("test-secret-123456789012345678901234"),
 		AccessTokenExpiry:  5 * time.Minute,
@@ -108,19 +108,19 @@ func TestRefreshTokenRotationAndReplay(t *testing.T) {
 	handler.Login(loginRec, loginReq)
 
 	if loginRec.Code != http.StatusOK {
-		t.Fatalf("Login failed with status: %d", loginRec.Code)
+		testingInstance.Fatalf("Login failed with status: %d", loginRec.Code)
 	}
 
 	cookies := loginRec.Result().Cookies()
 	var initialRefreshCookie *http.Cookie
-	for _, c := range cookies {
-		if c.Name == "refresh_token" {
-			initialRefreshCookie = c
+	for _, cookieItem := range cookies {
+		if cookieItem.Name == "refresh_token" {
+			initialRefreshCookie = cookieItem
 			break
 		}
 	}
 	if initialRefreshCookie == nil {
-		t.Fatalf("Expected refresh_token cookie on login")
+		testingInstance.Fatalf("Expected refresh_token cookie on login")
 	}
 
 	// Step 2: First Refresh (Valid)
@@ -130,21 +130,21 @@ func TestRefreshTokenRotationAndReplay(t *testing.T) {
 	handler.Refresh(refreshRec1, refreshReq1)
 
 	if refreshRec1.Code != http.StatusOK {
-		t.Fatalf("First refresh failed with status: %d, body: %s", refreshRec1.Code, refreshRec1.Body.String())
+		testingInstance.Fatalf("First refresh failed with status: %d, body: %s", refreshRec1.Code, refreshRec1.Body.String())
 	}
 
 	var rotatedRefreshCookie *http.Cookie
-	for _, c := range refreshRec1.Result().Cookies() {
-		if c.Name == "refresh_token" {
-			rotatedRefreshCookie = c
+	for _, cookieItem := range refreshRec1.Result().Cookies() {
+		if cookieItem.Name == "refresh_token" {
+			rotatedRefreshCookie = cookieItem
 			break
 		}
 	}
 	if rotatedRefreshCookie == nil {
-		t.Fatalf("Expected rotated refresh_token cookie on refresh")
+		testingInstance.Fatalf("Expected rotated refresh_token cookie on refresh")
 	}
 	if rotatedRefreshCookie.Value == initialRefreshCookie.Value {
-		t.Fatalf("Rotated refresh token must not match initial refresh token")
+		testingInstance.Fatalf("Rotated refresh token must not match initial refresh token")
 	}
 
 	// Step 3: Replay Attack (Reusing initial consumed refresh token MUST FAIL)
@@ -154,7 +154,7 @@ func TestRefreshTokenRotationAndReplay(t *testing.T) {
 	handler.Refresh(replayRec, replayReq)
 
 	if replayRec.Code != http.StatusUnauthorized {
-		t.Fatalf("Expected replay of consumed token to return 401, got %d", replayRec.Code)
+		testingInstance.Fatalf("Expected replay of consumed token to return 401, got %d", replayRec.Code)
 	}
 
 	// Step 4: Valid Refresh with the newly rotated cookie MUST SUCCEED
@@ -164,6 +164,109 @@ func TestRefreshTokenRotationAndReplay(t *testing.T) {
 	handler.Refresh(refreshRec2, refreshReq2)
 
 	if refreshRec2.Code != http.StatusOK {
-		t.Fatalf("Refresh with rotated cookie failed with status: %d", refreshRec2.Code)
+		testingInstance.Fatalf("Refresh with rotated cookie failed with status: %d", refreshRec2.Code)
+	}
+}
+
+func TestPhase4_CORSMultiOriginSameHostAndHttpCookieSecurity(testingInstance *testing.T) {
+	corsHandler := CORSMiddleware("http://localhost:3000, http://52.66.202.136:3000")(
+		http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			writer.WriteHeader(http.StatusOK)
+		}),
+	)
+
+	// 1. Explicitly configured AWS origin must be echoed
+	awsRequest := httptest.NewRequest(http.MethodGet, "http://52.66.202.136:8080/api/health", nil)
+	awsRequest.Header.Set("Origin", "http://52.66.202.136:3000")
+	awsRecorder := httptest.NewRecorder()
+	corsHandler.ServeHTTP(awsRecorder, awsRequest)
+	if awsRecorder.Header().Get("Access-Control-Allow-Origin") != "http://52.66.202.136:3000" {
+		testingInstance.Fatalf("Expected AWS origin to be allowed, got %q", awsRecorder.Header().Get("Access-Control-Allow-Origin"))
+	}
+
+	// 2. Same-host origin must be allowed even when CORSMiddleware only lists localhost
+	localhostOnlyCORS := CORSMiddleware("http://localhost:3000")(
+		http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			writer.WriteHeader(http.StatusOK)
+		}),
+	)
+	sameHostRequest := httptest.NewRequest(http.MethodGet, "http://52.66.202.136:8080/api/health", nil)
+	sameHostRequest.Host = "52.66.202.136:8080"
+	sameHostRequest.Header.Set("Origin", "http://52.66.202.136:3000")
+	sameHostRecorder := httptest.NewRecorder()
+	localhostOnlyCORS.ServeHTTP(sameHostRecorder, sameHostRequest)
+	if sameHostRecorder.Header().Get("Access-Control-Allow-Origin") != "http://52.66.202.136:3000" {
+		testingInstance.Fatalf("Expected same-host origin to be allowed dynamically, got %q", sameHostRecorder.Header().Get("Access-Control-Allow-Origin"))
+	}
+
+	// 3. Untrusted cross-site origin must be blocked
+	foreignRequest := httptest.NewRequest(http.MethodGet, "http://52.66.202.136:8080/api/health", nil)
+	foreignRequest.Host = "52.66.202.136:8080"
+	foreignRequest.Header.Set("Origin", "https://evil-attacker.example.com")
+	foreignRecorder := httptest.NewRecorder()
+	localhostOnlyCORS.ServeHTTP(foreignRecorder, foreignRequest)
+	if foreignRecorder.Header().Get("Access-Control-Allow-Origin") != "" {
+		testingInstance.Fatalf("Expected untrusted foreign origin to be rejected, got %q", foreignRecorder.Header().Get("Access-Control-Allow-Origin"))
+	}
+
+	// 4. Plain HTTP production IP login must NOT set Secure=true on refresh_token cookie (or browser drops it),
+	// whereas HTTPS forwarded login MUST set Secure=true.
+	productionHTTPConfig := &config.Config{
+		JWTSecret:          []byte("test-secret-123456789012345678901234"),
+		FrontendURL:        "http://52.66.202.136:3000",
+		AllowedOrigins:     []string{"http://52.66.202.136:3000"},
+		IsProduction:       true,
+		AccessTokenExpiry:  5 * time.Minute,
+		RefreshTokenExpiry: 24 * time.Hour,
+	}
+	mockStore := &mockUserStore{
+		email:    "trader@algotrade.com",
+		password: "Password123!",
+		user: &User{
+			ID:    "usr_test",
+			Email: "trader@algotrade.com",
+			Name:  "Test Trader",
+			Role:  "PRO_TRADER",
+		},
+	}
+	authHandler := NewHandler(productionHTTPConfig, mockStore)
+	loginPayload, _ := json.Marshal(map[string]string{
+		"email":    "trader@algotrade.com",
+		"password": "Password123!",
+	})
+
+	plainHTTPRequest := httptest.NewRequest(http.MethodPost, "http://52.66.202.136:8080/api/auth/login", bytes.NewReader(loginPayload))
+	plainHTTPRequest.Header.Set("Origin", "http://52.66.202.136:3000")
+	plainHTTPRecorder := httptest.NewRecorder()
+	authHandler.Login(plainHTTPRecorder, plainHTTPRequest)
+
+	var plainHTTPRefreshCookie *http.Cookie
+	for _, cookieItem := range plainHTTPRecorder.Result().Cookies() {
+		if cookieItem.Name == "refresh_token" {
+			plainHTTPRefreshCookie = cookieItem
+			break
+		}
+	}
+	if plainHTTPRefreshCookie == nil {
+		testingInstance.Fatalf("Expected refresh_token cookie on plain HTTP login")
+	}
+	if plainHTTPRefreshCookie.Secure {
+		testingInstance.Fatalf("Expected refresh_token cookie Secure=false on plain HTTP IP so browser does not drop cookie")
+	}
+
+	httpsForwardedRequest := httptest.NewRequest(http.MethodPost, "http://52.66.202.136:8080/api/auth/login", bytes.NewReader(loginPayload))
+	httpsForwardedRequest.Header.Set("X-Forwarded-Proto", "https")
+	httpsForwardedRecorder := httptest.NewRecorder()
+	authHandler.Login(httpsForwardedRecorder, httpsForwardedRequest)
+
+	var httpsRefreshCookie *http.Cookie
+	for _, cookieItem := range httpsForwardedRecorder.Result().Cookies() {
+		if cookieItem.Name == "refresh_token" {
+			httpsRefreshCookie = cookieItem
+			break
+		}
+	}
+	if httpsRefreshCookie == nil || !httpsRefreshCookie.Secure {
+		testingInstance.Fatalf("Expected refresh_token cookie Secure=true when X-Forwarded-Proto is https")
 	}
 }

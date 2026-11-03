@@ -14,11 +14,11 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func setupTestDB(t *testing.T) *sql.DB {
-	t.Helper()
+func setupTestDB(testingInstance *testing.T) *sql.DB {
+	testingInstance.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
-		t.Fatalf("Failed to open in-memory sqlite db: %v", err)
+		testingInstance.Fatalf("Failed to open in-memory sqlite db: %v", err)
 	}
 
 	queries := []string{
@@ -145,14 +145,14 @@ func setupTestDB(t *testing.T) *sql.DB {
 
 	for _, migrationQuery := range queries {
 		if _, err := db.Exec(migrationQuery); err != nil {
-			t.Fatalf("Migration query failed: %v", err)
+			testingInstance.Fatalf("Migration query failed: %v", err)
 		}
 	}
 	return db
 }
 
-func TestEventCollector_ShadowAndTradeEvents(t *testing.T) {
-	db := setupTestDB(t)
+func TestEventCollector_ShadowAndTradeEvents(testingInstance *testing.T) {
+	db := setupTestDB(testingInstance)
 	defer db.Close()
 
 	collector := NewEventCollector(db)
@@ -182,7 +182,7 @@ func TestEventCollector_ShadowAndTradeEvents(t *testing.T) {
 		VALUES ('POS-1', '2026-10-30', 'PAPER', 'TCS', 2953213, 'ACTIVE', 'ORB_15M_BREAKOUT', CURRENT_TIMESTAMP)
 	`)
 	if err != nil {
-		t.Fatalf("Failed to insert dummy position: %v", err)
+		testingInstance.Fatalf("Failed to insert dummy position: %v", err)
 	}
 
 	collector.EmitTradeEvent(TradeExecutionEvent{
@@ -203,21 +203,21 @@ func TestEventCollector_ShadowAndTradeEvents(t *testing.T) {
 	// Verify shadow signal recorded
 	var shadowCount int
 	if err := db.QueryRow("SELECT COUNT(*) FROM shadow_signals WHERE symbol = 'INFY'").Scan(&shadowCount); err != nil || shadowCount != 1 {
-		t.Fatalf("Expected 1 shadow signal for INFY, got %d, err: %v", shadowCount, err)
+		testingInstance.Fatalf("Expected 1 shadow signal for INFY, got %d, err: %v", shadowCount, err)
 	}
 
 	// Verify trade event updated positions
 	var intendedPx, entrySlip, hwm, lwm float64
 	if err := db.QueryRow("SELECT intended_entry_price, entry_slippage_pct, high_water_mark, low_water_mark FROM positions WHERE position_id = 'POS-1'").Scan(&intendedPx, &entrySlip, &hwm, &lwm); err != nil {
-		t.Fatalf("Failed to query updated position: %v", err)
+		testingInstance.Fatalf("Failed to query updated position: %v", err)
 	}
 	if intendedPx != 3500.0 || hwm != 3540.0 || lwm != 3495.0 {
-		t.Errorf("Unexpected position update: intended=%.2f, hwm=%.2f, lwm=%.2f", intendedPx, hwm, lwm)
+		testingInstance.Errorf("Unexpected position update: intended=%.2f, hwm=%.2f, lwm=%.2f", intendedPx, hwm, lwm)
 	}
 }
 
-func TestShadowSignalsResolution_With5mBars(t *testing.T) {
-	db := setupTestDB(t)
+func TestShadowSignalsResolution_With5mBars(testingInstance *testing.T) {
+	db := setupTestDB(testingInstance)
 	defer db.Close()
 
 	now := time.Now()
@@ -232,7 +232,7 @@ func TestShadowSignalsResolution_With5mBars(t *testing.T) {
 		)
 	`, now.UTC().Format(time.RFC3339))
 	if err != nil {
-		t.Fatalf("Failed to insert shadow signal: %v", err)
+		testingInstance.Fatalf("Failed to insert shadow signal: %v", err)
 	}
 
 	// Insert 5m bars where target 2520 is reached
@@ -243,29 +243,29 @@ func TestShadowSignalsResolution_With5mBars(t *testing.T) {
 			(738561, ?, 2508.0, 2525.0, 2505.0, 2522.0, 15000)
 	`, now.Add(5*time.Minute).UTC().Format("2006-01-02 15:04:05"), now.Add(10*time.Minute).UTC().Format("2006-01-02 15:04:05"))
 	if err != nil {
-		t.Fatalf("Failed to insert 5m bars: %v", err)
+		testingInstance.Fatalf("Failed to insert 5m bars: %v", err)
 	}
 
 	resolved, err := ResolveShadowSignals(db, "2026-10-30")
 	if err != nil {
-		t.Fatalf("ResolveShadowSignals failed: %v", err)
+		testingInstance.Fatalf("ResolveShadowSignals failed: %v", err)
 	}
 	if resolved != 1 {
-		t.Fatalf("Expected 1 signal resolved, got %d", resolved)
+		testingInstance.Fatalf("Expected 1 signal resolved, got %d", resolved)
 	}
 
 	var outcome string
 	var simR float64
 	if err := db.QueryRow("SELECT outcome, simulated_r FROM shadow_signals WHERE symbol = 'RELIANCE'").Scan(&outcome, &simR); err != nil {
-		t.Fatalf("Query failed: %v", err)
+		testingInstance.Fatalf("Query failed: %v", err)
 	}
 	if outcome != "WIN_1R" || simR != 1.0 {
-		t.Errorf("Expected WIN_1R with simulated_r=1.0, got %s / %.2f", outcome, simR)
+		testingInstance.Errorf("Expected WIN_1R with simulated_r=1.0, got %s / %.2f", outcome, simR)
 	}
 }
 
-func TestComputeEODMetrics_AndExcursionAlerts(t *testing.T) {
-	db := setupTestDB(t)
+func TestComputeEODMetrics_AndExcursionAlerts(testingInstance *testing.T) {
+	db := setupTestDB(testingInstance)
 	defer db.Close()
 
 	// Insert 3 closed trades
@@ -310,74 +310,74 @@ func TestComputeEODMetrics_AndExcursionAlerts(t *testing.T) {
 		 1, 'INITIAL_SL_HIT', ?, ?)
 	`, openT1, closeT1, openT2, closeT2, openT3, closeT3)
 	if err != nil {
-		t.Fatalf("Failed to insert positions: %v", err)
+		testingInstance.Fatalf("Failed to insert positions: %v", err)
 	}
 
 	summary, err := ComputeEODMetrics(db, "2026-10-30")
 	if err != nil {
-		t.Fatalf("ComputeEODMetrics failed: %v", err)
+		testingInstance.Fatalf("ComputeEODMetrics failed: %v", err)
 	}
 
 	if summary.TotalTrades != 3 {
-		t.Errorf("Expected 3 total trades, got %d", summary.TotalTrades)
+		testingInstance.Errorf("Expected 3 total trades, got %d", summary.TotalTrades)
 	}
 	if summary.WinningTrades != 2 || summary.LosingTrades != 1 {
-		t.Errorf("Expected 2 wins, 1 loss, got %d wins, %d losses", summary.WinningTrades, summary.LosingTrades)
+		testingInstance.Errorf("Expected 2 wins, 1 loss, got %d wins, %d losses", summary.WinningTrades, summary.LosingTrades)
 	}
 	if summary.RealisedNetPnL != 2200.0 {
-		t.Errorf("Expected net PnL 2200.0, got %.2f", summary.RealisedNetPnL)
+		testingInstance.Errorf("Expected net PnL 2200.0, got %.2f", summary.RealisedNetPnL)
 	}
 
 	// Verify Stop Loss Alert triggered (100% of winners stayed above -0.6R)
 	if summary.ExcursionSummary.PctWinnersUnder06R != 100.0 {
-		t.Errorf("Expected 100%% winners under 0.6R, got %.1f%%", summary.ExcursionSummary.PctWinnersUnder06R)
+		testingInstance.Errorf("Expected 100%% winners under 0.6R, got %.1f%%", summary.ExcursionSummary.PctWinnersUnder06R)
 	}
 	if summary.ExcursionSummary.StopLossAlert == "" {
-		t.Errorf("Expected StopLossAlert to be populated")
+		testingInstance.Errorf("Expected StopLossAlert to be populated")
 	}
 
 	// Verify Toxic Liquidity Flagged for HDFCBANK (slippage 0.334% > 0.15%)
-	var foundHDFC bool
+	var isFoundHDFC bool
 	for _, slip := range summary.SlippageRecords {
 		if slip.Symbol == "HDFCBANK" {
-			foundHDFC = true
+			isFoundHDFC = true
 			if !slip.IsToxicLiquidity {
-				t.Errorf("Expected HDFCBANK to be marked toxic")
+				testingInstance.Errorf("Expected HDFCBANK to be marked toxic")
 			}
 		}
 	}
-	if !foundHDFC {
-		t.Errorf("Expected HDFCBANK in slippage records")
+	if !isFoundHDFC {
+		testingInstance.Errorf("Expected HDFCBANK in slippage records")
 	}
 
 	// Verify HTML and Markdown generation
 	html := GenerateHTMLReport(summary)
 	md := GenerateMarkdownReport(summary)
 	if len(html) < 200 || len(md) < 100 {
-		t.Errorf("HTML or Markdown report suspiciously short")
+		testingInstance.Errorf("HTML or Markdown report suspiciously short")
 	}
 
 	// Save Report Files
-	tempDir := t.TempDir()
+	tempDir := testingInstance.TempDir()
 	htmlPath, mdPath, saveErr := SaveReportFiles(db, summary, tempDir)
 	if saveErr != nil {
-		t.Fatalf("SaveReportFiles failed: %v", saveErr)
+		testingInstance.Fatalf("SaveReportFiles failed: %v", saveErr)
 	}
 	if _, statErr := os.Stat(htmlPath); statErr != nil {
-		t.Errorf("HTML file not found at %s", htmlPath)
+		testingInstance.Errorf("HTML file not found at %s", htmlPath)
 	}
 	if _, statErr := os.Stat(mdPath); statErr != nil {
-		t.Errorf("Markdown file not found at %s", mdPath)
+		testingInstance.Errorf("Markdown file not found at %s", mdPath)
 	}
 
 	// Check SQLite record
 	var recordedDate string
 	if err := db.QueryRow("SELECT trading_date FROM daily_eod_reports WHERE trading_date = '2026-10-30'").Scan(&recordedDate); err != nil || recordedDate != "2026-10-30" {
-		t.Errorf("Expected daily_eod_reports entry for 2026-10-30, got %s", recordedDate)
+		testingInstance.Errorf("Expected daily_eod_reports entry for 2026-10-30, got %s", recordedDate)
 	}
 }
 
-func TestResendEmailDispatch_MockServer(t *testing.T) {
+func TestResendEmailDispatch_MockServer(testingInstance *testing.T) {
 	var receivedAuthHeader string
 	var receivedPayload ResendEmailPayload
 
@@ -396,7 +396,7 @@ func TestResendEmailDispatch_MockServer(t *testing.T) {
 	defer func() { http.DefaultTransport = oldTransport }()
 	http.DefaultTransport = mockTransport
 
-	db := setupTestDB(t)
+	db := setupTestDB(testingInstance)
 	defer db.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -404,28 +404,28 @@ func TestResendEmailDispatch_MockServer(t *testing.T) {
 
 	err := SendEODReportEmail(ctx, db, "re_test_key_xyz", "desk@example.com", "2026-10-30", "<h1>Test Report</h1>")
 	if err != nil {
-		t.Fatalf("SendEODReportEmail failed: %v", err)
+		testingInstance.Fatalf("SendEODReportEmail failed: %v", err)
 	}
 
 	if receivedAuthHeader != "Bearer re_test_key_xyz" {
-		t.Errorf("Expected 'Bearer re_test_key_xyz', got '%s'", receivedAuthHeader)
+		testingInstance.Errorf("Expected 'Bearer re_test_key_xyz', got '%s'", receivedAuthHeader)
 	}
 	if len(receivedPayload.To) != 1 || receivedPayload.To[0] != "desk@example.com" {
-		t.Errorf("Unexpected recipient: %v", receivedPayload.To)
+		testingInstance.Errorf("Unexpected recipient: %v", receivedPayload.To)
 	}
 	if receivedPayload.Subject != "AlgoTrade EOD Diagnostic Report — 2026-10-30" {
-		t.Errorf("Unexpected subject: %s", receivedPayload.Subject)
+		testingInstance.Errorf("Unexpected subject: %s", receivedPayload.Subject)
 	}
 }
 
 type mockRoundTripper func(req *http.Request) (*http.Response, error)
 
-func (f mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
+func (mockTransport mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return mockTransport(req)
 }
 
-func TestGenerateReport_ZeroTradeDiagnosticMode(t *testing.T) {
-	testDatabase := setupTestDB(t)
+func TestGenerateReport_ZeroTradeDiagnosticMode(testingInstance *testing.T) {
+	testDatabase := setupTestDB(testingInstance)
 	defer testDatabase.Close()
 
 	tradingDate := "2026-11-02"
@@ -436,7 +436,7 @@ func TestGenerateReport_ZeroTradeDiagnosticMode(t *testing.T) {
 		VALUES (1, 'PAPER', 1)
 	`)
 	if executionSettingsErr != nil {
-		t.Fatalf("Failed to insert execution settings: %v", executionSettingsErr)
+		testingInstance.Fatalf("Failed to insert execution settings: %v", executionSettingsErr)
 	}
 
 	// Insert 8 rejected setups matching today's scenario
@@ -455,52 +455,52 @@ func TestGenerateReport_ZeroTradeDiagnosticMode(t *testing.T) {
 			) VALUES (?, ?, ?, ?, 'VWAP_PULLBACK_RECLAIM', 78.5, ?, 1500.0, 1485.0, 15.0, 1515.0, 'PENDING', 0.0)
 		`, tradingDate, signalTime.Format(time.RFC3339), symbol, 1000+indexNumber, rejectionReason)
 		if insertShadowErr != nil {
-			t.Fatalf("Failed to insert shadow signal %s: %v", symbol, insertShadowErr)
+			testingInstance.Fatalf("Failed to insert shadow signal %s: %v", symbol, insertShadowErr)
 		}
 	}
 
 	reportSummary, computeMetricsErr := ComputeEODMetrics(testDatabase, tradingDate)
 	if computeMetricsErr != nil {
-		t.Fatalf("ComputeEODMetrics failed: %v", computeMetricsErr)
+		testingInstance.Fatalf("ComputeEODMetrics failed: %v", computeMetricsErr)
 	}
 
 	if reportSummary.TotalTrades != 0 {
-		t.Errorf("Expected 0 total trades, got %d", reportSummary.TotalTrades)
+		testingInstance.Errorf("Expected 0 total trades, got %d", reportSummary.TotalTrades)
 	}
 	if reportSummary.ShadowSummary.ShadowSignalCount != 8 {
-		t.Errorf("Expected 8 shadow signals, got %d", reportSummary.ShadowSummary.ShadowSignalCount)
+		testingInstance.Errorf("Expected 8 shadow signals, got %d", reportSummary.ShadowSummary.ShadowSignalCount)
 	}
 	if len(reportSummary.ShadowSummary.RejectedSignals) != 8 {
-		t.Errorf("Expected 8 itemized rejected signals, got %d", len(reportSummary.ShadowSummary.RejectedSignals))
+		testingInstance.Errorf("Expected 8 itemized rejected signals, got %d", len(reportSummary.ShadowSummary.RejectedSignals))
 	}
 	if !strings.Contains(reportSummary.ZeroTradeVerdict, "8 qualified candidates detected") {
-		t.Errorf("Expected ZeroTradeVerdict to detail the 8 candidates, got: %s", reportSummary.ZeroTradeVerdict)
+		testingInstance.Errorf("Expected ZeroTradeVerdict to detail the 8 candidates, got: %s", reportSummary.ZeroTradeVerdict)
 	}
 
 	// Generate HTML and verify content
 	htmlContent := GenerateHTMLReport(reportSummary)
 	if !strings.Contains(htmlContent, "100% Capital Preserved") {
-		t.Errorf("HTML missing Capital Preserved banner")
+		testingInstance.Errorf("HTML missing Capital Preserved banner")
 	}
 	if !strings.Contains(htmlContent, "Pre-Trade Gate Audit") {
-		t.Errorf("HTML missing Pre-Trade Gate Audit section")
+		testingInstance.Errorf("HTML missing Pre-Trade Gate Audit section")
 	}
 	if !strings.Contains(htmlContent, "INFY") || !strings.Contains(htmlContent, "BHARTIARTL") {
-		t.Errorf("HTML missing rejected symbols")
+		testingInstance.Errorf("HTML missing rejected symbols")
 	}
 	if strings.Contains(htmlContent, "No trades executed today") {
-		t.Errorf("HTML should not render empty boilerplate tables on zero-trade days")
+		testingInstance.Errorf("HTML should not render empty boilerplate tables on zero-trade days")
 	}
 
 	// Generate Markdown and verify content
 	markdownContent := GenerateMarkdownReport(reportSummary)
 	if !strings.Contains(markdownContent, "Capital Preservation Status") {
-		t.Errorf("Markdown missing Capital Preservation Status")
+		testingInstance.Errorf("Markdown missing Capital Preservation Status")
 	}
 	if !strings.Contains(markdownContent, "Pre-Trade Gate Audit") {
-		t.Errorf("Markdown missing Pre-Trade Gate Audit")
+		testingInstance.Errorf("Markdown missing Pre-Trade Gate Audit")
 	}
 	if !strings.Contains(markdownContent, "INFY") {
-		t.Errorf("Markdown missing INFY in table")
+		testingInstance.Errorf("Markdown missing INFY in table")
 	}
 }

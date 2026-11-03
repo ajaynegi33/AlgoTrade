@@ -85,14 +85,14 @@ type UserProfileData struct {
 }
 
 type Service struct {
-	cfg             *config.Config
-	db              *sql.DB
-	client          *kiteconnect.Client
-	httpClient      *http.Client
-	rateLimiter     *kiteratelimiter.CentralKiteDispatcher
-	session         *SessionInfo
-	onAuthenticated []func()
-	mu              sync.RWMutex
+	cfg                      *config.Config
+	db                       *sql.DB
+	client                   *kiteconnect.Client
+	httpClient               *http.Client
+	rateLimiter              *kiteratelimiter.CentralKiteDispatcher
+	session                  *SessionInfo
+	onAuthenticatedCallbacks []func()
+	mu                       sync.RWMutex
 }
 
 // NewService instantiates the Kite service and attempts to restore existing sessions from SQLite
@@ -155,7 +155,7 @@ func (service *Service) RegisterOnAuthenticated(callbackFunction func()) {
 		return
 	}
 	service.mu.Lock()
-	service.onAuthenticated = append(service.onAuthenticated, callbackFunction)
+	service.onAuthenticatedCallbacks = append(service.onAuthenticatedCallbacks, callbackFunction)
 	hasActive := service.session != nil && service.session.AccessToken != "" && !isSessionExpired(service.session.CreatedAt)
 	service.mu.Unlock()
 
@@ -165,7 +165,7 @@ func (service *Service) RegisterOnAuthenticated(callbackFunction func()) {
 }
 
 func (service *Service) notifyAuthenticatedLocked() {
-	for _, callbackFunction := range service.onAuthenticated {
+	for _, callbackFunction := range service.onAuthenticatedCallbacks {
 		if callbackFunction != nil {
 			go callbackFunction()
 		}

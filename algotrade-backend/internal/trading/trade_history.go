@@ -273,7 +273,41 @@ func buildTradeHistoryFromDTO(
 		gross = totalSellValue - totalInvested
 	}
 
-	taxDTO := CalculatePositionTaxBreakdown(buyPrice, sellPrice, qty, act.HasTranche1Completed)
+	var orderLegs []market.TradeOrderLegDTO
+	var hasFilledScaleOutLeg bool
+	if db != nil {
+		oRows, err := db.Query(`
+			SELECT order_id, position_id, leg_type, transaction_type, order_type,
+			       quantity, filled_quantity, price, trigger_price, average_price,
+			       status, mod_count, updated_at
+			FROM orders
+			WHERE position_id = ?
+			ORDER BY updated_at ASC
+		`, act.PositionID)
+		if err == nil {
+			defer oRows.Close()
+			for oRows.Next() {
+				var leg market.TradeOrderLegDTO
+				var updRaw string
+				if err := oRows.Scan(
+					&leg.OrderID, &leg.PositionID, &leg.LegType, &leg.TransactionType, &leg.OrderType,
+					&leg.Quantity, &leg.FilledQuantity, &leg.Price, &leg.TriggerPrice, &leg.AveragePrice,
+					&leg.Status, &leg.ModCount, &updRaw,
+				); err == nil {
+					_, leg.UpdatedAt = parseDBTimeIST(updRaw, ist)
+					if leg.LegType == "SCALE_OUT" && leg.FilledQuantity > 0 {
+						hasFilledScaleOutLeg = true
+					}
+					orderLegs = append(orderLegs, leg)
+				}
+			}
+			if oErr := oRows.Err(); oErr != nil {
+				slog.Error("Failed iterating position order legs from DB", "position_id", act.PositionID, "error", oErr)
+			}
+		}
+	}
+
+	taxDTO := CalculatePositionTaxBreakdown(buyPrice, sellPrice, qty, hasFilledScaleOutLeg)
 
 	netAfterTax := round2(gross - taxDTO.TotalCharges)
 
@@ -305,36 +339,6 @@ func buildTradeHistoryFromDTO(
 		}
 		if peakMFER > 0.05 && realisedR > 0 {
 			rCapturePct = math.Min(100.0, (realisedR/peakMFER)*100.0)
-		}
-	}
-
-	var orderLegs []market.TradeOrderLegDTO
-	if db != nil {
-		oRows, err := db.Query(`
-			SELECT order_id, position_id, leg_type, transaction_type, order_type,
-			       quantity, filled_quantity, price, trigger_price, average_price,
-			       status, mod_count, updated_at
-			FROM orders
-			WHERE position_id = ?
-			ORDER BY updated_at ASC
-		`, act.PositionID)
-		if err == nil {
-			defer oRows.Close()
-			for oRows.Next() {
-				var leg market.TradeOrderLegDTO
-				var updRaw string
-				if err := oRows.Scan(
-					&leg.OrderID, &leg.PositionID, &leg.LegType, &leg.TransactionType, &leg.OrderType,
-					&leg.Quantity, &leg.FilledQuantity, &leg.Price, &leg.TriggerPrice, &leg.AveragePrice,
-					&leg.Status, &leg.ModCount, &updRaw,
-				); err == nil {
-					_, leg.UpdatedAt = parseDBTimeIST(updRaw, ist)
-					orderLegs = append(orderLegs, leg)
-				}
-			}
-			if oErr := oRows.Err(); oErr != nil {
-				slog.Error("Failed iterating position order legs from DB", "position_id", act.PositionID, "error", oErr)
-			}
 		}
 	}
 
